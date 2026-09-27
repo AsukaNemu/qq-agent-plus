@@ -549,6 +549,7 @@ export class StickerManager {
       tools: [tool],
       toolChoice: { type: 'function', function: { name: 'submit_sticker_pick' } },
       temperature: 0.3,
+      purpose: 'judge',   // 收不收这张表情 = 判断类任务
       signal,
       // 思考会先吃掉 80~595 个 token，200 会把它截断到一个字段都收不到
       maxTokens: 600

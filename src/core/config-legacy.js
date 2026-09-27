@@ -31,6 +31,22 @@ export const DEFAULT_CONFIG = {
     model: '',                              // UI 里选择/填写
     provider: '',                           // 当前模型所属提供商（多提供商目录的选中项）
     vision: true,                           // 模型是否支持图片输入（关掉则移除看图工具）
+    // 思考控制（语义层，见 src/core/provider-presets.js 的渠道形状翻译）：
+    //   'on'（默认，不干预）/ 'off'（尽力关闭；渠道关不掉时按最低档近似并提示）
+    //   / 'low' / 'medium' / 'high' / 'max'（档位，仅该渠道已核实的档位会发出去）
+    //   / 按用途对象 { chat: 'off', default: 'on' }
+    // 表外渠道：只有明确 off 时才发历史默认形状 thinking:{type:'disabled'}（不认的网关不会 400）。
+    thinking: 'on',
+    // 每个供应商的独立思考设置，键为主机名（如 "api.commandcode.ai"）：换供应商不串设置；
+    // 没有条目的供应商退回上面的全局 thinking（老配置照常工作）。
+    thinkingByService: {},
+    // 自定义渠道的档位映射：语义档位 → 请求字段，例：
+    //   { "low": {"reasoning_effort": "low"}, "high": {"reasoning_effort": "high"} }
+    // 表外/自定义渠道优先用它；内置预设渠道仍走内置形状（不覆盖）。
+    thinkingParams: {},
+    // 额外请求参数（高级逃生口）：填了就以最高优先级合并进每次请求。
+    // 例：某些网关要 {"reasoning":{"enabled":false}} 才能关思考；表外渠道的怪癖参数都填这里。
+    extraBody: {},
     temperature: 0.8,
     maxRounds: 12,                          // 单次运行的最多工具轮数
     timeoutMs: 60000,

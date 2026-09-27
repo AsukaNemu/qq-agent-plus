@@ -1,6 +1,7 @@
 // 多提供商模型目录：统一使用 OpenAI 兼容接口，由控制台维护。
 import { getConfig, updateConfig } from './config.js';
 import { assertTimeAllowed, watchTimeWindow } from './time-gate.js';
+import { modelServiceOfBaseUrl, thinkingPatchFor, resolveThinkingPatch, normalizeThinkingIntent } from './provider-presets.js';
 
 /** 当前生效的提供商目录（配置里的 providers）。 */
 export function currentProviders() {
@@ -89,8 +90,7 @@ export async function fetchModelsFrom(baseUrl, apiKey, timeoutMs = 15000) {
 }
 
 /** 用用户提供的 baseUrl + apiKey + modelId 发送一次最小 chat 测试请求。 */
-export async function testModelChat({ baseUrl, apiKey, model }) {
-  assertTimeAllowed('');
+export async function testModelChat({ baseUrl, apiKey, model }) {  assertTimeAllowed('');
   const base = normalizeBaseUrl(baseUrl);
   if (!base) throw new Error('请先填写 Base URL');
   if (!String(model || '').trim()) throw new Error('请先填写模型 ID');
@@ -133,6 +133,143 @@ export async function testModelChat({ baseUrl, apiKey, model }) {
   }
 }
 
+/**
+ * 思考能力探测：用「真正会发出去的那套参数」发一条最小请求，实测这个渠道的实际行为。
+ * 能测出的事实（不靠预设假设，也不依赖任何查询接口）：
+ *   - 关闭参数是否生效：带了 off 形状后响应里还有没有思考痕迹（reasoning_content / reasoning_tokens）；
+ *   - 档位接受度：400 报错里若列出合法枚举（如 Command Code 的 "expected one of low|medium|high|xhigh|max"），解析出来缓存。
+ * 结果落盘到 provider.thinkingProbe，控制台据此显示「已实测」标记。
+ */
+export async function probeThinking({ providerId = '', baseUrl = '', apiKey = '', model = '', thinking = undefined, extraBody = undefined } = {}) {
+  assertTimeAllowed('');
+  const cfg = getConfig();
+  let p = currentProviders().find((x) => x.id === providerId) || null;
+  // 地址回退链带上顶层 api.*：大量部署（包括本机实测的这台）不建 provider 记录，
+  // 直接用 api.baseUrl + api.apiKey 连接（2026-09-27 服务器实测踩到）。
+  const base = normalizeBaseUrl(baseUrl || p?.baseURL || cfg?.api?.baseUrl || '');
+  // Key 只认调用方传入的那把：路由已按"已知地址"守卫解析过。
+  // 这里不再回退 p.apiKey / cfg.api.apiKey —— 否则等于把已存明文 Key 送到任意 baseUrl（终审 P1）。
+  const key = String(apiKey || '').trim();
+  const modelId = String(model || cfg?.api?.model || (p?.models || [])[0] || '').trim();
+  if (!base) throw new Error('请先填写 Base URL');
+  if (!modelId) throw new Error('请先选择/填写模型 ID');
+  const service = (p && p.preset && modelServiceOfBaseUrl(p.baseURL)) || modelServiceOfBaseUrl(base);
+  const serviceId = p?.preset || service?.id || '';
+  const intent = normalizeThinkingIntent(thinking !== undefined ? thinking : cfg?.api?.thinking, 'chat');
+  // 探测两类问题，语义分开（终审 P1：此前把"当前档位"的实测结果误当"能关闭"落盘）：
+  //  - 选择是 off / 未设(on)：测"这个渠道能不能关掉思考" → canDisable 有结论（含近似档说明）；
+  //  - 选择是具体档位：只报"该档位实发与思考 token"，不下"可关闭"的结论。
+  const testingOff = intent === 'on' || intent === 'off';
+  const resolved = resolveThinkingPatch(serviceId, testingOff ? 'off' : intent, cfg?.api?.thinkingParams);
+  const sendPatch = resolved?.patch || null;
+  const offPatch = testingOff ? sendPatch : null;
+  const approx = resolved?.approx === true;
+  const extra = (extraBody !== undefined ? extraBody : cfg?.api?.extraBody);
+  const body = {
+    model: modelId,
+    messages: [{ role: 'user', content: '只回复数字：1+1=?' }],
+    max_tokens: 1024,
+    stream: false,
+    ...(sendPatch || {}),
+    ...((extra && typeof extra === 'object' && !Array.isArray(extra)) ? extra : {})
+  };
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error('超时')), 25000);
+  const releaseTimeGuard = watchTimeWindow((error) => controller.abort(error), '');
+  try {
+    controller.signal.throwIfAborted();
+    const res = await fetch(`${base}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(key ? { authorization: `Bearer ${key}` } : {}),
+        ...opencodeHeaders(base, modelId)
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    const payload = await res.json().catch(() => ({}));
+    const latencyMs = Date.now() - startedAt;
+    if (!res.ok) {
+      const errText = String(payload?.error?.message ?? payload?.message ?? '').slice(0, 300);
+      // 有的渠道会在 400 里列出合法档位枚举 —— 直接解析缓存，省得逐个试。
+      const m = errText.match(/expected one of\s+["']?([a-z| ]+)["']?/i);
+      const levels = m ? m[1].split('|').map((s) => s.trim()).filter(Boolean) : null;
+      const result = {
+        ok: false, latencyMs, serviceId,
+        sentPatch: sendPatch,
+        note: `探测请求失败 HTTP ${res.status}${errText ? `：${errText}` : ''}`,
+        ...(levels ? { levels } : {})
+      };
+      saveProbe(p, result);
+      return result;
+    }
+    const usage = payload?.usage || {};
+    const reasoningTokens = Number(usage?.completion_tokens_details?.reasoning_tokens) || 0;
+    const reasoningContent = String(payload?.choices?.[0]?.message?.reasoning_content ?? '').trim();
+    const hasReasoning = reasoningTokens > 0 || reasoningContent !== '';
+    let canDisable = null;
+    let note;
+    if (testingOff) {
+      canDisable = offPatch ? !hasReasoning : null;
+      note = offPatch
+        ? (hasReasoning
+          ? (approx
+            ? `该渠道无法真正关闭思考：选「关闭」按最低档发送（实测思考 token ${reasoningTokens || '>0'}）。`
+            : `该渠道忽略了关闭思考的参数（思考 token ${reasoningTokens || '>0'}）：无法真正关闭。`)
+          : '该渠道接受了关闭思考的参数：实测已关闭，无思考 token。')
+        : (hasReasoning
+          ? `未配置可用的关闭参数；实测思考默认开启（思考 token ${reasoningTokens || '>0'}）。可用「额外请求参数」按服务商文档自定义。`
+          : '未配置关闭参数；本次请求未见思考 token（无法据此断定可关闭）。');
+    } else {
+      note = `已按「${intent}」档实测：思考 token ${reasoningTokens || 0}${hasReasoning ? '' : '（未见思考痕迹）'}；本次不含"能否关闭"的结论，选「关闭」再测即可。`;
+    }
+    const result = { ok: true, latencyMs, serviceId, sentPatch: sendPatch, hasReasoning, canDisable, reasoningTokens, note };
+    saveProbe(p, result);
+    return result;
+  } catch (error) {
+    const latencyMs = Date.now() - startedAt;
+    const msg = String(error?.cause?.message ?? error?.message ?? error);
+    const result = { ok: false, latencyMs, serviceId, sentPatch: sendPatch, note: msg === '超时' ? '探测超时' : `探测失败：${msg}` };
+    saveProbe(p, result);
+    return result;
+  } finally {
+    releaseTimeGuard();
+    clearTimeout(timer);
+  }
+}
+
+/** 探测结果落盘（控制台展示「已实测」标记用）。
+ *  有 provider 记录 → 记到该记录；没有（直接用顶层 api.baseUrl 的部署）→ 记到 api.thinkingProbe，
+ *  同时带上 baseUrl，换地址后旧结论自动作废。 */
+function saveProbe(provider, result) {
+  const snapshot = {
+    checkedAt: Date.now(),
+    ok: result.ok === true,
+    canDisable: result.canDisable === null || result.canDisable === undefined ? null : result.canDisable === true,
+    reasoningTokens: Number(result.reasoningTokens) || 0,
+    levels: Array.isArray(result.levels) ? result.levels : undefined,
+    note: String(result.note || '').slice(0, 300)
+  };
+  try {
+    if (provider?.id && provider.id.startsWith('custom_')) {
+      const providers = currentProviders().map((x) => {
+        const { apiKey: _ak, ...rest } = x;
+        return rest;
+      });
+      const target = providers.find((x) => x.id === provider.id);
+      if (target) {
+        target.thinkingProbe = snapshot;
+        updateConfig({ providers });
+        return;
+      }
+    }
+    const cfg = getConfig();
+    updateConfig({ api: { thinkingProbe: { ...snapshot, baseUrl: normalizeBaseUrl(cfg?.api?.baseUrl || '') } } });
+  } catch { /* 落盘失败不影响探测结果本身 */ }
+}
+
 /** 测试一个提供商端点（按 providerId 查目录，或直接给 baseUrl/apiKey）。 */
 export async function testOneProvider({ providerId = '', baseUrl = '', apiKey = '' } = {}) {
   let p = currentProviders().find((x) => x.id === providerId);
@@ -146,10 +283,13 @@ export async function testOneProvider({ providerId = '', baseUrl = '', apiKey = 
   return testProvider(p);
 }
 
-/** 新建提供商；若同 baseURL 已存在则合并模型。返回 { provider, created }。 */
-export function upsertProvider({ baseUrl, apiKey, models = [] }) {
+/** 新建提供商；若同 baseURL 已存在则合并模型。返回 { provider, created }。
+ *  preset = 渠道预设 id（provider-presets.js），用于把"关思考"翻译成该渠道认识的参数形状；
+ *  留空时运行期按 baseURL 主机名自动推断。 */
+export function upsertProvider({ baseUrl, apiKey, models = [], preset = '' }) {
   const base = normalizeBaseUrl(baseUrl);
   if (!base) throw new Error('Base URL 不能为空');
+  const presetId = String(preset || '').trim().toLowerCase();
   const providers = currentProviders().map((p) => { const { apiKey: _ak, ...rest } = p; return { ...rest, models: [...(p.models || [])] }; });
   const existing = providers.find((p) => normalizeBaseUrl(p.baseURL) === base);
   const entries = normalizeModelInput(models);
@@ -161,6 +301,7 @@ export function upsertProvider({ baseUrl, apiKey, models = [] }) {
     // 在它之后改 existing 只改了返回值 —— 配置里留下的还是首次导入的名字，UI 上显示原始 id。
     existing.modelNames = { ...(existing.modelNames || {}) };
     for (const m of entries) existing.modelNames[m.id] = m.name;
+    if (presetId && existing.preset !== presetId) existing.preset = presetId;
     if (apiKey) {
       const keys = { ...(getConfig().providerKeys || {}) };
       keys[existing.id] = String(apiKey).trim();
@@ -183,7 +324,8 @@ export function upsertProvider({ baseUrl, apiKey, models = [] }) {
     apiKeyFrom: apiKey ? 'manual' : '',
     models: entries.map((m) => m.id),
     modelNames,
-    needsBaseUrl: false
+    needsBaseUrl: false,
+    ...(presetId ? { preset: presetId } : {})
   };
   providers.push(provider);
   const keys = { ...(getConfig().providerKeys || {}) };

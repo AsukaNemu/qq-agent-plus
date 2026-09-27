@@ -24,7 +24,7 @@ import { resolveOfficialPrice, listOfficialPrices, listModelAliases, isPeakHour,
 import { initPriceFeed, refreshPriceFeed, priceFeedStatus } from '../pricing/price-feed.js';
 import { probeChannelPrices, capPrices } from '../pricing/price-probe.js';
 import { initChannelPrices, refreshChannelFeed, removeChannelFeed, channelPriceStatus, maybeAutoProbeChannel } from '../pricing/channel-prices.js';
-import { currentProviders, setProviderKey, testAllProviders, testOneProvider, testModelChat, fetchModelsFrom, upsertProvider, addModelsToProvider, removeModelFromProvider } from '../core/providers.js';
+import { currentProviders, setProviderKey, testAllProviders, testOneProvider, testModelChat, probeThinking, fetchModelsFrom, upsertProvider, addModelsToProvider, removeModelFromProvider } from '../core/providers.js';
 import { scanModelsVision, visionResults, modelImageVerdict } from '../llm/vision-scan.js';
 import { builtinVisionResults } from '../llm/model-vision-docs.js';
 import { createEventBus, todayKey, shanghaiDayStart, isSelfSender, safeSlice, sanitizeUserText, textWithQuote } from '../core/util.js';
@@ -1373,7 +1373,7 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     if (!target) return true;   // 没给地址 = 用配置里的那个
     const known = [
       norm(cfgNow.api?.baseUrl),
-      ...(cfgNow.providers || []).map((p) => norm(p?.baseUrl))
+      ...(cfgNow.providers || []).map((p) => norm(p?.baseURL))
     ].filter(Boolean);
     return known.includes(target);
   }
@@ -1957,7 +1957,9 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
           hasKey: !!p.apiKey,
           anthropicOrigin: p.anthropicOrigin === true,
           models: p.models,
-          modelNames: p.modelNames || {}
+          modelNames: p.modelNames || {},
+          preset: p.preset || '',
+          thinkingProbe: p.thinkingProbe || null
         }));
         return json(res, 200, { providers });
       }
@@ -2167,6 +2169,38 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         }
       }
 
+      // 思考能力探测：用当前渠道真实会发的参数发一条最小请求，实测「关得掉吗/档位认哪些」。
+      if (pathname === '/api/providers/probe-thinking' && method === 'POST') {
+        try {
+          const body = await readBody(req);
+          // 支持用"未保存的当前选择"实测：thinking 传字符串或按用途对象；
+          // extraBody 传对象。类型不合法一律忽略（回落到已保存配置）。
+          const thinkingInput = (typeof body.thinking === 'string'
+            || (body.thinking && typeof body.thinking === 'object' && !Array.isArray(body.thinking)))
+            ? body.thinking : undefined;
+          const extraInput = (body.extraBody && typeof body.extraBody === 'object' && !Array.isArray(body.extraBody))
+            ? body.extraBody : undefined;
+          const baseUrlIn = String(body.baseUrl ?? '');
+          const submitted = String(body.apiKey ?? '').trim();
+          // 与「测试连通性」「获取列表」同一条守卫：掩码/空 Key 时只把服务端已存的明文 Key
+          // 发给配置里已知的地址——不能因为调用方随手填个地址就把 Key 送出去（终审发现漏了这条）。
+          const apiKeyResolved = (submitted && submitted !== '******')
+            ? submitted
+            : (storedKeyAllowedFor(getConfig(), baseUrlIn || getConfig().api.baseUrl) ? resolveApiKey(getConfig()) : '');
+          const result = await probeThinking({
+            providerId: String(body.providerId ?? ''),
+            model: String(body.model ?? ''),
+            thinking: thinkingInput,
+            extraBody: extraInput,
+            baseUrl: baseUrlIn,
+            apiKey: apiKeyResolved
+          });
+          return json(res, 200, { ok: true, result });
+        } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) });
+        }
+      }
+
       // 新增提供商（同 baseURL 自动合并）
       if (pathname === '/api/providers' && method === 'POST') {
         try {
@@ -2174,7 +2208,8 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
           const r = upsertProvider({
             baseUrl: String(body.baseUrl ?? ''),
             apiKey: String(body.apiKey ?? ''),
-            models: body.models || []
+            models: body.models || [],
+            preset: String(body.preset ?? '')
           });
           return json(res, 200, { ok: true, ...r, provider: sanitizeProvider(r.provider) });
         } catch (error) {

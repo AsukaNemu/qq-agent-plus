@@ -954,6 +954,7 @@ export class IdentityPilotManager {
         tools: [FRIEND_REVIEW_TOOL],
         toolChoice: 'auto',
         temperature: 0.2,
+        purpose: 'judge',   // 好友申请评估 = 判断类任务
         maxTokens: 2048,
         signal: controller.signal
       }, 0);

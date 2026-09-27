@@ -516,6 +516,7 @@ export class RelationshipPilotManager {
         tools,
         toolChoice: 'auto',
         temperature: 0.1,
+        purpose: 'judge',   // 关系评估 = 判断类任务
         maxTokens: 1600
       }, 0);
       usage = usageOf(response);

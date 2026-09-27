@@ -1114,6 +1114,7 @@ export class DailyMomentsManager {
         tools,
         toolChoice,
         temperature: 1,
+        purpose: 'write',   // 每日动态（说说）= 写作类任务
         signal,
         cacheKey: `qq-agent:daily-moments:${personaHash.slice(0, 24)}`
       });

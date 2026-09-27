@@ -2404,7 +2404,8 @@ export class Orchestrator {
     const cfg = getConfig();
     const mem = cfg.memory || {};
     if (mem.useChatModel !== false) {
-      return chatCompletion({ messages, temperature: 0.2 });
+      // 记忆整理 = 判断/总结类任务（与聊天、写作可各自设思考档位）。
+      return chatCompletion({ messages, temperature: 0.2, purpose: 'judge' });
     }    const providers = currentProviders();
     const p = providers.find((x) => x.id === mem.provider);
     if (!p?.baseURL || !p?.apiKey || !mem.model) {
@@ -2413,6 +2414,7 @@ export class Orchestrator {
     return chatCompletion({
       messages,
       temperature: 0.2,
+      purpose: 'judge',
       overrides: { baseUrl: p.baseURL, apiKey: p.apiKey, model: mem.model, timeoutMs: 180000 }
     });
   }

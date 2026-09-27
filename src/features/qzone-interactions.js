@@ -900,6 +900,7 @@ export class QzoneInteractionManager {
         // The prompt and finalPlan validation still require this sole submit tool.
         toolChoice: 'auto',
         temperature: 1,
+        purpose: 'write',   // 空间互动文案 = 写作类任务
         signal,
         cacheKey: `qq-agent:qzone-interactions:${qzoneInteractionPersonaHash(root.persona).slice(0, 24)}`
       });

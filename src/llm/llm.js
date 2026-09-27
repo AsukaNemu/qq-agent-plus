@@ -2,6 +2,7 @@
 // 支持工具调用、usage 统计和可选模型。
 import { getConfig } from '../core/config.js';
 import { stripLoneSurrogates } from '../core/util.js';
+import { normalizeThinkingIntent, thinkingPatchFor, resolveThinkingPatch, modelServiceById, modelServiceOfBaseUrl, effectiveThinkingRaw, hostOf } from '../core/provider-presets.js';
 import { resolveOfficialPrice, resolveModelPrice, priceAt } from '../pricing/model-prices.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { assertTimeAllowed, watchTimeWindow } from '../core/time-gate.js';
@@ -115,22 +116,77 @@ export function isRetryableError(error) {
  * @param {number} [retries=2] 最多额外重试几次（默认 2，即总共最多 3 次尝试）
  */
 /**
- * 按用途决定要不要"思考"（网关侧 thinking 开关）。
- * 配置：api.thinking = { chat: 'off', default: 'on' }；也接受 'off' / 'on' 字符串（全局）。
- * 只有明确 off 时才带 thinking 字段 —— 不认这个字段的网关因此不会 400。
+ * 按用途决定要不要"思考"，并翻译成当前渠道认识的参数形状（见 src/core/provider-presets.js）。
+ * 配置：api.thinking 支持 'on'/'off'（全局）、'low'/'medium'/'high'/'max'（档位）、
+ * 或按用途对象 { chat: 'off', default: 'on' }。表外渠道沿用历史行为：只有明确 off
+ * 时才带 thinking 字段 —— 不认这个字段的网关因此不会 400；档位对表外渠道一律不发。
  */
 // 思考模式下降级强制 tool_choice 的提示只打一次（每种工具一次），避免每次判断刷屏。
 const thinkingToolChoiceWarned = new Set();
-function thinkingModeFor(purpose) {
-  let t = null;
-  try { t = getConfig().api?.thinking; } catch { return 'on'; }
-  if (t === 'off' || t === false) return 'off';
-  if (t === 'on' || t === true || t == null) return 'on';
-  if (typeof t === 'object') {
-    const v = (purpose && t[purpose] != null) ? t[purpose] : t.default;
-    return v === 'off' || v === false ? 'off' : 'on';
+// 表外渠道 / 未验证档位的提示同样只打一次，避免刷屏。
+const thinkingUnsupportedWarned = new Set();
+// 模型级差异兜底：个别模型/网关不认思考参数会 400 —— 去掉参数重试一次（每个模型只提示一次）。
+const thinkingParamRejectedWarned = new Set();
+
+/** 当前连接的地址主机（每供应商独立设置按它取）。 */
+function currentHost() {
+  try {
+    const cfg = getConfig();
+    const pid = String(cfg?.api?.provider || '').trim();
+    const provider = (cfg?.providers || []).find((p) => p && p.id === pid) || null;
+    return hostOf(provider?.baseURL || cfg?.api?.baseUrl || '');
+  } catch {
+    return '';
   }
-  return 'on';
+}
+
+/** 当前连接命中的渠道预设 id（先看 provider 记录，再看 api.baseUrl）。 */
+function currentServiceId() {
+  try {
+    const cfg = getConfig();
+    const pid = String(cfg?.api?.provider || '').trim();
+    const provider = (cfg?.providers || []).find((p) => p && p.id === pid) || null;
+    if (provider?.preset) {
+      const byPreset = modelServiceById(provider.preset);
+      if (byPreset) return byPreset.id;
+    }
+    if (provider?.baseURL) {
+      const byProvider = modelServiceOfBaseUrl(provider.baseURL);
+      if (byProvider) return byProvider.id;
+    }
+    const byApi = modelServiceOfBaseUrl(cfg?.api?.baseUrl);
+    return byApi ? byApi.id : '';
+  } catch {
+    return '';
+  }
+}
+
+function thinkingFor(purpose) {
+  let raw = null;
+  let customParams = null;
+  try {
+    const cfg = getConfig();
+    // 先取"当前供应商自己的条"，没有才退回全局设置（每供应商独立）。
+    raw = effectiveThinkingRaw(cfg?.api, currentHost());
+    customParams = cfg?.api?.thinkingParams;
+  } catch { /* 取不到就走默认 */ }
+  const intent = normalizeThinkingIntent(raw, purpose);
+  const serviceId = currentServiceId();
+  if (intent === 'on') return { mode: 'on', patch: null, approx: false, effectiveOff: false, serviceId };
+  // 自定义/表外渠道优先用用户的档位映射（api.thinkingParams）。
+  const resolved = resolveThinkingPatch(serviceId, intent, customParams);
+  if (!resolved) {
+    // 表内没核过这个档位 / 表外渠道：不发参数，别赌网关认不认。
+    const key = `${serviceId || 'unknown'}:${intent}`;
+    if (intent !== 'off' && !thinkingUnsupportedWarned.has(key)) {
+      thinkingUnsupportedWarned.add(key);
+      console.warn(`[llm] 当前渠道（${serviceId || '未识别'}）未验证思考档位「${intent}」，已跳过该参数；可用「额外请求参数」自定义。`);
+    }
+    return { mode: intent, patch: null, approx: false, effectiveOff: false, serviceId };
+  }
+  // 只有"真正关掉"才丢 reasoning_content：近似关闭（如网关最低档）思考仍在发生，历史里保留它更连贯。
+  const effectiveOff = intent === 'off' && !resolved.approx && !resolved.suppressed;
+  return { mode: intent, patch: resolved.patch, approx: resolved.approx, effectiveOff, serviceId, suppressed: resolved.suppressed };
 }
 
 // 服务商的内容审核会偶尔把整次请求判为 high risk 直接拒绝（2026-09-18 实测：群里吵架上下文触发，
@@ -269,7 +325,8 @@ export async function chatCompletion({
   const api = overrides || effectiveApi();
   // 聊天这类"随口回一句"的任务关掉思考：省一半输出 token、少 1~3 秒；
   // 判断/写作类（表情包要不要收、说说、空间互动、身份评估）不传 purpose，继续思考。
-  const thinkingOff = thinkingModeFor(purpose) === 'off';
+  const thinking = thinkingFor(purpose);
+  const thinkingOff = thinking.effectiveOff;
   const body = {
     model: api.model,
     messages: messages.map(({ role, content, tool_calls, tool_call_id, name, reasoning_content }) => ({
@@ -285,7 +342,7 @@ export async function chatCompletion({
     })),
     stream: false
   };
-  if (thinkingOff) body.thinking = { type: 'disabled' };
+  if (thinking.patch) Object.assign(body, thinking.patch);
   if (tools && tools.length > 0) {
     body.tools = tools;
     // 思考模式与强制 tool_choice 不兼容：部分网关（DeepSeek 系）会整次请求 400
@@ -316,6 +373,11 @@ export async function chatCompletion({
   })())) {
     body.prompt_cache_key = String(cacheKey).slice(0, 64);
   }
+  // 额外请求参数（控制台「高级」）：用户按自己服务商的文档填，最高优先级合并，
+  // 表外渠道/怪癖网关不必等适配（例：某些网关要 {"reasoning":{"enabled":false}}）。
+  const extraBody = api.extraBody && typeof api.extraBody === 'object' && !Array.isArray(api.extraBody)
+    ? api.extraBody : null;
+  if (extraBody) Object.assign(body, extraBody);
 
   const controller = new AbortController();
   const timeoutMs = Math.max(5000, Number(api.timeoutMs) || 180000);
@@ -330,15 +392,31 @@ export async function chatCompletion({
   try {
     controller.signal.throwIfAborted();
     assertTimeAllowed();
-    const res = await fetch(joinUrl(api.baseUrl, '/chat/completions'), {
+    const send = (payload) => fetch(joinUrl(api.baseUrl, '/chat/completions'), {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...authHeaders(api.apiKey, api.baseUrl, api.model) },
-      body: JSON.stringify(body),
+      body: JSON.stringify(payload),
       signal: controller.signal
     });
+    let res = await send(body);
     if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`模型 API HTTP ${res.status}：${text.slice(0, 500)}`);
+      let text = await res.text();
+      // 模型级差异：个别模型/网关不认识思考参数会整次 400 —— 一个可选参数不该让消息发不出去。
+      // 去掉"我们自己加的"思考参数重试一次（extraBody 是用户显式填的，不动）。
+      const patchKeys = thinking.patch ? Object.keys(thinking.patch) : [];
+      const paramRejected = res.status === 400 && patchKeys.length
+        && /thinking|reasoning|enable_thinking|unsupported|unknown|unexpected|invalid/i.test(text);
+      if (paramRejected) {
+        const retryBody = { ...body };
+        for (const k of patchKeys) delete retryBody[k];
+        if (!thinkingParamRejectedWarned.has(api.model)) {
+          thinkingParamRejectedWarned.add(api.model);
+          console.warn('[llm] 模型拒绝思考参数，已去掉后重试（每个模型提示一次）：', api.model, '|', text.slice(0, 160));
+        }
+        res = await send(retryBody);
+        if (!res.ok) text = await res.text();
+      }
+      if (!res.ok) throw new Error(`模型 API HTTP ${res.status}：${text.slice(0, 500)}`);
     }
     const data = await res.json();
     const choice = data?.choices?.[0];
