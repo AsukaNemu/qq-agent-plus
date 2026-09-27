@@ -321,7 +321,7 @@ export function buildToolDefs() {
     },
     {
       name: 'send_sticker',
-      description: '发送一个 QQ 收藏表情（一条消息只能一张表情，不能附带文字；想说的话先用 send_message 单独发）。stickerId 直接填【可用表情包】里的备注名即可（如“别墨迹”），也接受完整 id。',
+      description: '发送一个收藏表情（一条消息只能一张表情，不能附带文字；想说的话先用 send_message 单独发）。stickerId 直接填【可用表情包】里那行开头的备注名即可，也接受完整 id。',
       parameters: {
         type: 'object',
         properties: {
@@ -333,7 +333,15 @@ export function buildToolDefs() {
       },
       async execute(ctx, args) {
         try {
-          const sticker = await ctx.stickers.findForSend(unquoteJsonString(args.stickerId));
+          let sticker = null;
+          try {
+            sticker = await ctx.stickers.findForSend(unquoteJsonString(args.stickerId));
+          } catch (error) {
+            if (error?.code === 'STICKER_LINK_DEAD') {
+              return err(`${error.message}。换一张，或用 list_stickers 看看别的。`);
+            }
+            throw error;
+          }
           if (!sticker) return err(`找不到表情。${await stickerLookupHint(ctx, args.stickerId)}`);
           if (!sticker.url) return err(`表情 ${sticker.id} 没有可发送的图片地址`);
           const targetError = messageTargetError(ctx, args);
@@ -405,7 +413,7 @@ export function buildToolDefs() {
     },
     {
       name: 'sticker_note',
-      description: '给一个表情记下你的理解（含义/用法/标签），下次能更准地选用。',
+      description: '给一个表情记下你的理解（含义/用法/标签），下次能更准地选用。只写画面/用途这类识别信息，不要写"我是谁"这种自我设定（人设以【角色设定】为准，不靠备注）。',
       parameters: {
         type: 'object',
         properties: {
@@ -443,10 +451,27 @@ export function buildToolDefs() {
           if (!entry) return err(`在当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
           const imageMedia = (entry.media || []).find((m) => m.kind === 'image' && m.url);
           if (!imageMedia) return err('该消息没有可收藏的图片');
+          // 与"自动收藏"同一口径：先判一下这是不是真表情包 —— 只靠模型自己的判断，
+          // 生活照/自拍/形象图会混进表情库，之后按图片发出去（用户 2026-09-27 反馈）
+          const verdict = await ctx.stickers.judgeImage({
+            url: imageMedia.url,
+            message: { mid: entry.mid, senderName: entry.senderName || '' }
+          });
+          if (verdict?.save !== true) {
+            return err(`这张不收（${verdict?.reason || '不像表情包'}）：只收以后聊天用得上的表情包，生活照/截图/自拍不存`);
+          }
           // 与 send_message/send_sticker 一样归一化：模型常传 "#123"，直接当 id 会生成
           // collected_#123，而刷新逻辑只认 collected_123，收藏的表情链接就永远不刷新。
-          const saved = ctx.stickers.collect(normalizeMid(args.messageId), { url: imageMedia.url, note: String(args.note ?? '') });
-          return ok({ collected: true, id: saved.id, note: saved.localNote });
+          const saved = await ctx.stickers.collect(normalizeMid(args.messageId), {
+            url: imageMedia.url,
+            note: String(verdict?.note || args.note || '')
+          });
+          return ok({
+            collected: true,
+            id: saved.id,
+            note: saved.localNote,
+            kind: saved.localFile ? '本地图库（发出去是图片）' : 'QQ收藏表情'
+          });
         } catch (error) {
           return err(error?.message ?? error);
         }

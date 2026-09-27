@@ -168,22 +168,53 @@ export class StickerManager {
       const segments = Array.isArray(data?.message) ? data.message : [];
       const image = segments.find((segment) => segment?.type === 'image');
       const freshUrl = String(image?.data?.url || image?.data?.file || '').trim();
-      if (!/^https?:\/\//i.test(freshUrl)) return sticker;
-      if (freshUrl === sticker.url) return sticker;
-      const refreshed = { ...sticker, url: freshUrl, updatedAt: new Date().toISOString() };
-      this.saveEntries(
-        this.entries.map((entry) => entry.id === sticker.id ? refreshed : entry)
-      );
-      return refreshed;
-    } catch {
-      return sticker;
+      if (/^https?:\/\//i.test(freshUrl) && freshUrl !== sticker.url) {
+        const refreshed = { ...sticker, url: freshUrl, updatedAt: new Date().toISOString() };
+        this.saveEntries(
+          this.entries.map((entry) => entry.id === sticker.id ? refreshed : entry)
+        );
+        return refreshed;
+      }
+    } catch { /* 源消息过期就退回下面"探活"这条路 */ }
+    // 刷不到新链接（原消息已过期/被撤回）的早期条目只有一条老 URL：链接可能早就 400 了。
+    // 直接发出去群友看到的是一张坏图 —— 先探一下，探不通就明确报"已失效"（2026-09-27）。
+    try {
+      const safeUrl = await validateImageUrl(sticker.url);
+      const { buffer } = await safeFetchBinary(safeUrl, 64 * 1024, AbortSignal.timeout(8000));
+      if (!buffer?.length) throw new Error('内容为空');
+    } catch (error) {
+      const dead = new Error(`这张的图片链接已经失效（${String(error?.message ?? error)}），发出去会是一张坏图`);
+      dead.code = 'STICKER_LINK_DEAD';
+      throw dead;
     }
+    return sticker;
   }
 
   note(id, patch) {
     const result = applyStickerNote(this.entries, id, patch);
     if (result.entry) this.saveEntries(result.entries);
     return result.entry;
+  }
+
+  /**
+   * 把图片字节落到托管目录（sticker-assets/），返回相对路径。
+   * 两类条目共用：控制台上传的自定义表情、以及从消息里收藏下来的图（消息链接是临时的，
+   * 不落盘就只能靠会过期的 URL 发出去 —— 2026-09-27 实测就有一条已 400）。
+   * 顺手当校验用：非图片/超大直接抛错。
+   */
+  #writeAsset(imageBuffer, id) {
+    const buffer = Buffer.isBuffer(imageBuffer) ? imageBuffer : Buffer.from(imageBuffer || []);
+    if (!buffer.length) throw new Error('图片内容为空');
+    if (buffer.length > MAX_STICKER_BYTES) throw new Error('图片不能超过 8 MiB');
+    const contentType = imageType(buffer);
+    if (!contentType) throw new Error('仅支持 PNG、JPEG、GIF 或 WebP 图片');
+    const relativeFile = `sticker-assets/${id}.${IMAGE_EXTENSIONS[contentType]}`;
+    const file = path.join(DATA_DIR, relativeFile);
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, buffer, { mode: 0o600 });
+    fs.renameSync(tmp, file);
+    return { relativeFile, file };
   }
 
   addManual({
@@ -194,20 +225,8 @@ export class StickerManager {
     usage = ''
   }) {
     this.assertStorageWritable();
-    const buffer = Buffer.isBuffer(imageBuffer)
-      ? imageBuffer
-      : Buffer.from(imageBuffer || []);
-    if (!buffer.length) throw new Error('请选择表情图片');
-    if (buffer.length > MAX_STICKER_BYTES) throw new Error('表情图片不能超过 8 MiB');
-    const contentType = imageType(buffer);
-    if (!contentType) throw new Error('仅支持 PNG、JPEG、GIF 或 WebP 图片');
     const id = `manual_${crypto.randomUUID().replaceAll('-', '').slice(0, 16)}`;
-    const relativeFile = `sticker-assets/${id}.${IMAGE_EXTENSIONS[contentType]}`;
-    const file = path.join(DATA_DIR, relativeFile);
-    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, buffer, { mode: 0o600 });
-    fs.renameSync(tmp, file);
+    const { relativeFile, file } = this.#writeAsset(imageBuffer, id);
     const now = new Date().toISOString();
     const entry = normalizeStickerEntry({
       id,
@@ -381,12 +400,22 @@ export class StickerManager {
         return this.peek(qq.emojiId) || { id: qq.emojiId, localNote: note, source: 'qq' };
       }
     }
-    const entry = this.collect(message?.mid, { url: usedUrl, srcKey, note });
+    const entry = await this.collect(message?.mid, { url: usedUrl, srcKey, note });
     if (entry && !entry.srcKey) {
       entry.srcKey = srcKey;
       this.saveEntries(this.entries);
     }
     return entry;
+  }
+
+  /**
+   * QQ 收藏表情的容量状态（非会员 500 个）：控制台据此说明"新收藏会进本地库（发出去是图片）"。
+   * 复用 #qqFavoritesFull 的 10 分钟缓存，别多打一次接口。
+   */
+  async qqFavoritesState() {
+    const full = await this.#qqFavoritesFull();
+    const count = Number.isFinite(this.qqCount) ? this.qqCount : null;
+    return { count, limit: 500, full, checkedAt: this.qqCountAt || 0 };
   }
 
   /** QQ 收藏表情有上限（非会员 500 个）；满了就改存本地库。结果缓存 10 分钟。 */
@@ -449,6 +478,12 @@ export class StickerManager {
     if (!buffer?.length) throw new Error('图片内容为空');
     const mime = /^image\//.test(String(contentType || '')) ? String(contentType) : 'image/jpeg';
     return `data:${mime};base64,${buffer.toString('base64')}`;
+  }
+
+  /** 判断一张图值不值得收（工具收藏与自动收藏共用同一口径：只收真正的表情包）。 */
+  async judgeImage({ url = '', message = null } = {}) {
+    if (!url) return { save: false, reason: '这条消息里没有可收藏的图片' };
+    return this.#judgeSticker({ url }, message);
   }
 
   /** 一次极小的视觉判断：这张图收不收？收的话备注写什么？ */
@@ -567,7 +602,7 @@ export class StickerManager {
   }
 
   /** 收藏一条消息里的图片（本地新增条目，不入 QQ 收藏）。 */
-  collect(messageId, { url, note = '', srcKey = '' } = {}) {
+  async collect(messageId, { url, note = '', srcKey = '', signal } = {}) {
     note = String(note ?? '').slice(0, 300);
     if (!getConfig().sticker?.collectEnabled) throw new Error('收藏表情功能未开启');
     // 限频
@@ -583,10 +618,21 @@ export class StickerManager {
     if (existing) {
       return this.note(id, { note: String(note || '') });
     }
+    // 入库即落盘：消息图片的链接是临时地址（带 rkey、随时可能 400），只存 URL 的条目
+    // 过一阵子就发不出去了（实测有一条已失效）。落盘后发送走 base64，永不过期。
+    let localFile = '';
+    try {
+      const safeUrl = await validateImageUrl(url);
+      const { buffer } = await safeFetchBinary(safeUrl, MAX_STICKER_BYTES, signal);
+      localFile = this.#writeAsset(buffer, id).relativeFile;
+    } catch (error) {
+      throw new Error(`这张图取不到（${String(error?.message ?? error)}），没有收藏`);
+    }
     const entry = {
       id,
       resId: id,
       url,
+      localFile,
       md5: '',
       srcKey: String(srcKey || '').trim() || stickerSourceKey(url),
       desc: String(note || '').slice(0, 20),

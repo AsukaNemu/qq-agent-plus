@@ -282,3 +282,95 @@ test('抬头在"只有一个/全都没用过"与"全都用过"两个边界不再
   assert.equal(p2.includes('还有 0 张没发过'), false);
   assert.match(p2, /最近没用过的/);
 });
+
+
+test('清单把两类来源标出来：QQ 收藏表情 vs 本地图库（发出去是图片）', () => {
+  const entries = [
+    { id: '3808482642_1', desc: '真表情', url: 'https://p.qpic.cn/qq_expression/x/1', source: 'qq', useCount: 1, lastUsedAt: 1 },
+    { id: 'collected_-100', desc: '收藏的图片', url: 'https://multimedia.nt.qq.com.cn/download?fileid=x', source: 'ai', useCount: 0 },
+    { id: 'manual_abc', desc: '手动上传的图', localFile: 'sticker-assets/manual_abc.png', source: 'manual', useCount: 0 }
+  ];
+  const prompt = buildStickerContext(entries, 10);
+  assert.match(prompt, /真表情.*〔QQ收藏表情〕/);
+  assert.match(prompt, /收藏的图片.*〔本地图库·发出去是图片〕/);
+  assert.match(prompt, /手动上传的图.*〔本地图库·发出去是图片〕/);
+  assert.match(prompt, /标〔QQ收藏表情〕的发出去是表情/);
+});
+
+test('收藏入库即落盘：发送走 base64（不再依赖会过期的消息链接）', async (t) => {
+  const http = await import('node:http');
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6300010000050001' + '0d0a2db4' + '0000000049454e44ae426082', 'hex');
+  const server = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'image/png' }); res.end(png); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => new Promise((r) => server.close(r)));
+  const { updateConfig, DEFAULT_CONFIG } = await import('../src/core/config.js');
+  updateConfig({ security: { ...DEFAULT_CONFIG.security, allowPrivateImageHosts: true }, sticker: { ...DEFAULT_CONFIG.sticker, collectEnabled: true } });
+  const manager = new StickerManager({ async call() { return []; } });
+  const entry = await manager.collect('-555', { url: `http://127.0.0.1:${server.address().port}/a.png`, note: '本地图库测试' });
+  assert.ok(entry.localFile, '要落盘（localFile 非空）');
+  assert.ok(String(entry.localFile).startsWith('sticker-assets'), '落到托管目录 sticker-assets/ 下');
+  const image = manager.readImage(entry.id);
+  assert.ok(image?.buffer?.length, '能从托管目录读回来');
+  const forSend = await manager.findForSend(entry.id);
+  assert.match(forSend.url, /^base64:\/\//, '发送用 base64，不依赖原链接');
+});
+
+test('取不到图就不收藏（不是存一个迟早失效的链接）', async (t) => {
+  const http = await import('node:http');
+  const server = http.createServer((req, res) => { res.writeHead(404); res.end('nope'); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => new Promise((r) => server.close(r)));
+  const { updateConfig, DEFAULT_CONFIG } = await import('../src/core/config.js');
+  updateConfig({ security: { ...DEFAULT_CONFIG.security, allowPrivateImageHosts: true }, sticker: { ...DEFAULT_CONFIG.sticker, collectEnabled: true } });
+  const manager = new StickerManager({ async call() { return []; } });
+  await assert.rejects(
+    () => manager.collect('-556', { url: `http://127.0.0.1:${server.address().port}/x.png`, note: 'x' }),
+    /取不到/
+  );
+});
+
+
+test('老条目链接失效时不发坏图（明确报"已失效"，而不是拿它当表情找不到）', async (t) => {
+  const http = await import('node:http');
+  const server = http.createServer((req, res) => { res.writeHead(400, { 'content-type': 'application/json' }); res.end('{"error":"expired"}'); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => new Promise((r) => server.close(r)));
+  const { updateConfig, DEFAULT_CONFIG } = await import('../src/core/config.js');
+  updateConfig({ security: { ...DEFAULT_CONFIG.security, allowPrivateImageHosts: true } });
+  const url = `http://127.0.0.1:${server.address().port}/dead.png`;
+  const manager = new StickerManager({
+    async call() { return []; },
+    async getMsg() { throw new Error('源消息已过期'); }   // 刷新那条路走不通
+  });
+  const note = manager.note ? null : null;
+  manager.saveEntries([...manager.entries, {
+    id: 'collected_-999', resId: 'collected_-999', url, source: 'ai', desc: '老条目',
+    useCount: 0, lastUsedAt: 0, createdAt: new Date().toISOString()
+  }]);
+  await assert.rejects(() => manager.findForSend('collected_-999'), (error) => {
+    assert.equal(error?.code, 'STICKER_LINK_DEAD');
+    assert.match(String(error?.message || ''), /失效/);
+    return true;
+  });
+});
+
+test('收藏夹容量状态：满 500 时告诉控制台"新收藏会进本地库"', async () => {
+  const manager = new StickerManager({
+    async call(action, params) {
+      assert.equal(action, 'fetch_custom_face_detail');
+      return Array.from({ length: 500 }, (_, i) => ({ emojiId: `e${i}` }));
+    }
+  });
+  const state = await manager.qqFavoritesState();
+  assert.equal(state.limit, 500);
+  assert.equal(state.count, 500);
+  assert.equal(state.full, true);
+});
+
+
+test('表情策略里不再点名某张卡的专属表情（示例中性化）', () => {
+  const hint = buildStickerStrategyHint(2);
+  assert.equal(hint.includes('别墨迹'), false);
+  assert.equal(hint.includes('大肥鱼'), false);
+  assert.match(hint, /那行开头的备注名/);
+});

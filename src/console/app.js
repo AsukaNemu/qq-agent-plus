@@ -2036,6 +2036,21 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         }
       }
 
+      // 换人设后"断奶"：清掉所有群的会话交接并关闭进行中的线程。
+      // 只动这两个（不删聊天记录、不删人物印象）—— 换卡后模型会被自己旧发言的口癖锚住，
+      // 清掉交接能让新卡立刻生效（2026-09-27 实测：换卡 26 小时后仍在用旧卡口癖）。
+      if (pathname === '/api/persona/reset-handoffs' && method === 'POST') {
+        if (!keyEndpointAllowed(req)) return json(res, 403, { error: '请求来源不被信任，已拒绝。' });
+        const chats = store.listChats();
+        let closed = 0;
+        for (const chatKey of chats) {
+          try { memory.clearHandoff(chatKey); } catch { /* 单个会话失败不阻断其余 */ }
+          try { if (store.closeConversationThread(chatKey, 'persona-changed')) closed += 1; } catch { /* 没有线程就跳过 */ }
+        }
+        log(`[persona] 换了人设：已清空 ${chats.length} 个会话的交接与线程状态`);
+        return json(res, 200, { ok: true, chats: chats.length, threadsClosed: closed });
+      }
+
       // 本机语音转写：状态查询与"点一下安装"（只有控制台来源放行；不擅自重启服务）
       if (pathname === '/api/asr/install-status' && method === 'GET') {
         if (!keyEndpointAllowed(req)) return json(res, 403, { error: '请求来源不被信任，已拒绝。' });
@@ -2337,6 +2352,14 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         // 控制台保存总会带上显式的 provider（来自服务预设）：等于用户确认过这一家，
         // 清掉"升级默认值"的标记，让环境变量 Key 恢复生效（2026-09-26 审查 P2）
         if (patch?.asr && typeof patch.asr === 'object') delete patch.asr.providerDefaulted;
+        // 人设真的改了就打一个时间戳：提示词据此在接下来 24 小时里提醒模型
+        // "历史里的旧口癖/自称不作数"（换卡后它会被自己的旧发言锚住，实测能锚一天以上）
+        if (patch?.persona && typeof patch.persona === 'object') {
+          const before = cfgNow.persona || {};
+          const changed = ['roleText', 'templateId', 'behaviorProfile', 'customRules', 'botName']
+            .some((key) => String(patch.persona[key] ?? before[key] ?? '') !== String(before[key] ?? ''));
+          if (changed) patch.persona.changedAt = Date.now();
+        }
         const previousProactive = JSON.stringify(cfgNow.proactive || {});
         const previousDailyMoments = JSON.stringify(cfgNow.dailyMoments || {});
         const previousQzoneInteractions = JSON.stringify(cfgNow.qzoneInteractions || {});
@@ -2720,6 +2743,9 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
           limit: url.searchParams.get('limit') || 100,
           refresh: url.searchParams.get('refresh') === '1'
         });
+        // QQ 收藏表情有上限（非会员 500）：满了之后新收藏只能进本地图库（发出去是图片），
+        // 界面据此解释清楚，别让人以为"表情包坏了"
+        try { result.qqFavorites = await stickers.qqFavoritesState(); } catch { /* 拿不到就不显示 */ }
         return json(res, 200, result);
       }
 

@@ -1356,6 +1356,59 @@ describe('Orchestrator', () => {
     assert.equal(followUpPlan({ ...base, followUpEnabled: true }).schedule, true);
     assert.equal(followUpPlan({ ...base, followUpEnabled: true, unread: 1 }).schedule, false);
   });
+
+it('提示词里不再写死默认人设的元素（示例改成中性的）', async (t) => {
+  const { cfg, runner, append } = fixture(t);
+  cfg.sticker.enabled = true;
+  setRuntimeConfig(cfg);
+  let system = '';
+  globalThis.fetch = async (_url, options) => {
+    system = JSON.parse(options.body).messages[0].content;
+    return Response.json({ choices: [{ message: { content: 'done' } }], usage: { total_tokens: 10 } });
+  };
+  append(1, '哈哈', '42');
+  await runner.wake('group:1');
+  // 这四处原来写死的是默认卡（小鲸鱼）的梗/属性，换到别的卡就变成"别人的残留"
+  // 只看平台段：角色卡正文里出现"大肥鱼"是这张卡自己的雷点，属于卡片内容，不算"平台写死"
+  const platform = system.slice(0, system.indexOf('【角色设定')) + system.slice(system.indexOf('【QQ 场景规则】'));
+  const leftover = ['别墨迹', '大肥鱼', '角色卡里的傲娇、毒舌', '如 DeepSeek V3'].filter((w) => platform.includes(w));
+  assert.deepEqual(leftover, [], `平台提示词里不该再写死默认人设的元素：${leftover.join('、')}`);
+  // 硬规则要在（口癖以当前卡为准）
+  assert.match(system, /口癖、自称、梗一律以当前【角色设定】为准/);
+});
+
+it('换卡后 24 小时内，历史与交接口径会说明"旧口癖不作数"', async (t) => {
+  const { cfg, runner, append } = fixture(t);
+  setRuntimeConfig(cfg);
+  let seq = 0;
+  const run = async () => {
+    let system = '';
+    globalThis.fetch = async (_url, options) => {
+      // 过去状态/交接在**用户**消息里，平台提示在系统消息里：两边都抓
+      const messages = JSON.parse(options.body).messages || [];
+      system = messages.map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content || ''))).join(String.fromCharCode(10));
+      return Response.json({ choices: [{ message: { content: 'done' } }], usage: { total_tokens: 10 } });
+    };
+    seq += 1;
+    append(seq, '在吗', '42');
+    await runner.wake('group:1');
+    return system;
+  };
+  await run();   // 先跑一轮，让"过去状态"里真的有历史（没有历史的会话不需要这段口径）
+  // 没换过卡：不带这段口径
+  setRuntimeConfig({ ...cfg, persona: { ...cfg.persona, changedAt: 0 } });
+  const cold = await run();
+  assert.equal(cold.includes('【角色设定】刚换过'), false);
+  // 刚换过：历史/交接前面要带说明
+  setRuntimeConfig({ ...cfg, persona: { ...cfg.persona, changedAt: Date.now() - 60 * 1000 } });
+  const fresh = await run();
+  assert.match(fresh, /【角色设定】刚换过/);
+  assert.match(fresh, /口癖、自称、称呼都不一定还适用/);
+  // 超过 24 小时：自动失效（只在换卡那阵子提醒，不长期占 token）
+  setRuntimeConfig({ ...cfg, persona: { ...cfg.persona, changedAt: Date.now() - 25 * 3600 * 1000 } });
+  const old = await run();
+  assert.equal(old.includes('【角色设定】刚换过'), false);
+});
 });
 
 process.on('exit', () => fs.rmSync(root, { recursive: true, force: true }));

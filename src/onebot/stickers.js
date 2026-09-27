@@ -241,7 +241,10 @@ export function buildStickerContext(entries, max = 10, { vision = true } = {}) {
     const label = clipLine(sanitizeUserText(e.desc || e.localNote || '')) || '（无备注，可先看图）';
     const extra = e.tags?.length ? ` [${clipLine(e.tags.map((t) => sanitizeUserText(t)).join('/'), TAG_CHARS)}]` : '';
     const used = e.useCount ? `（用过${e.useCount}次）` : '（没用过）';
-    return `- ${label}${extra}${used}（stickerId：${e.id}）`;
+    // 两类来源在 QQ 里的呈现完全不同：QQ 收藏表情发出去是"表情"，本地图库（收藏/上传的图）
+    // 只能当图片发 —— 标出来，模型才知道"要发表情"时该挑哪种（2026-09-27 用户反馈"只发出图片"）。
+    const kindTag = (e.localFile || e.source !== 'qq') ? '〔本地图库·发出去是图片〕' : '〔QQ收藏表情〕';
+    return `- ${label}${extra}${used}（stickerId：${e.id}）${kindTag}`;
   });
   // 库刚建起来时"常用的一半"也全是没用过的：那时别写"前几个是常用的"，
   // 否则和逐行的（没用过）标记自相矛盾（2026-09-26 审查）。
@@ -259,7 +262,9 @@ export function buildStickerContext(entries, max = 10, { vision = true } = {}) {
   const tail = vision
     ? '，完整列表可用 list_stickers 查询；没用过的可以先 get_sticker_image 看一眼再用'
     : '，完整列表可用 list_stickers 查询';
-  return `【可用表情包】你的表情库里有 ${list.length} 个表情包（${scope}${tail}）：\n${lines.join('\n')}`;
+  return `【可用表情包】你的表情库里有 ${list.length} 个表情包（${scope}${tail}）。`
+    + '标〔QQ收藏表情〕的发出去是表情，标〔本地图库〕的是一张图片（QQ 里显示为图片）——'
+    + `群里要"发表情"时优先挑前者：\n${lines.join('\n')}`;
 }
 
 /** 发送前的表情包策略提示（软策略）。 */
@@ -285,7 +290,7 @@ export function buildStickerStrategyHint(level = 1, { vision = true } = {}) {
       ? '- 清单里标「没用过」的也可以直接用，不确定是什么就先 get_sticker_image 看一眼；用掉一张，下一张没用过的会自己顶上来。'
       : '- 清单里标「没用过」的挑有备注的用（清单里没备注的不会列出来）；看不到图，别对没把握的图硬发挥。',
     '- 发送：用 send_sticker；一条消息只能是一张表情，不能在同一气泡里附带文字；想说的话先用 send_message 作为单独气泡发出，再单独发表情。',
-    '- 选图很简单：stickerId 直接填【可用表情包】里的备注名（如“别墨迹”“大肥鱼”），备注里独特的一小段也行，系统会自动匹配；命中不唯一时才需要完整 id（可用 list_stickers 看全库）。',
+    '- 选图很简单：stickerId 直接填【可用表情包】里那行开头的备注名（不要背长 id），备注里独特的一小段也行，系统会自动匹配；命中不唯一时才需要完整 id（可用 list_stickers 看全库）。',
     '- 不要：在严肃/正式/敏感话题硬塞表情；不要每次都用同一个；不要一条消息里塞多个表情；不要把文字和表情混在同一个气泡里。'
   ].join('\n');
 }

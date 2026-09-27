@@ -3588,7 +3588,15 @@ function renderStickerAssets(data) {
   if (!entries.length) {
     return '<div class="empty-hint">当前表情包库为空</div>';
   }
-  return `<div class="asset-sticker-grid">${entries.map((entry) => {
+  // QQ 收藏表情有上限（非会员 500）：满了之后新收藏只能进本地图库 —— 那种在群里是以"图片"
+  // 发出去的（不是表情）。这句就是解释"为什么最近像图片"（2026-09-27 用户反馈）。
+  const fav = data?.qqFavorites || null;
+  const favHint = fav && (fav.full || (fav.count != null && fav.count >= 400))
+    ? `<div class="hint" style="margin:0 0 8px">QQ 收藏表情已占 ${fav.count ?? '?'}/500`
+      + `${fav.full ? '（已满）' : ''}：新收藏会存进本地图库 —— 本地图库的条目在群里以<strong>图片</strong>发出（不是表情），`
+      + '上面标「AI 收藏 / 手动」的就是这一类。想让它当表情发，需要在手机 QQ 里腾出收藏位。</div>'
+    : '';
+  return favHint + `<div class="asset-sticker-grid">${entries.map((entry) => {
     const title = entry.localNote || entry.desc || entry.id;
     const tags = (entry.tags || []).map((tag) => `<span>${esc(tag)}</span>`).join('');
     return `<article class="asset-sticker">
@@ -6172,6 +6180,11 @@ function renderPersonaLibrary(c) {
         <button class="btn btn-small" id="persona-expand-btn">全部收起</button>
         <button class="btn btn-small" id="new-persona-btn">＋ 新建自定义卡</button>
         <button class="btn btn-small btn-danger hidden" id="del-persona-btn">删除当前自定义卡</button>
+        <button class="btn btn-small" id="persona-reset-handoff-btn" title="换完人设后点一下：清掉所有群的会话交接与线程状态，避免它继续沿用上一张卡的口癖/自称">换人设后清空交接</button>
+      </div>
+      <div class="hint" style="margin:2px 0 8px" id="persona-reset-handoff-hint">
+        换了角色卡之后，它历史里还留着自己上一张卡的发言和"交接"，容易继续用旧口癖（我们实测换卡一天后仍在喵）。
+        正文/优先级已经写明"以当前卡为准"，点上面那个按钮可以再彻底一点：清空各群的会话交接与线程状态（<strong>不动聊天记录、不动记忆</strong>）。
       </div>
       <div class="persona-grid" id="persona-grid">${renderPersonaGrid(c)}</div>
     </div>
@@ -8461,7 +8474,8 @@ function renderPersonaSection(c) {
         这里改一个字也会<strong>解除与内置卡的绑定</strong>（正文归你自己管），想重新跟随卡文件，回上面的卡库里点一下那张卡。</div>
     </div>
     <div class="field-row">
-      <div class="field"><label>机器人名字</label><input type="text" id="cfg-botname" value="${esc(c.persona.botName)}" /></div>
+      <div class="field"><label>机器人名字</label><input type="text" id="cfg-botname" value="${esc(c.persona.botName)}" />
+        <div class="hint">它是账号的名字，<strong>不随角色卡切换</strong>（换卡只换下面的正文）；群里显示的是「群内展示名」或 QQ 群名片。</div></div>
       <div class="field"><label>群内展示名（可选）</label><input type="text" id="cfg-selfnick" value="${esc(c.persona.selfNickname || '')}" /></div>
       <div class="field"><label>交流策略</label>
         <select id="cfg-behavior-profile">
@@ -10336,6 +10350,29 @@ function bindSettingsEvents(c) {
     box.value = box.value.trim() ? `${box.value.replace(/\s+$/, '')}\n${rule}` : rule;
     syncPersonaButtons();
   });
+  // 换卡后"断奶"：清掉各群的会话交接与线程状态（不动聊天记录与记忆）
+  const resetHandoffBtn = $('#persona-reset-handoff-btn');
+  if (resetHandoffBtn) resetHandoffBtn.addEventListener('click', async () => {
+    const NL = String.fromCharCode(10);
+    const confirmed = await askForConfirmation(
+      '清空所有群的【上次会话交接】并关闭进行中的对话线程？' + NL + NL
+      + '· 不删聊天记录、不删记忆（只清"交接"与线程状态）' + NL
+      + '· 换完角色卡后点它，可以避免它继续沿用上一张卡的口癖与自称'
+    );
+    if (!confirmed) return;
+    resetHandoffBtn.disabled = true;
+    try {
+      const res = await api('/api/persona/reset-handoffs', { method: 'POST' });
+      const hint = $('#persona-reset-handoff-hint');
+      if (hint) hint.textContent = `已清空 ${res.chats || 0} 个群的交接（关闭了 ${res.threadsClosed || 0} 个进行中的线程）。`;
+    } catch (error) {
+      const hint = $('#persona-reset-handoff-hint');
+      if (hint) hint.textContent = `清空失败：${error?.message ?? error}`;
+    } finally {
+      resetHandoffBtn.disabled = false;
+    }
+  });
+
   const newPersonaBtn = $('#new-persona-btn');
   if (newPersonaBtn) newPersonaBtn.addEventListener('click', () => openPersonaCreateModal());
   const delPersonaBtn = $('#del-persona-btn');

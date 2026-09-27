@@ -236,3 +236,52 @@ test('web_search 的标题/摘要过段头弱化（九个 provider 的出口统�
     globalThis.fetch = originalFetch;
   }
 });
+
+
+test('collect_sticker：判断说不收就不入库，并说明原因（生活照/截图不混进表情库）', async () => {
+  const { updateConfig, DEFAULT_CONFIG } = await import('../src/core/config.js');
+  updateConfig({ sticker: { ...DEFAULT_CONFIG.sticker, collectEnabled: true } });
+  let collected = 0;
+  const f = context({
+    store: {
+      findByMid: () => ({ mid: '1710457251', media: [{ kind: 'image', url: 'https://example.com/a.jpg' }], senderId: '42', senderName: '群友', text: '图' }),
+      recent: () => []
+    },
+    stickers: {
+      judgeImage: async () => ({ save: false, reason: '生活照，以后聊天用不上' }),
+      collect: async () => { collected += 1; return { id: 'x', localNote: '' }; }
+    }
+  });
+  const result = await tool('collect_sticker').execute(f.ctx, { messageId: '1710457251', note: '随手拍' });
+  assert.equal(collected, 0, '判断说不收就不能入库');
+  assert.match(JSON.stringify(result), /这张不收/);
+  assert.match(JSON.stringify(result), /生活照/);
+});
+
+test('collect_sticker：判断通过才入库，备注优先用判断给的那句', async () => {
+  const { updateConfig, DEFAULT_CONFIG } = await import('../src/core/config.js');
+  updateConfig({ sticker: { ...DEFAULT_CONFIG.sticker, collectEnabled: true } });
+  const seen = [];
+  const f = context({
+    store: {
+      findByMid: () => ({ mid: '1710457251', media: [{ kind: 'image', url: 'https://example.com/a.jpg' }], senderId: '42', senderName: '群友', text: '图' }),
+      recent: () => []
+    },
+    stickers: {
+      judgeImage: async () => ({ save: true, note: '熊猫头震惊，接梗用' }),
+      collect: async (mid, opts) => { seen.push({ mid, opts }); return { id: `collected_${mid}`, localNote: opts.note, localFile: 'sticker-assets/x.png' }; }
+    }
+  });
+  const result = await tool('collect_sticker').execute(f.ctx, { messageId: '1710457251', note: '模型自己写的' });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].opts.note, '熊猫头震惊，接梗用', '用判断那句更准的备注');
+  assert.match(JSON.stringify(result), /本地图库/);
+});
+
+
+test('send_sticker 的工具描述不再点名默认人设的表情（示例中性化）', () => {
+  const description = tool('send_sticker').description;
+  assert.equal(description.includes('别墨迹'), false);
+  assert.equal(description.includes('大肥鱼'), false);
+  assert.match(description, /那行开头的备注名/);
+});
