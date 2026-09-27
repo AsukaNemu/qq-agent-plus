@@ -415,7 +415,8 @@ async function main() {
   assert.strictEqual(send3.body.message[0].data.id, '9001');
   assert.strictEqual(send3.body.message[1].data.text, '收到');
   const replyRunReq = llm.state.requests.at(-2);
-  assert.ok(replyRunReq.messages[1].content.includes('[引用 被引用者：被引用的原话]'), '引用原文被解析进上下文');
+  // 引用块带被引用那条的消息 id（Issue #16）：模型要靠它定位"在回哪一句"
+  assert.ok(replyRunReq.messages[1].content.includes('[引用#9001·被引用者：被引用的原话]'), '引用原文被解析进上下文');
   assert.strictEqual(app.store.findByMid('group:456', 9003).reply.senderId, '111', '引用对象 QQ 号已结构化存储');
   pass('引用解析与 reply 段发送正确');
 

@@ -27,7 +27,7 @@ import { initChannelPrices, refreshChannelFeed, removeChannelFeed, channelPriceS
 import { currentProviders, setProviderKey, testAllProviders, testOneProvider, testModelChat, fetchModelsFrom, upsertProvider, addModelsToProvider, removeModelFromProvider } from '../core/providers.js';
 import { scanModelsVision, visionResults, modelImageVerdict } from '../llm/vision-scan.js';
 import { builtinVisionResults } from '../llm/model-vision-docs.js';
-import { createEventBus, todayKey, shanghaiDayStart, sanitizeUserText } from '../core/util.js';
+import { createEventBus, todayKey, shanghaiDayStart, isSelfSender, sanitizeUserText } from '../core/util.js';
 import { assertCanSend } from '../core/access.js';
 import { isTimeActive } from '../core/time-gate.js';
 import { timeControlState, TIME_ZONE } from '../core/time-control.js';
@@ -806,6 +806,9 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         messageId: String(messageId),
         sender: String(senderName),
         senderId,
+        // 引用的是不是自己的消息：引用块里要标"我"（与历史行口径一致），
+        // 否则模型会把机器人自己的名片名当成别人（Issue #16：引用了自己的一条，答成"你发的啊"）。
+        self: isSelfSender(senderId, onebot.selfId),
         text: String(text).slice(0, 120)
       };
     } catch {
@@ -844,6 +847,7 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
               messageId: String(replySegment.data.id),
               sender: local.self ? (onebot.selfNickname || cfgNow.persona?.botName || '我') : local.senderName,
               senderId: local.self ? String(onebot.selfId || '') : String(local.senderId || ''),
+              self: Boolean(local.self),
               text: String(local.text || '').slice(0, 120)
             };
           }

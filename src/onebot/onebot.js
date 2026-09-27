@@ -2,7 +2,7 @@
 import WebSocket from 'ws';
 import fs from 'node:fs';
 import path from 'node:path';
-import { sanitizeUserText, escapeCqText } from '../core/util.js';
+import { sanitizeUserText, escapeCqText, formatQuoteRef } from '../core/util.js';
 
 // QQ 系统表情对照表：把「[表情14]」渲染成「[表情14 微笑]」，让模型知道对方发的是哪个表情。
 // 表来自容器内 QQ 自带的 sys-face-catalog.json，由 /home/ubuntu/export-face-names.sh 导出到数据目录。
@@ -453,13 +453,7 @@ export async function segmentsToText(segments, { resolveReply = null, resolveAtN
         let replyText = '';
         if (resolveReply) {
           try {
-            const info = await resolveReply(String(d.id));
-            if (info?.sender || info?.text) {
-              const parts = [];
-              if (info.sender) parts.push(info.sender);
-              if (info.text) parts.push(info.text);
-              replyText = `[引用 ${parts.join('：')}]`;
-            }
+            replyText = formatQuoteRef(await resolveReply(String(d.id)));
           } catch { /* 解析失败降级 */ }
         }
         out.push(replyText || '[引用消息]');

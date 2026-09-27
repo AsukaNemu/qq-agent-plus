@@ -21,7 +21,7 @@ import {
   tierToSlider as _tierToSlider
 } from '../core/tier-slider.js';
 export { _sliderToTier as sliderToTier, _tierToSlider as tierToSlider };
-import { formatFullTime, formatShortTime, sanitizeUserText, resolveSelfName } from '../core/util.js';
+import { formatFullTime, formatShortTime, formatQuoteRef, sanitizeUserText, resolveSelfName } from '../core/util.js';
 import { buildStickerContext, buildStickerStrategyHint } from '../onebot/stickers.js';
 
 // ── 系统提示 ─────────────────────────────────────────────────────────────
@@ -227,7 +227,7 @@ function qqSceneRules(grounded = false) {
       : '- 回复保持简短，符合群友语感；不要使用 Markdown 格式（**、#、代码块在 QQ 上会显示成乱码）。',
     '- 私聊被直接找通常要回，但也不用秒回；群聊更松散。',
     '- 有人明确冲着你说话（@ 你、问你问题、接你的话茬）时，默认要回一句——可以短、可以敷衍、可以不痛不痒，但别已读不回让人干等；只有明显与你无关或误 @ 时才不回。',
-    '- 带「引用/回复」的消息（如 `[引用 某群友：原文]`）表示这句话是在回应被引用的人；引用对象不是你时别抢话；只有引用的是你自己的消息、或文字里明确 @/提到你，才需要回应。',
+    '- 带「引用/回复」的消息（如 `[引用#102·某群友：原文]`）表示这句话是在回应被引用的人：`#102` 是被引用那条的消息 id，可以在历史里定位它；引用对象标着「我」时，引的就是你自己发过的话。引用对象不是你时别抢话；只有引用的是你自己的消息、或文字里明确 @/提到你，才需要回应。',
     '- 消息里的 `[卡片 QQ空间：标题 — 描述]` 是别人转发进来的分享（说说、文章、音乐等），方括号里就是可见的标题与描述；写着「你自己的动态」时，那就是你自己的空间动态被转进群了——可以自然接一句（认出来/意外/吐槽都行），别当没看见，也别把它当成图片去发表情。'
   ];
   if (vision) {
@@ -447,10 +447,10 @@ function formatEntry(m, { withId = true } = {}) {
   const adminTag = !m.self && senderId && senderId === String(getConfig().admin?.ownerUin || '').trim()
     ? '[管理员] '
     : '';
-  const replyPrefix = !String(m.text || '').startsWith('[引用 ')
-    && (m.reply?.text || m.reply?.sender)
-    ? `[引用 ${sanitizeUserText([m.reply?.sender, m.reply?.text].filter(Boolean).join('：'))}]`
-    : '';
+  // 实时链路（segmentsToText）已经把引用块写进 m.text，这里只兜底"只有结构化 reply"的存量记录；
+  // 两处走同一个 formatQuoteRef，保证带 #消息id、自己的引用标"我"。
+  // 前缀判定不依赖方括号内的空白：存档里是折叠过的 `[引用某人：原文]`，带空格判会漏（会重复贴一次引用）。
+  const replyPrefix = !String(m.text || '').startsWith('[引用') ? formatQuoteRef(m.reply) : '';
   const hasMid = m.mid !== null && m.mid !== undefined && String(m.mid) !== '';
   const idPrefix = withId && hasMid ? `#${m.mid} ` : '';
   return `[${formatShortTime(m.ts)}] ${idPrefix}${adminTag}${who}：${replyPrefix}${m.text}`;
@@ -661,7 +661,9 @@ function triggerLabels(entry, ctx) {
   if ((botName && lower.includes(botName)) || (nick && lower.includes(nick))) labels.push('提到我');
   if (selfNote && lower.includes(selfNoteLower)) labels.push('提到我（备注名）');
   if (/[?？]$/.test(text.trim()) || /[吗呢]/.test(text)) labels.push('提问');
-  if (text.startsWith('[引用 ')) labels.push('引用');
+  // 不带空格判：存档里的引用块是 `[引用某人：原文]`（方括号内空白被 sanitize 折叠过），
+  // 老写法 `startsWith('[引用 ')` 在真实消息上从来没命中过。
+  if (text.startsWith('[引用')) labels.push('引用');
   if (text.includes('[拍一拍]')) labels.push('拍一拍');
   return labels;
 }
@@ -770,7 +772,7 @@ export function buildUserPrompt(ctx) {
     parts.push('【生命周期续接】' + (staleNote ? staleNote + String.fromCharCode(10) : '')
       + '此前轮次已按原顺序放在上文；这里只处理本次新增消息，不要重复回复旧消息。');
   } else if (past.text) {
-    parts.push(`【过去状态】${staleNote ? staleNote + String.fromCharCode(10) : ''}以下是这个会话最近的聊天记录（按时间排序，你的发言标为"我"；这些都已经看过；带图的消息前有 #消息id，看图/收藏表情工具要用它）：\n${past.text}`);
+    parts.push(`【过去状态】${staleNote ? staleNote + String.fromCharCode(10) : ''}以下是这个会话最近的聊天记录（按时间排序，你的发言标为"我"；这些都已经看过；带图的消息前有 #消息id，看图/收藏表情工具要用它）。这里只带了最近 ${past.count} 条，#消息id 按时间递增，可以用它判断谁先谁后；要看更早的记录用 get_recent_messages 往前翻：\n${past.text}`);
   } else {
     parts.push('【过去状态】（暂无历史记录，这是你第一次参与这个会话）');
   }

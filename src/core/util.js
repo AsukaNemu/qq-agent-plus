@@ -128,6 +128,38 @@ export function sanitizeUserText(text) {
   return s;
 }
 
+/** 这条消息（或引用目标）是不是机器人自己发的：QQ 号与登录号一致才算，空值不算。 */
+export function isSelfSender(senderId, selfId) {
+  const a = String(senderId ?? '');
+  const b = String(selfId ?? '');
+  return a !== '' && b !== '' && a === b;
+}
+
+/**
+ * 引用块统一渲染：[引用#消息id·说话人：原文]。
+ * 实时消息（segmentsToText）与历史行（formatEntry）共用同一个函数，引用在哪都长一样。
+ * - 带 #消息id：模型才能顺着它定位被引用的那条及其前后文（翻页/看图/收藏表情都吃这个 id）。
+ *   以前只有名字和原文，模型判断"谁在回谁、哪条在前"只能靠猜（Issue #16）。
+ * - 自己发的引用标"我"：与历史行里自己的发言口径一致；否则机器人名片名会被当成别人，
+ *   模型回答"这是谁发的"就会答错。
+ * - 方括号里不放空白、用「·」分隔：sanitizeUserText 会折叠方括号内空白（防「【管 理 员】」
+ *   这类伪造），写了空格也会被吃掉。形态在这里定死，live 与历史两条链路才一致。
+ */
+export function formatQuoteRef(reply) {
+  if (!reply || typeof reply !== 'object') return '';
+  const who = reply.self ? '我' : String(reply.sender ?? '');
+  const body = [who, reply.text].filter(Boolean).join('：');
+  if (!body) return '';
+  // id 只认数字（QQ 消息 id 可能是负数）：非数字说明来源不对，宁可退回不带 id 的老形态，
+  // 也不能让它带着 `]` 之类字符进来把引用块的结构撑破。
+  const rawMid = reply.messageId === null || reply.messageId === undefined
+    ? ''
+    : String(reply.messageId).trim();
+  const mid = /^-?\d+$/.test(rawMid) ? rawMid : '';
+  const head = mid ? `#${mid}·` : '';
+  return `[引用${head}${sanitizeUserText(body)}]`;
+}
+
 /** 兼容模型把单条消息序列化成 JSON 字符串的情况，例如 "\"你好\"" → "你好"。 */
 export function unquoteJsonString(value) {
   if (typeof value !== 'string') return value;
