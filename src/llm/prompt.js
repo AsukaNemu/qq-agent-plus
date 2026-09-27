@@ -21,7 +21,7 @@ import {
   tierToSlider as _tierToSlider
 } from '../core/tier-slider.js';
 export { _sliderToTier as sliderToTier, _tierToSlider as tierToSlider };
-import { formatFullTime, formatShortTime, formatQuoteRef, sanitizeUserText, resolveSelfName } from '../core/util.js';
+import { formatFullTime, formatShortTime, quotePrefixFor, sanitizeUserText, resolveSelfName } from '../core/util.js';
 import { buildStickerContext, buildStickerStrategyHint } from '../onebot/stickers.js';
 
 // ── 系统提示 ─────────────────────────────────────────────────────────────
@@ -434,18 +434,6 @@ function participationText(level) {
   }
 }
 
-/**
- * 这一行需要补的引用块前缀（没有就返回空串）。
- * 实时链路（segmentsToText）已经把引用块写进 m.text；只有"结构化 reply 还在、正文里却没有"
- * 的存量记录（合并转发展开会整段覆盖正文）才由渲染时补，且用的是同一个 formatQuoteRef。
- * 判定按"正文是否已经以同一个前缀开头"，不再猜 `[引用 `（带空格的老形态在存档里是折叠过的）。
- */
-function quotePrefixFor(entry) {
-  const prefix = formatQuoteRef(entry?.reply);
-  if (!prefix) return '';
-  return String(entry?.text || '').startsWith(prefix) ? '' : prefix;
-}
-
 // withId：是否带 "#消息id" 前缀。id 只在需要引用/看图的场景展示（触发批、带图消息），
 // 纯文本历史行不带，避免整屏数字噪音。
 function formatEntry(m, { withId = true } = {}) {
@@ -788,7 +776,15 @@ export function buildUserPrompt(ctx) {
   } else if (past.text) {
     parts.push(`【过去状态】${staleNote ? staleNote + String.fromCharCode(10) : ''}以下是这个会话最近的聊天记录（按时间排序，越往下越新；你的发言标为"我"；这些都已经看过；每行的 #消息id 用来定位具体某条 —— 引用、看图、收藏表情、翻页工具都要用它，个别行如拍一拍没有 id）。这里只带了最近 ${past.count} 条；同一个会话里 #消息id 通常随时间递增，可以用它核对先后（遇到被补课的旧消息、或 id 跳号时，以行序为准）。要看更早的记录用 get_recent_messages 往前翻：\n${past.text}`);
   } else {
-    parts.push('【过去状态】（暂无历史记录，这是你第一次参与这个会话）');
+    // "这次没带历史"和"这个会话真的没有历史"必须分开说：前者（档位给 0 条、或字符预算
+    // 连最新一条都放不下）以前也报"你第一次参与这个会话"，模型会当新会话开场、
+    // 重复问已经聊过的事。只有在库里确实一条都没有时，才说第一次。
+    const hasAnyHistory = (() => {
+      try { return ctx.store.recent(ctx.chatKey, { limit: 1, readOnly: true }).length > 0; } catch { return false; }
+    })();
+    parts.push(hasAnyHistory
+      ? '【过去状态】（这次没有附带历史记录，只有下面的【本次唤醒】；需要更早的上下文就用 get_recent_messages 往前翻）'
+      : '【过去状态】（暂无历史记录，这是你第一次参与这个会话）');
   }
 
   // 记忆：只注入与本次对话相关群友的印象（触发者 + 最近活跃成员），控制 token

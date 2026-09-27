@@ -165,6 +165,24 @@ export function formatQuoteRef(reply) {
   return sanitizeUserText(`[引用${sanitizeUserText(body)}]`);
 }
 
+/**
+ * 这条记录需要补的引用块前缀（不需要就返回空串）；需要时返回 "引用块 + 正文" 的完整文本。
+ * 正常消息在 ingest 时就把引用块写进正文了；只有"结构化 reply 还在、正文里却没有"的记录
+ * （回复 + 合并转发卡片：展开转发时用展开文本整段覆盖了正文）需要在展示时补。
+ * 提示词渲染与工具/控制台返回都走它，同一个模型在两个窗口看到的形状才一致。
+ */
+export function quotePrefixFor(entry) {
+  const prefix = formatQuoteRef(entry?.reply);
+  if (!prefix) return '';
+  return String(entry?.text || '').startsWith(prefix) ? '' : prefix;
+}
+
+/** 展示用正文：正文里缺引用块时补上（其余情况原样返回）。 */
+export function textWithQuote(entry) {
+  const prefix = quotePrefixFor(entry);
+  return prefix ? `${prefix}${entry?.text ?? ''}` : String(entry?.text ?? '');
+}
+
 /** 兼容模型把单条消息序列化成 JSON 字符串的情况，例如 "\"你好\"" → "你好"。 */
 export function unquoteJsonString(value) {
   if (typeof value !== 'string') return value;

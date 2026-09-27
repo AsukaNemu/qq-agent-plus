@@ -317,3 +317,62 @@ test('collect_sticker：限频时不再白跑一次看图判断', async () => {
   assert.equal(judged, 0, '限频了就别再调模型');
   assert.match(JSON.stringify(result), /收藏太频繁/);
 });
+
+test('get_recent_messages / get_message_detail 与提示词同形：正文缺引用块时补上', async () => {
+  // 回复 + 合并转发卡片那种记录：展开转发时用展开文本整段覆盖了正文，引用块没了，
+  // 结构化 reply 还在。提示词渲染会补，工具也必须补，否则同一个模型两个窗口看到两种形状。
+  const quoted = { messageId: '5000', sender: '犊子', senderId: '888', self: true, text: '在吗' };
+  const overwritten = {
+    mid: '5001', id: 11, ts: Date.now(), self: false, senderId: '42', senderName: '阿卡林',
+    text: '[合并转发 共 2 条] 甲：在吗 / 乙：在',
+    reply: quoted
+  };
+  const already = {
+    mid: '5002', id: 12, ts: Date.now(), self: false, senderId: '42', senderName: '阿卡林',
+    text: '[引用#5000·我：在吗] 你发的啊',
+    reply: quoted
+  };
+  const plain = { mid: '5003', id: 13, ts: Date.now(), self: false, senderId: '42', senderName: '阿卡林', text: '普通一句', reply: null };
+  const f = context({
+    store: {
+      recent: () => [overwritten, already, plain],
+      findByMid: (_chatKey, mid) => (String(mid) === '5001' ? overwritten : null)
+    }
+  });
+
+  const list = JSON.parse((await tool('get_recent_messages').execute(f.ctx, { limit: 10 })).content);
+  const byMid = new Map(list.messages.map((m) => [String(m.messageId), m.text]));
+  assert.equal(byMid.get('5001'), '[引用#5000·我：在吗][合并转发 共 2 条] 甲：在吗 / 乙：在', '缺引用块的正文要补上');
+  assert.equal(byMid.get('5002'), '[引用#5000·我：在吗] 你发的啊', '已经带引用块的不能补第二遍');
+  assert.equal(byMid.get('5003'), '普通一句', '没有引用的照旧');
+
+  const detail = JSON.parse((await tool('get_message_detail').execute(f.ctx, { messageId: '5001' })).content);
+  assert.equal(detail.text, '[引用#5000·我：在吗][合并转发 共 2 条] 甲：在吗 / 乙：在');
+  assert.equal(detail.reply?.messageId, '5000', '结构化 reply 仍然原样返回');
+  assert.equal(detail.reply?.self, true);
+});
+
+test('过去状态：有历史但这次没带（档位 0 条）时，不说"你第一次参与"', async () => {
+  const { buildUserPrompt, buildPastState } = await import('../src/llm/prompt.js');
+  const { ChatStore } = await import('../src/core/store.js');
+  const { MemoryStore } = await import('../src/memory/memory.js');
+  const store = new ChatStore(0);
+  const chatKey = 'group:777001';
+  store.appendIncoming(chatKey, { mid: 6001, ts: Date.now() - 60000, senderId: '42', senderName: '阿卡林', text: '之前聊过的一句' });
+  store.drainUnread(chatKey);
+  const base = {
+    chatKey, kind: 'group', chatId: '777001', chatName: '测试群', store,
+    memory: new MemoryStore(), stickerEntries: [], triggerEntries: [],
+    selfNickname: '测试机', selfLastMessageAt: 0, lastMessageAt: Date.now(), recentCount: 1,
+    runSeq: 1, moreUnreadDuringRun: false, proactive: true
+  };
+  assert.equal(buildPastState(store, chatKey, { limit: 0 }).count, 0, '档位 0 条 → 一条历史都不带');
+
+  const limited = buildUserPrompt({ ...base, contextLimit: 0 });
+  assert.match(limited, /这次没有附带历史记录/, '有历史但没带 → 如实说明');
+  assert.equal(limited.includes('第一次参与这个会话'), false, '不能说成第一次');
+
+  const empty = buildUserPrompt({ ...base, chatKey: 'group:777002' });
+  assert.match(empty, /第一次参与这个会话/, '库里真没有历史时才说第一次');
+  store.close();
+});

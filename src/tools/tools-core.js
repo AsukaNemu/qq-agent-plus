@@ -67,7 +67,7 @@ async function stickerLookupHint(ctx, key) {
   }
 }
 
-import { normalizeMessageList, sanitizeUserText, unquoteJsonString } from '../core/util.js';
+import { normalizeMessageList, sanitizeUserText, textWithQuote, unquoteJsonString } from '../core/util.js';
 import { repairUnescapedStringQuotes } from '../core/json-repair.js';
 import { formatStickerList } from '../onebot/stickers.js';
 import { validateImageUrl, safeFetchBinary } from '../llm/safe-fetch.js';
@@ -601,7 +601,8 @@ export function buildToolDefs() {
             messageId: m.mid ?? undefined,
             time: new Date(m.ts).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }),
             sender: m.self ? '我' : sanitizeUserText(m.senderName),
-            text: m.text
+            // 与【过去状态】同一套渲染：正文缺引用块时补上（回复 + 合并转发卡片那类记录）
+            text: textWithQuote(m)
           }))
         });
       }
@@ -670,7 +671,8 @@ export function buildToolDefs() {
           time: new Date(entry.ts).toLocaleString('zh-CN', { hour12: false }),
           sender: entry.self ? '我' : sanitizeUserText(entry.senderName),
           senderId: entry.senderId,
-          text: entry.text,
+          // 正文与【过去状态】同形（缺引用块就补）；reply 仍是结构化原字段，供取 id 用
+          text: textWithQuote(entry),
           reply: entry.reply
         });
       }

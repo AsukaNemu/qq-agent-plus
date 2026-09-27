@@ -27,7 +27,7 @@ import { initChannelPrices, refreshChannelFeed, removeChannelFeed, channelPriceS
 import { currentProviders, setProviderKey, testAllProviders, testOneProvider, testModelChat, fetchModelsFrom, upsertProvider, addModelsToProvider, removeModelFromProvider } from '../core/providers.js';
 import { scanModelsVision, visionResults, modelImageVerdict } from '../llm/vision-scan.js';
 import { builtinVisionResults } from '../llm/model-vision-docs.js';
-import { createEventBus, todayKey, shanghaiDayStart, isSelfSender, sanitizeUserText } from '../core/util.js';
+import { createEventBus, todayKey, shanghaiDayStart, isSelfSender, sanitizeUserText, textWithQuote } from '../core/util.js';
 import { assertCanSend } from '../core/access.js';
 import { isTimeActive } from '../core/time-gate.js';
 import { timeControlState, TIME_ZONE } from '../core/time-control.js';
@@ -3295,7 +3295,8 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         const limit = Math.min(1048576, Math.max(1, Number(url.searchParams.get('limit')) || 1048576));
         const messages = store.recent(chatKey, { limit }).map((m) => ({
           id: m.id, mid: m.mid, ts: m.ts, senderId: m.senderId, senderName: m.senderName,
-          text: m.text, self: m.self, read: m.read, reply: m.reply,
+          // 与提示词同一套渲染：正文缺引用块时补上（回复 + 合并转发卡片那类记录）
+          text: textWithQuote(m), self: m.self, read: m.read, reply: m.reply,
           media: m.media || []
         }));
         return json(res, 200, { chatKey, messages });
