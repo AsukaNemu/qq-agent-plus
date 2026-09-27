@@ -183,6 +183,26 @@ export function textWithQuote(entry) {
   return prefix ? `${prefix}${entry?.text ?? ''}` : String(entry?.text ?? '');
 }
 
+/**
+ * 按字符数截断，但不切断代理对（emoji 是两个 UTF-16 码元）。
+ * 直接 slice 会在边界留下**孤立代理项**：JSON 里能表示，但整条请求会被模型网关判成
+ * Bad Request 400（2026-09-27 实测：记忆"新建印象"把天气播报里的 emoji 切成两半，
+ * 该成员永远建不出印象，控制台只看到"1 位失败"）。
+ */
+export function safeSlice(text, max) {
+  const s = String(text ?? '');
+  const limit = Math.max(0, Math.floor(Number(max) || 0));
+  if (s.length <= limit) return s;
+  const last = limit > 0 ? s.charCodeAt(limit - 1) : 0;
+  const cutsPair = last >= 0xd800 && last <= 0xdbff;   // 结尾正好是代理对的高位：少切一个
+  return s.slice(0, cutsPair ? limit - 1 : limit);
+}
+
+/** 剥掉孤立代理项（只可能来自错误的截断/拼接）。请求前兜底清理，避免整次调用 400。 */
+export function stripLoneSurrogates(text) {
+  return String(text ?? '').replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '');
+}
+
 /** 兼容模型把单条消息序列化成 JSON 字符串的情况，例如 "\"你好\"" → "你好"。 */
 export function unquoteJsonString(value) {
   if (typeof value !== 'string') return value;

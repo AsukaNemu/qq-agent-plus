@@ -6863,7 +6863,14 @@ function renderMemorySettingsSection(c) {
       </div>
     </div>
     <div class="field"><label>整理冷却时间（毫秒）</label><input type="number" id="cfg-mem-interval" min="1800000" step="600000" value="${esc(mem.consolidateMinIntervalMs ?? 21600000)}" /></div>
-    <div class="hint">条数超过阈值且距上次整理超过该冷却时间后，才会在运行结束后后台整理。默认 6 小时（21600000 毫秒）。</div>`;
+    <div class="hint">条数超过阈值且距上次整理超过该冷却时间后，才会在运行结束后后台整理。默认 6 小时（21600000 毫秒）。</div>
+    <div class="field-row" style="align-items:start">
+      <div class="field"><label>发现新人的最少发言条数</label>
+        <input type="number" id="cfg-mem-discover-min" min="1" max="500" value="${esc(mem.discoverMinMessages ?? 20)}" /></div>
+      <div class="field"><label>单次最多发现几人</label>
+        <input type="number" id="cfg-mem-discover-max" min="1" max="20" value="${esc(mem.discoverMaxMembers ?? 3)}" /></div>
+    </div>
+    <div class="hint">自动整理时，把"最近 2000 条里发言达到这个条数、且还没有任何印象"的群友挑出来，读他的发言提炼新印象（单次最多挑上面那个人数）。<b>调高会让新人更难进入记忆</b>，调到 20 以上时发言少的人可能永远不会有印象；模型自己很少主动记，这里是主要入口。默认 20 条 / 3 人。</div>`;
 }
 
 function renderExperimentalSettingsSection(c) {
@@ -10977,7 +10984,10 @@ async function saveConfig({ quiet = false } = {}) {
       useChatModel: chk('#cfg-mem-usechat', c.memory?.useChatModel !== false),
       provider: val('#cfg-mem-provider', c.memory?.provider || '').trim(),
       model: val('#cfg-mem-model', c.memory?.model || '').trim(),
-      consolidateMinIntervalMs: Number(val('#cfg-mem-interval', c.memory?.consolidateMinIntervalMs ?? 21600000)) || 21600000
+      consolidateMinIntervalMs: Number(val('#cfg-mem-interval', c.memory?.consolidateMinIntervalMs ?? 21600000)) || 21600000,
+      // 发现新人的门槛：这两项决定"聊天多但零印象"的人能不能进记忆
+      discoverMinMessages: Math.max(1, Math.round(Number(val('#cfg-mem-discover-min', c.memory?.discoverMinMessages ?? 20))) || 20),
+      discoverMaxMembers: Math.max(1, Math.round(Number(val('#cfg-mem-discover-max', c.memory?.discoverMaxMembers ?? 3))) || 3)
     };
   }
 

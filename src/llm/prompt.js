@@ -21,7 +21,7 @@ import {
   tierToSlider as _tierToSlider
 } from '../core/tier-slider.js';
 export { _sliderToTier as sliderToTier, _tierToSlider as tierToSlider };
-import { formatFullTime, formatShortTime, quotePrefixFor, sanitizeUserText, resolveSelfName } from '../core/util.js';
+import { formatFullTime, formatShortTime, quotePrefixFor, safeSlice, sanitizeUserText, resolveSelfName } from '../core/util.js';
 import { buildStickerContext, buildStickerStrategyHint } from '../onebot/stickers.js';
 
 // ── 系统提示 ─────────────────────────────────────────────────────────────
@@ -591,7 +591,7 @@ export function buildPastState(store, chatKey, { excludeIds = [], limit = null }
   const selected = [];
   const lines = [];
   for (const m of [...messages].reverse()) {
-    const line = formatEntry({ ...m, text: m.text.slice(0, 2000) }, { withId: true });
+    const line = formatEntry({ ...m, text: safeSlice(m.text, 2000) }, { withId: true });
     if (line.length + 1 > remaining) break;
     remaining -= line.length + 1;
     lines.unshift(line);

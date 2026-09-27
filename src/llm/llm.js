@@ -1,6 +1,7 @@
 // OpenAI 兼容 Chat Completions 客户端（非流式）。
 // 支持工具调用、usage 统计和可选模型。
 import { getConfig } from '../core/config.js';
+import { stripLoneSurrogates } from '../core/util.js';
 import { resolveOfficialPrice, resolveModelPrice, priceAt } from '../pricing/model-prices.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { assertTimeAllowed, watchTimeWindow } from '../core/time-gate.js';
@@ -242,6 +243,17 @@ export async function chatCompletionWithRetry(args, retries = 2) {
  * 返回 { message, usage, raw }；usage 形如 { prompt_tokens, completion_tokens, total_tokens }。
  * overrides: { baseUrl, apiKey, model, timeoutMs } 可选，用于记忆整理专用模型等场景。
  */
+/** 请求体里的内容清洗：字符串直接清，多模态数组逐段清 text（图片段原样保留）。 */
+function cleanContentForRequest(content) {
+  if (typeof content === 'string') return stripLoneSurrogates(content);
+  if (Array.isArray(content)) {
+    return content.map((part) => (part && typeof part.text === 'string'
+      ? { ...part, text: stripLoneSurrogates(part.text) }
+      : part));
+  }
+  return content;
+}
+
 export async function chatCompletion({
   messages,
   tools = null,
@@ -261,7 +273,12 @@ export async function chatCompletion({
   const body = {
     model: api.model,
     messages: messages.map(({ role, content, tool_calls, tool_call_id, name, reasoning_content }) => ({
-      role, content, ...(tool_calls ? { tool_calls } : {}),
+      role,
+      // 请求前兜底：字符串里若有孤立代理项（只可能来自把 emoji 切两半的错误截断），
+      // 整次调用会被模型网关判成 400 Bad Request（2026-09-27 实测：记忆"新建印象"因此永远失败）。
+      // 统一在这里清掉，别指望每个拼提示词的地方都记得用 safeSlice。
+      content: cleanContentForRequest(content),
+      ...(tool_calls ? { tool_calls } : {}),
       ...(tool_call_id ? { tool_call_id } : {}), ...(name ? { name } : {}),
       // 关思考时不能把上一轮的 reasoning_content 带回去（有的网关会 400）
       ...(!thinkingOff && reasoning_content ? { reasoning_content } : {})

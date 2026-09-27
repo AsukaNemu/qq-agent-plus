@@ -1138,6 +1138,31 @@ try {
       + (emptyOk ? '' : ` -> ${posted?.asr?.maxPerHour}`));
   }
 
+  // 记忆门槛：控制台「记忆整理」里能自己设"发现新人的最少发言条数 / 单次最多发现几人"，
+  // 保存要落到 memory.*（聊天多却零印象的人进不进记忆，就取决于这两项）
+  {
+    let posted = null;
+    vm.runInContext("state.settingsSection = 'memory';", ctx);
+    vm.runInContext(`state.config = ${JSON.stringify({ ...cfg, memory: { ...(cfg.memory || {}), discoverMinMessages: 20, discoverMaxMembers: 3 } })};`, ctx);
+    document.querySelector('#cfg-mem-discover-min').value = '8';
+    document.querySelector('#cfg-mem-discover-max').value = '5';
+    const before = sandbox.fetch;
+    sandbox.fetch = async (url, options) => {
+      if (String(url).includes('/api/config') && options?.method === 'POST') {
+        posted = JSON.parse(options.body);
+        return { ok: true, status: 200, json: async () => ({ config: { ...cfg, memory: posted.memory } }), text: async () => '' };
+      }
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+    };
+    try { await ctx.saveConfig({ quiet: true }); } catch { /* 看 patch */ }
+    sandbox.fetch = before;
+    const memOk = posted?.memory?.discoverMinMessages === 8 && posted?.memory?.discoverMaxMembers === 5
+      && code.includes('id="cfg-mem-discover-min"') && code.includes('id="cfg-mem-discover-max"');
+    memOk ? pass++ : fail++;
+    console.log('  ' + (memOk ? 'OK   ' : 'FAIL ') + '设置页：记忆整理可设"发现新人的最少发言条数/单次最多发现几人"并落到 memory.*'
+      + (memOk ? '' : ` -> ${JSON.stringify(posted?.memory)}`));
+  }
+
   // 每小时上限的收口口径要与显示/后端一致：非正数按 12、超上限夹到 200（不是夹到 1）
   {
     const cases = [

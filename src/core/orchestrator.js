@@ -95,6 +95,7 @@ function proactiveWindowState(raw, now) {
 }
 
 
+import { safeSlice } from './util.js';
 import { canRun } from './access.js';
 import { assertTimeAllowed, isTimeActive, TimeControlError, watchTimeWindow, withTimeScope } from './time-gate.js';
 import { vendorOfConfig } from '../pricing/model-prices.js';
@@ -1155,7 +1156,7 @@ export class Orchestrator {
         reply ? `本轮回复：${reply}` : ''
       ].filter(Boolean).join('；');
       draft = {
-        topic: previous?.topic || String(triggerEntries?.[0]?.text || reply).slice(0, 200),
+        topic: previous?.topic || safeSlice(String(triggerEntries?.[0]?.text || reply), 200),
         summary: [previous?.summary, turnSummary].filter(Boolean).join('；').slice(-1200)
       };
       session.handoffFallback = true;
@@ -1476,11 +1477,11 @@ export class Orchestrator {
 
     const wakeLead = wakeNote
       ? (String(wakeNote).startsWith('【系统提醒】')
-        ? String(wakeNote).slice(0, 300)
-        : `这是你自己之前安排的：${String(wakeNote).slice(0, 300)}。现在时间到了，看看当前情况决定要不要说话。`)
+        ? safeSlice(String(wakeNote), 300)
+        : `这是你自己之前安排的：${safeSlice(String(wakeNote), 300)}。现在时间到了，看看当前情况决定要不要说话。`)
       : '（主动机会）群里已经安静了一会儿。';
     const selfWakeOn = cfg.proactive?.selfWakeEnabled !== false;
-    const pacedLead = (wakeNote ? `你之前给自己留过话：${String(wakeNote).slice(0, 200)}\n` : '')
+    const pacedLead = (wakeNote ? `你之前给自己留过话：${safeSlice(String(wakeNote), 200)}\n` : '')
       + '这些消息是攒着等你按自己的节奏来看的。决定要不要说话、说什么；不想接就安静结束'
       + (selfWakeOn
         ? '，并用 schedule_wake 给自己安排下一次醒来的时间（比如几分钟后、或二三十分钟后）。'
@@ -1722,7 +1723,7 @@ export class Orchestrator {
           toolCall: {
             name,
             args: result.parsedArgs ?? safeParse(argsRaw),
-            result: contentStr.slice(0, 2000),
+            result: safeSlice(contentStr, 2000),
             isError: !!result.isError,
             ...(result.errorCode ? { errorCode: result.errorCode } : {}),
             ...(result.argumentsRepaired ? { argumentsRepaired: true } : {})
@@ -1868,7 +1869,7 @@ export class Orchestrator {
     if (timer.unref) timer.unref();
     // kind 只用于派发时按开关作废（followUp=补话 / selfWake=模型自安排 / paced=自主节奏），不进提示词
     const label = kind || (paced ? 'paced' : 'selfWake');
-    this.scheduledWakes.set(chatKey, { at, note: String(note || '').slice(0, 200), timer, paced, kind: label });
+    this.scheduledWakes.set(chatKey, { at, note: safeSlice(String(note || ''), 200), timer, paced, kind: label });
     return at;
   }
 
@@ -2312,7 +2313,7 @@ export class Orchestrator {
       .map((s) => String(s ?? '').trim())
       .filter(Boolean)
       .slice(0, maxKeep)
-      .map((content) => content.slice(0, 120));
+      .map((content) => safeSlice(content, 120));
 
     return this.memory.replaceMember(chatKey, mem.userId, mem.name, clean);
   }
@@ -2373,7 +2374,7 @@ export class Orchestrator {
     const sample = (this.store.recent(chatKey, { limit: 2000 }) || [])
       .filter((m) => !m.self && String(m.senderId) === uid)
       .slice(-40)
-      .map((m) => String(m.text || '').slice(0, 200))
+      .map((m) => safeSlice(String(m.text || ''), 200))
       .filter(Boolean);
 
     return {

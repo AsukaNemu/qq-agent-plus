@@ -67,7 +67,7 @@ async function stickerLookupHint(ctx, key) {
   }
 }
 
-import { normalizeMessageList, sanitizeUserText, textWithQuote, unquoteJsonString } from '../core/util.js';
+import { normalizeMessageList, safeSlice, sanitizeUserText, textWithQuote, unquoteJsonString } from '../core/util.js';
 import { repairUnescapedStringQuotes } from '../core/json-repair.js';
 import { formatStickerList } from '../onebot/stickers.js';
 import { validateImageUrl, safeFetchBinary } from '../llm/safe-fetch.js';
@@ -535,7 +535,7 @@ export function buildToolDefs() {
           if (typeof ctx.scheduleWake !== 'function') return err('当前环境不支持自主唤醒');
           const m = Number(args.minutes);
           if (!Number.isFinite(m) || m < 5 || m > 240) return err('minutes 需要是 5~240 之间的数字');
-          const note = String(args.note ?? '').slice(0, 200);
+          const note = safeSlice(String(args.note ?? ''), 200);
           const at = ctx.scheduleWake(Math.round(m * 60000), note);
           const when = new Date(at).toLocaleTimeString('zh-CN', { hour12: false });
           return ok({ scheduled: true, minutes: Math.round(m), at: when, note, hint: '到点会作为主动机会唤醒你；不需要再回复这条结果。' });
@@ -1062,7 +1062,7 @@ export function buildToolDefs() {
         required: ['summary']
       },
       async execute(ctx, args) {
-        const summary = String(args.summary ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
+        const summary = safeSlice(String(args.summary ?? '').replace(/\s+/g, ' ').trim(), 300);
         if (!summary) return err('summary 不能为空');
         const draft = { summary };
         for (const key of [
@@ -1103,7 +1103,7 @@ export async function executeTool(defs, ctx, name, argsJson) {
   const parsed = parseToolArguments(name, raw);
   if (parsed.error) {
     return {
-      content: `错误：工具 ${name} 的参数不是合法 JSON：${String(raw).slice(0, 200)}`
+      content: `错误：工具 ${name} 的参数不是合法 JSON：${safeSlice(String(raw), 200)}`
         + '。请重新调用：字符串值必须放在双引号内，字符串里的双引号必须转义；不要重复已经成功的外部操作。',
       isError: true,
       errorCode: 'INVALID_TOOL_ARGUMENTS',
