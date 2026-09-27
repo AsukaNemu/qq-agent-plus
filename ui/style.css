@@ -794,7 +794,7 @@ html.boot-show .loading-overlay { opacity: 1; }
   vertical-align: middle;
 }
 .usage-cost-bar i { display: block; height: 100%; background: var(--accent); opacity: .75; }
-/* 手动添加提供商：两列模型行给足呼吸空间 */
+/* 添加提供商：两列模型行给足呼吸空间 */
 .model-rows-table input { padding: 8px 10px; font-size: 12.5px; }
 .model-rows-table th { padding: 6px 8px; }
 .model-rows-table td { padding: 6px 8px; }
@@ -3071,3 +3071,37 @@ dialog { margin: auto; max-height: 88vh; }
 }
 #update-notice-result { margin: 0; font-size: 12px; }
 #update-notice-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+
+/* 思考模式分段选择（ChatGPT 式：一排档位块，选中项实心高亮）。 */
+.seg {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  width: 100%;
+  box-sizing: border-box;
+}
+.seg.dim { opacity: .45; }
+.seg-item {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 6px 4px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.3;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .12s ease, color .12s ease;
+}
+.seg-item:hover { background: rgba(127, 127, 127, .14); }
+.seg-item.selected {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .22);
+}

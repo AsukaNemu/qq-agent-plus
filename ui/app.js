@@ -4868,7 +4868,7 @@ async function renderProbeResult(res) {
     const hx = $('#probe-status');
     const vendorLabel = vendor || state.modelPrices?.currentVendor || '';
     if (!vendorLabel) {
-      if (hx) { hx.textContent = '拿不到当前渠道名，无法写成渠道价：请先在「手动添加提供商」里配好渠道。'; hx.className = 'hint error'; }
+      if (hx) { hx.textContent = '拿不到当前渠道名，无法写成渠道价：请先在「模型 API」里配好渠道。'; hx.className = 'hint error'; }
       return;
     }
     const patch = {};
@@ -5557,7 +5557,7 @@ function openBatchPriceModal() {
   if (!lefts.length) {
     modelModalShell({
       head: '批量自定义价格编辑',
-      body: '<div class="empty-hint">模型目录为空：请先在「模型 API」页签添加提供商。</div>',
+      body: '<div class="empty-hint">模型目录为空：请先在「模型 API」页签选服务预设或填地址添加。</div>',
       foot: ''
     });
     return;
@@ -6260,7 +6260,7 @@ function renderProviderColumn(c) {
   // 提供商目录为空时给出可直接操作的指引。
   if (!provs.length) {
     return '<div class="muted" style="padding:10px;font-size:12px;line-height:1.7">'
-      + '目录还是空的。先在右边「手动添加提供商」填上接口地址和 API Key，'
+      + '目录还是空的。先在「模型 API」里选服务预设（或直接填地址和 API Key），'
       + '点「获取列表」拉取模型，或直接手动填模型 id 后点「确认添加」。'
       + '不知道去哪弄？DeepSeek、智谱、Kimi、OpenAI 等官网的开放平台都能申请到 Key。'
       + '</div>';
@@ -6416,7 +6416,7 @@ function renderApiSection(c) {
   const currentModelDisplay = (currentProvider?.modelNames || {})[c.api.model] || c.api.model;
   return `
     <h3 id="settings-api">模型 API</h3>
-    <div class="field"><label>模型目录</label>
+    <div class="field"><label>当前模型（点击切换）</label>
       <div style="display:flex;gap:8px">
         <input type="text" id="cfg-model-pick" readonly placeholder="点击选择模型" value="${esc(currentModelDisplay || '')}" style="flex:1;cursor:pointer" />
         <button class="btn btn-small" id="test-provider-btn">测试连通性</button>
@@ -6427,18 +6427,34 @@ function renderApiSection(c) {
       <input type="hidden" id="cfg-provider" value="${esc(c.api.provider || '')}" />
       <input type="hidden" id="cfg-model" value="${esc(c.api.model || '')}" />
     </div>
+    <div class="field"><label>服务预设</label>
+      <select id="new-service-preset">${modelServiceOptionsHtml(c.api?.baseUrl)}</select>
+      <div class="hint" id="new-service-note">${esc(initialServiceNote(c))}</div>
+    </div>
     <div class="field-row">
-      <div class="field"><label>当前 Base URL</label>
+      <div class="field"><label>Base URL（可改）</label>
         <div style="display:flex;gap:8px">
-          <input type="text" id="cfg-baseurl" readonly value="${esc(c.api.baseUrl)}" style="flex:1" />
+          <input type="text" id="cfg-baseurl" placeholder="例如 https://api.deepseek.com/v1 或自建网关" value="${esc(c.api.baseUrl)}" style="flex:1" />
           <button class="btn btn-small" id="fetch-current-models-btn">获取列表</button>
         </div></div>
-      <div class="field"><label>当前 API Key</label>
+      <div class="field"><label>API Key</label>
         <div style="display:flex;gap:8px">
-          <input type="password" id="cfg-apikey" value="${esc((currentProvider?.hasKey || c.api.apiKey) ? '******' : '')}" placeholder="输入新 Key 可替换；留空保存则保持原 Key" autocomplete="new-password" style="flex:1" />
+          <input type="password" id="cfg-apikey" value="${esc((currentProvider?.hasKey || c.api.apiKey) ? '******' : '')}" placeholder="输入新 Key 可替换；留空/掩码 = 保持原 Key" autocomplete="new-password" style="flex:1" />
           <button class="btn btn-small" id="cfg-apikey-toggle" type="button">显示</button>
         </div></div>
     </div>
+    <div class="hint" id="model-fetch-note">有的服务需要先填好这家的 API Key，「获取列表」才拉得到（换服务后请填这家的 Key）；如果填了 Key 仍拉不到，就是该服务不提供模型列表，直接在下面「模型 id」手填一行或多行，点「确认添加 / 保存」即可。</div>
+    <div class="field"><label>模型 id（拉不到列表时手填；已有的模型用上面「当前模型」切换）</label>
+      <div id="model-rows"></div>
+      <div style="display:flex;gap:8px;margin-top:6px">
+        <button class="btn btn-small" id="add-model-row-btn">＋ 添加一行</button>
+      </div>
+      <div class="hint">先点「获取列表」从服务商官网拉；拉不到（或清单里没有想要的）就在这里手填一行或多行，点「确认添加 / 保存」加进当前服务的模型列表。</div></div>
+    <div class="field-row">
+      <div class="field"><button class="btn btn-primary" id="confirm-add-provider-btn">确认添加 / 保存</button></div>
+      <div class="field"><button class="btn btn-danger" id="delete-model-btn">删除模型…</button></div>
+    </div>
+    <div class="hint" id="provider-action-hint">${esc(state.lastProviderHint || '')}</div>
     <div class="field-row">
       <div class="field"><label>温度</label><input type="number" id="cfg-temperature" step="0.1" min="0" max="2" value="${esc(c.api.temperature)}" /></div>
       <div class="field"><label>单次运行最大工具轮数</label><input type="number" id="cfg-maxrounds" min="1" max="40" value="${esc(c.api.maxRounds)}" /></div>
@@ -6448,6 +6464,39 @@ function renderApiSection(c) {
     <div class="checkbox-row"><input type="checkbox" id="cfg-vision" ${c.api.vision !== false ? 'checked' : ''} />
       <label for="cfg-vision">图片输入（关闭则移除看图工具，模型只会看到 [图片] 占位符）</label>
       <span id="vision-switch-hint" class="muted" style="font-size:12px;align-self:center"></span></div>
+    <details class="collapsible settings-advanced" id="thinking-advanced">
+      <summary>高级：思考模式${esc(thinkingAdvancedSummary(c))}</summary>
+      <div style="padding-top:8px">
+        <div class="field" id="thinking-controls">
+          <label>思考模式</label>
+          <div id="thinking-seg-slot">${isSplitThinking(c) ? splitRowsHtml(c).inner : thinkingSegHtml(c)}</div>
+          <div id="thinking-split-note">${isSplitThinking(c) ? splitRowsHtml(c).note : ''}</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:6px;flex-wrap:wrap">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:normal">
+              <input type="checkbox" id="cfg-thinking-split" ${isSplitThinking(c) ? 'checked' : ''} />
+              <span>按任务分别设档（聊天 / 判断总结 / 写作 / 其他）</span>
+            </label>
+            <label id="cfg-thinking-default-row" style="display:${isSplitThinking(c) ? 'none' : 'flex'};align-items:center;gap:6px;font-size:13px;font-weight:normal">
+              <input type="checkbox" id="cfg-thinking-default" ${thinkingIsDefault(c) ? 'checked' : ''} />
+              <span>跟随服务商默认（不干预）</span>
+            </label>
+            <button class="btn btn-small" id="probe-thinking-btn" type="button" style="flex:none">测试思考能力</button>
+          </div>
+          <div class="hint" id="thinking-hint">${esc(thinkingHintText(c))}</div>
+          <div class="hint" id="probe-thinking-result" style="${state.lastProbeNote ? '' : 'display:none'}">${esc(state.lastProbeNote || '')}</div>
+        </div>
+        <div class="field">
+          <label>自定义档位映射（JSON，表外/自定义渠道用）</label>
+          <textarea id="cfg-thinking-params" rows="3" style="width:100%" placeholder='例如 {"low":{"reasoning_effort":"low"},"high":{"reasoning_effort":"high"}}。填了这里，档位条就会按这些键出现（仅对表外/自定义渠道生效）。'>${esc(extraBodyText(c.api?.thinkingParams))}</textarea>
+          <div class="hint" id="cfg-thinking-params-hint">键是档位（off/low/medium/high/max），值是请求里要带的字段；内置预设渠道走内置形状，不受这里影响。</div>
+        </div>
+        <div class="field">
+          <label>额外请求参数（JSON）</label>
+          <textarea id="cfg-extra-body" rows="3" style="width:100%" placeholder='例如 {"reasoning":{"enabled":false}}。留空 = 不附加。'>${esc(extraBodyText(c.api?.extraBody))}</textarea>
+          <div class="hint" id="cfg-extra-body-hint">填了就以最高优先级合并进每次请求（JSON 对象）；服务商文档里的怪参数都填这里，不用等适配。</div>
+        </div>
+      </div>
+    </details>
     <div class="settings-divider"></div>
 
     <h3>成本怎么算</h3>
@@ -6540,30 +6589,7 @@ function renderApiSection(c) {
     </div>
     </details>
 
-    <div class="settings-divider"></div>
-
-    <h3>手动添加提供商</h3>
-    <div class="field"><label>Base URL（可填写）</label>
-      <div style="display:flex;gap:8px">
-        <input type="text" id="new-baseurl" placeholder="例如 https://api.deepseek.com/v1 或 https://open.bigmodel.cn/api/paas/v4" value="${esc(currentProvider?.baseURL || c.api.baseUrl || '')}" style="flex:1" />
-        <button class="btn btn-small" id="fetch-models-btn">获取列表</button>
-      </div></div>
-    <div class="field"><label>API Key（手动添加时填写）</label>
-      <div style="display:flex;gap:8px">
-        <input type="password" id="new-apikey" placeholder="sk-..." autocomplete="new-password" style="flex:1" />
-        <button class="btn btn-small" id="new-apikey-toggle" type="button">显示</button>
-      </div></div>
-    <div class="field"><label>模型 id（两列：左侧模型 ID，右侧模型目录中显示的名字；可添加多行）</label>
-      <div id="model-rows"></div>
-      <div style="display:flex;gap:8px;margin-top:6px">
-        <button class="btn btn-small" id="add-model-row-btn">＋ 添加一行</button>
-      </div>
-      <div class="hint">「获取列表」会从上面的 Base URL 拉取模型，并在弹窗里勾选加入列表。</div></div>
-    <div class="field-row">
-      <div class="field"><button class="btn btn-primary" id="confirm-add-provider-btn">确认添加</button></div>
-      <div class="field"><button class="btn btn-danger" id="delete-model-btn">删除模型…</button></div>
-    </div>
-    <div class="hint" id="provider-action-hint"></div>`;
+`;
 }
 
 
@@ -8553,6 +8579,234 @@ function stickerMaxSelectOptions(current) {
   return choices.map((n) => `<option value="${n}" ${n === value ? 'selected' : ''}>${n} 条</option>`).join('');
 }
 
+// 模型连接的「服务预设」展示层（行为以服务端 src/core/provider-presets.js 为准；
+// 这里只负责下拉选项、预填地址、档位提示的文案。档位/来源与那边一一对应）。
+const MODEL_SERVICES_UI = [
+  { id: 'deepseek', label: 'DeepSeek 官方', baseUrl: 'https://api.deepseek.com/v1', hosts: ['api.deepseek.com'], levels: ['off', 'low', 'high', 'max'], canDisable: true,
+    defaultNote: '默认开启思考、档位默认 high（官方文档）',
+    note: '可关闭；档位 low / high / max。模型例：deepseek-flash（V4.1 Flash，支持图片）/ deepseek-v4-pro。' },
+  { id: 'zhipu', label: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', hosts: ['open.bigmodel.cn', 'api.z.ai'], levels: ['off', 'low', 'high', 'max'], canDisable: true,
+    note: '档位 low/high/max（GLM-5.3 系官方枚举）；默认开启思考、档位默认 max。GLM-5.3 系与 4.7/4.5V 强制思考、关不掉（会被安全兜底忽略）。模型例：glm-5.3-flash（若「获取列表」拉不到就手填）。' },
+  { id: 'qwen', label: '通义千问（百炼）', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', hosts: ['dashscope.aliyuncs.com'], levels: ['off', 'low', 'medium', 'max'], canDisable: true,
+    defaultNote: '混合思考模型随模型；qwen3.8-omni-flash 默认 xhigh',
+    note: '官方文档：enable_thinking 可关；档位仅 qwen3.8-omni-flash 支持（低/中/最高=low/medium/max，官方把 high/max 映射到 xhigh）；其他模型用 thinking_budget（走「额外请求参数」）。模型例：qwen-max / qwen3-*。' },
+  { id: 'openai', label: 'OpenAI 官方', baseUrl: 'https://api.openai.com/v1', hosts: ['api.openai.com'], levels: ['off', 'low', 'medium', 'high', 'max'], canDisable: null,
+    defaultNote: '默认随模型（如 gpt-5.5 默认 medium）',
+    note: '档位与 none（关闭）随模型不同（官方文档）；不支持 none 的模型会 400，会被安全兜底自动去掉重试。模型例：gpt-5.x 系列。' },
+  { id: 'siliconflow', label: '硅基流动', baseUrl: 'https://api.siliconflow.cn/v1', hosts: ['api.siliconflow.cn'], levels: ['off', 'high', 'max'], canDisable: true,
+    defaultNote: '推理模式下默认 high（复杂 Agent 请求自动用 max）',
+    note: '官方文档：enable_thinking 可关、thinking_budget 限思维链（走「额外请求参数」）；档位仅 high/max（点名 DeepSeek-V4、V4-Flash、GLM-5.2；low/medium 官方映射到 high）。模型形如 deepseek-ai/DeepSeek-V3、Qwen/Qwen3-*。' },
+  { id: 'commandcode', label: 'Command Code（聚合网关 / Token Plan）', baseUrl: 'https://api.commandcode.ai/provider/v1', hosts: ['api.commandcode.ai'], levels: ['low', 'medium', 'high', 'max'], canDisable: false,
+    note: '实测：关不掉思考——界面不提供「关闭」，要最低思考选「低」（发的是同一个值）。默认档位高于 low。模型例：deepseek/deepseek-v4.1-flash、z-ai/glm-5.3-flash。' },
+  { id: 'opencode', label: 'OpenCode（Go 订阅）', baseUrl: 'https://opencode.ai/zen/go/v1', hosts: ['opencode.ai', 'api.opencode.ai'], levels: ['low', 'medium', 'high', 'max'], canDisable: null,
+    defaultNote: '随模型（官方客户端文档：OpenAI 系约 none…xhigh）',
+    note: '官方文档（客户端）：用 OpenAI 风格 reasoningEffort（Anthropic 系则是 thinking.budgetTokens）；但 Zen/Go 的 API 请求字段未文档化——先「测试思考能力」实测，不接受会被安全兜底自动去掉。Go 订阅模型名形如 opencode-go/xxx；非 Go 订阅改地址为 https://zen/v1 见官网。' },
+  { id: 'custom', label: '自定义 / 自建（OpenAI 兼容）', baseUrl: '', hosts: [], levels: [], canDisable: null,
+    note: '表外渠道：填你的服务地址；档位可在「自定义档位映射」里自定义（填了就会出档位条），其余参数用「额外请求参数」。' }
+];
+function modelServiceOptionsHtml(currentUrl) {
+  // 默认选中"当前地址对应的那家"（认不出来就选「自定义」）——避免下拉停在第一项、
+  // 与实际在用的服务不一致（2026-09-27 控制台实测发现：实际用 Command Code，
+  // 下拉却默认停在 DeepSeek 官方，容易被误读）。
+  const matched = currentUrl ? uiServiceOfUrl(currentUrl) : null;
+  const sel = matched ? matched.id : (currentUrl ? 'custom' : 'deepseek');
+  return MODEL_SERVICES_UI.map((s) => `<option value="${s.id}"${s.id === sel ? ' selected' : ''}>${esc(s.label)}</option>`).join('');
+}
+/** 服务预设下方的初始说明：与默认选中项一致（能认出当前地址就显示那家的说明）。 */
+function initialServiceNote(c) {
+  const matched = uiServiceOfUrl(c.api?.baseUrl);
+  if (matched) return matched.note;
+  return '先选一家（自动填好 Base URL，可改）；没有你的服务商就选「自定义 / 自建」，直接填下面的地址。模型点「获取列表」从服务商官网拉。';
+}
+function hostOfUrl(u) {
+  try { return new URL(String(u || '').trim()).host.toLowerCase(); } catch { return ''; }
+}
+/** 思考区随界面上的 Base URL 联动（未保存也要跟着变）：切换供应商后段位与提示必须换家。 */
+function syncThinkingUi(url, paramsOverride, splitOverride) {
+  const fake = {
+    api: {
+      ...(state.config?.api || {}),
+      baseUrl: String(url || ''),
+      ...(paramsOverride !== undefined ? { thinkingParams: paramsOverride } : {})
+    },
+    providers: state.providers || []
+  };
+  // 分设开关：优先用显式传参；否则以"界面上勾选状态"为准（用户刚勾的先生效，不用等保存）；再退回配置。
+  const splitCbNow = document.getElementById('cfg-thinking-split');
+  const split = splitOverride !== undefined
+    ? Boolean(splitOverride)
+    : (splitCbNow ? splitCbNow.checked : isSplitThinking(fake));
+  if (splitCbNow) splitCbNow.checked = split;
+  const rows = split ? splitRowsHtml(fake) : null;
+  const slot = document.getElementById('thinking-seg-slot');
+  if (slot) slot.innerHTML = split ? rows.inner : thinkingSegHtml(fake);
+  const splitNote = document.getElementById('thinking-split-note');
+  if (splitNote) splitNote.innerHTML = split ? rows.note : '';
+  const defRow = document.getElementById('cfg-thinking-default-row');
+  if (defRow) defRow.style.display = split ? 'none' : 'flex';
+  const hint = document.getElementById('thinking-hint');
+  if (hint) hint.textContent = thinkingHintText(fake);
+  const seg = document.getElementById('thinking-seg');
+  const cb = document.getElementById('cfg-thinking-default');
+  if (seg && cb && !split) seg.classList.toggle('dim', cb.checked);
+  const summary = document.querySelector('#thinking-advanced summary');
+  if (summary) summary.textContent = `高级：思考模式${thinkingAdvancedSummary(fake)}`;
+}
+function uiServiceOfUrl(url) {
+  try {
+    const host = new URL(String(url || '')).host.toLowerCase();
+    return MODEL_SERVICES_UI.find((s) => (s.hosts || []).includes(host)) || null;
+  } catch { return null; }
+}
+/** 「跟随服务商默认」= 配置里没有具体的思考要求（'on'/true/未设置）。 */
+/** 当前地址对应的设置原值：优先"该供应商自己的条"，没有退回全局（与服务端 effectiveThinkingRaw 同口径）。 */
+function currentThinkingRaw(c) {
+  const host = hostOfUrl(c.api?.baseUrl);
+  const map = c.api?.thinkingByService;
+  if (host && map && typeof map === 'object' && map[host] != null) return map[host];
+  return c.api?.thinking;
+}
+function thinkingIsDefault(c) {
+  const v = currentThinkingRaw(c);
+  return v === 'on' || v === true || v == null;
+}
+/** 折叠行摘要：不展开也能看到当前思考设置（默认视图保持一行，不打扰）。 */
+function thinkingAdvancedSummary(c) {
+  const v = currentThinkingRaw(c);
+  const level = { low: '低', medium: '中', high: '高', max: '最高' }[v];
+  const label = v && typeof v === 'object' ? '按用途分设'
+    : v === 'off' ? '关闭' : level || '跟随服务商默认';
+  const extra = c.api?.extraBody && Object.keys(c.api.extraBody || {}).length ? ' · 额外参数已设置' : '';
+  // 探测结论只在"记录的地址与当前地址同一家"时显示（与提示行同口径）——否则换了供应商还挂着"已实测"。
+  const probeRec = c.api?.thinkingProbe && c.api.thinkingProbe.ok !== false
+    && hostOfUrl(c.api.thinkingProbe.baseUrl) === hostOfUrl(c.api?.baseUrl) ? c.api.thinkingProbe : null;
+  const probe = probeRec ? ' · 已实测' : '';
+  return `（当前：${label}${extra}${probe}）`;
+}
+/** 思考模式分段选择（ChatGPT 式：一排档位块，选中项实心高亮）。
+ *  只列当前渠道可用的档位；「跟随服务商默认」不是强度轴上的一个点，单独用勾选框表达；
+ *  渠道没有可调档位时（未实测 / 官方不支持）不出控件，如实说明。 */
+/** 当前渠道可用的档位（内置=预设清单；自定义/表外=映射里的键）。 */
+function thinkingStops(c) {
+  const service = uiServiceOfUrl(c.api?.baseUrl);
+  const params = c.api?.thinkingParams && typeof c.api.thinkingParams === 'object' && !Array.isArray(c.api.thinkingParams)
+    ? c.api.thinkingParams : null;
+  const levels = (!service || service.id === 'custom') && params
+    ? ['off', 'low', 'medium', 'high', 'max'].filter((lv) => params[lv] && typeof params[lv] === 'object')
+    : (service ? service.levels : []);
+  return levels.filter((l) => ['off', 'low', 'medium', 'high', 'max'].includes(l));
+}
+/** 渲染一条档位分段。withOn=true 时最左多一格「默认」（"聊天单独设档"的两条用它表达各行的默认）。 */
+function renderThinkingSeg(id, stops, cur, service, withOn) {
+  const offApprox = Boolean(service && service.canDisable === false);
+  const label = (v2) => (v2 === 'on' ? '默认'
+    : v2 === 'off' ? (offApprox ? '关闭（近似）' : '关闭')
+      : ({ low: '低', medium: '中', high: '高', max: '最高' }[v2] || v2));
+  const title = (v2) => (v2 === 'off' && offApprox
+    ? '该渠道不支持真正关闭思考：将按最低档发送（实测）'
+    : (v2 === 'on' ? '跟随服务商默认（不干预）' : ''));
+  const all = withOn ? ['on', ...stops] : stops;
+  return `<div class="seg" id="${id}" data-stops="${all.join(',')}" role="group" aria-label="思考模式">
+      ${all.map((v2) => `<button type="button" class="seg-item${v2 === cur ? ' selected' : ''}" data-v="${v2}"${title(v2) ? ` title="${title(v2)}"` : ''}>${label(v2)}</button>`).join('')}
+    </div>`;
+}
+/** 统一模式（一条管全部任务，配「跟随服务商默认」勾选）。 */
+function thinkingSegHtml(c) {
+  const service = uiServiceOfUrl(c.api?.baseUrl);
+  const stops = thinkingStops(c);
+  const rawNow = currentThinkingRaw(c);
+  const isPerPurpose = Boolean(rawNow && typeof rawNow === 'object' && !Array.isArray(rawNow));
+  if (stops.length < 2 && !isPerPurpose) {
+    return `<div class="hint" style="margin:2px 0 0">${service && service.canDisable === false
+      ? '这条渠道没有可调的思考档位（该服务不支持调整/关闭思考）。'
+      : '未实测：先点「测试思考能力」探明可用档位，或用下方「额外请求参数」自定义。'}</div>`;
+  }
+  const cur = typeof rawNow === 'string' && stops.includes(rawNow)
+    ? rawNow
+    : (stops.includes('off') ? 'off' : stops[0]);
+  const tips = isPerPurpose
+    ? `<div class="hint" style="margin:2px 0 0">当前为按用途分别设置（${esc(Object.entries(rawNow).map(([k, v3]) => `${k}=${v3}`).join(' / '))}）；勾下面的「聊天单独设档」可继续按用途调整，或点档位改为统一值。</div>`
+    : '';
+  return `${tips}${renderThinkingSeg('thinking-seg', stops, cur, service, false)}`;
+}
+/** 是否"聊天单独设档"（配置里该供应商存的是按用途对象）。 */
+function isSplitThinking(c) {
+  const raw = currentThinkingRaw(c);
+  return Boolean(raw && typeof raw === 'object' && !Array.isArray(raw));
+}
+/** 按任务分设的四条：聊天 / 判断·总结 / 写作 / 其他；每条都含「默认」。 */
+const THINKING_PURPOSES = [
+  { key: 'chat', label: '聊天' },
+  { key: 'judge', label: '判断·总结' },
+  { key: 'write', label: '写作' },
+  { key: 'default', label: '其他任务' }
+];
+function splitThinkingRowsHtml(c) {
+  const service = uiServiceOfUrl(c.api?.baseUrl);
+  const stops = thinkingStops(c);
+  const raw = (currentThinkingRaw(c) && typeof currentThinkingRaw(c) === 'object') ? currentThinkingRaw(c) : {};
+  // 现有值可能不在该渠道的档位里（典型：聊天设了 off，但渠道关不掉）——映射到等价档显示：
+  // off 在关不掉的渠道上等价于最低档 low（运行时发的就是同一个值），其余未知值按「默认」。
+  const normStop = (val) => {
+    const all = ['on', ...stops];
+    if (all.includes(val)) return val;
+    if (val === 'off') return stops.includes('off') ? 'off' : (stops[0] || 'on');
+    return 'on';
+  };
+  const rows = THINKING_PURPOSES.map((p) => ({
+    key: p.key,
+    label: p.label,
+    html: renderThinkingSeg(`thinking-seg-${p.key}`, stops, normStop(raw[p.key]), service, true)
+  }));
+  return {
+    rows,
+    note: stops.includes('off') ? ''
+      : '<div class="hint" style="margin:2px 0 0">该渠道不提供「关闭」：原先的「关闭」设置会显示并发送为最低档（同一个值，等价）。</div>'
+  };
+}
+/** 分设模式整块内容的 HTML（行标签 + 档位条）。 */
+function splitRowsHtml(c) {
+  const { rows, note } = splitThinkingRowsHtml(c);
+  return {
+    inner: rows.map((r) => `<div style="display:flex;align-items:center;gap:8px;margin-top:4px"><span class="muted" style="font-size:12px;white-space:nowrap;min-width:64px">${esc(r.label)}</span><div style="flex:1;min-width:0" id="thinking-seg-slot-${r.key}">${r.html}</div></div>`).join(''),
+    note
+  };
+}
+function thinkingHintText(c) {
+  const service = uiServiceOfUrl(c.api?.baseUrl);
+  // 探测结果只在"记录的地址与当前地址同一家"时展示——换了供应商就该显示"未实测"。
+  const urlHost = hostOfUrl(c.api?.baseUrl);
+  const providerProbe = (() => {
+    const p = (c.providers || []).find((x) => x.id === c.api?.provider);
+    return p && p.thinkingProbe?.ok !== false && hostOfUrl(p.baseURL) === urlHost ? p.thinkingProbe : null;
+  })();
+  const apiProbe = c.api?.thinkingProbe && c.api.thinkingProbe.ok !== false
+    && hostOfUrl(c.api.thinkingProbe.baseUrl) === urlHost ? c.api.thinkingProbe : null;
+  const probe = providerProbe || apiProbe || null;
+  const bits = [];
+  const hasParams = c.api?.thinkingParams && Object.keys(c.api.thinkingParams || {}).length > 0;
+  bits.push(service
+    ? `渠道：${service.label}${service.defaultNote ? `（${service.defaultNote}）` : ''}。${service.note}`
+    : (hasParams
+      ? `渠道未识别：档位来自你的「自定义档位映射」（${Object.keys(c.api.thinkingParams).join('/')}）。`
+      : '渠道未识别：在下面「自定义档位映射」里填 {\"low\":{\"reasoning_effort\":\"low\"}, …} 就能用档位条；或用「额外请求参数」整体自定义。'));
+  bits.push('每个供应商各自一条设置：这里改的只对当前这家生效。');
+  bits.push('勾「按任务分别设档」：聊天（含其中的工具调用）/ 判断·总结（记忆整理、身份与关系评估、收不收表情）/ 写作（每日动态、空间互动文案）/ 其他任务，各选各的档；每行选「默认」= 跟随服务商默认。');
+  if (probe) {
+    const when = probe.checkedAt ? new Date(probe.checkedAt).toLocaleDateString() : '';
+    bits.push(probe.canDisable === true ? `已实测（${when}）：可关闭。`
+      : probe.canDisable === false ? `已实测（${when}）：忽略关闭参数，思考仍在发生。`
+        : `已实测（${when}）：未配置关闭参数，无法据此断定。`);
+  } else {
+    bits.push('未实测：点右侧「测试思考能力」按真实请求探明。');
+  }
+  return bits.join(' ');
+}
+function extraBodyText(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj) || Object.keys(obj).length === 0) return '';
+  try { return JSON.stringify(obj, null, 2); } catch { return ''; }
+}
+
 // 语音识别服务预设：选一下把 provider / 地址填好，模型一律**从服务商官网拉**（见「获取模型列表」）——
 // 写死的模型名会过时（用户明确要求：硅基流动上了新的免费模型，预设跟不上）。
 // 事实核查于 2026-09-26（见 docs/CONFIG-EXAMPLES.md）：硅基流动的 SenseVoiceSmall 标"免费"、国内可直连；
@@ -9955,7 +10209,6 @@ function bindSettingsEvents(c) {
   // 点「显示」→ 替换成真实 Key 明文；点「隐藏」→ 重新变回掩码 "******"。
   const pwdToggles = [
     ['cfg-apikey-toggle', 'cfg-apikey'],
-    ['new-apikey-toggle', 'new-apikey'],
     ['cfg-ds-searchkey-toggle', 'cfg-ds-searchkey'],
     ['cfg-zhipu-key-toggle', 'cfg-zhipu-key'],
     ['cfg-bocha-key-toggle', 'cfg-bocha-key'],
@@ -10035,6 +10288,13 @@ function bindSettingsEvents(c) {
   // 点击文本框弹出选择模态框（无“选择”按钮）
   const modelPickInput = $('#cfg-model-pick');
   if (modelPickInput) modelPickInput.addEventListener('click', () => openModelPicker());
+  // 模型服务区的提示统一走这里：写 state + DOM，loadSettings() 重渲染后仍能显示
+  // （此前保存成功会顺手重渲染，把刚写好的提示清掉，用户看不到结果）。
+  function setProviderHint(text) {
+    state.lastProviderHint = String(text || '');
+    const el = document.getElementById('provider-action-hint');
+    if (el) el.textContent = state.lastProviderHint;
+  }
   // 拿当前 API Key 的真实值：如果输入框里是用户刚输入的新 Key（非掩码非空），优先用；否则向后端取
   async function currentApiKey() {
     const input = $('#cfg-apikey');
@@ -10086,7 +10346,7 @@ function bindSettingsEvents(c) {
   if (fetchCurrentBtn) fetchCurrentBtn.addEventListener('click', async () => {
     const btn = fetchCurrentBtn;
     const base = $('#cfg-baseurl')?.value.trim() || '';
-    if (!base) { $('#provider-action-hint').textContent = '当前 Base URL 为空'; return; }
+    if (!base) { setProviderHint('当前 Base URL 为空'); return; }
     btn.textContent = '拉取中…';
     try {
       const key = await currentApiKey();
@@ -10094,31 +10354,24 @@ function bindSettingsEvents(c) {
         method: 'POST',
         body: JSON.stringify({ baseUrl: base, apiKey: key })
       });
-      openModelAddModal(base, key, r.models || []);
+      const models = r.models || [];
+      setProviderHint(models.length
+        ? `已拉取 ${models.length} 个模型：在弹窗里勾选加入；清单里没有的可在下面「模型 id」手填。`
+        : '该地址返回了空列表：请在下面「模型 id」里手动填模型名（例：见服务预设下方的说明）。');
+      openModelAddModal(base, key, models);
       btn.textContent = '获取列表';
     } catch (e) {
       btn.textContent = '获取列表';
-      $('#provider-action-hint').textContent = `拉取失败：${e.message}`;
-    }
-  });
-
-  const fetchModelsBtn = $('#fetch-models-btn');
-  if (fetchModelsBtn) fetchModelsBtn.addEventListener('click', async () => {
-    const btn = fetchModelsBtn;
-    const base = $('#new-baseurl')?.value.trim() || '';
-    const key = $('#new-apikey')?.value.trim() || '';
-    if (!base) { $('#provider-action-hint').textContent = '请先填写 Base URL'; return; }
-    btn.textContent = '拉取中…';
-    try {
-      const r = await api('/api/providers/fetch-models', {
-        method: 'POST',
-        body: JSON.stringify({ baseUrl: base, apiKey: key })
-      });
-      openModelAddModal(base, key, r.models || []);
-      btn.textContent = '获取列表';
-    } catch (e) {
-      btn.textContent = '获取列表';
-      $('#provider-action-hint').textContent = `拉取失败：${e.message}`;
+      const msg = String(e?.message ?? e);
+      // 把"为什么拉不到"说清楚：401/403 基本都是 Key 不对（换服务后旧 Key 不会沿用）；
+      // 404/无列表则是该服务不提供清单，让用户去手填，而不是以为功能坏了。
+      const isAuth = /HTTP 40[13]|令牌|invalid|unauthorized|authentication|API key/i.test(msg);
+      const isNoList = /HTTP 404|not found|no models|not support/i.test(msg);
+      setProviderHint(isAuth
+        ? `拉取失败：${msg} —— 多半是 Key 不对：换服务后请填这家的 API Key（旧 Key 不会自动沿用），或确认这家是否给这个地址发了 Key。`
+        : isNoList
+          ? `拉取失败：${msg} —— 该服务可能不提供模型列表，请在下面「模型 id」里手动填（例：见服务预设下方的说明）。`
+          : `拉取失败：${msg}`);
     }
   });
 
@@ -10160,22 +10413,163 @@ function bindSettingsEvents(c) {
 
   const confirmAddProviderBtn = $('#confirm-add-provider-btn');
   if (confirmAddProviderBtn) confirmAddProviderBtn.addEventListener('click', async () => {
-    const baseUrl = $('#new-baseurl').value.trim();
-    const apiKey = $('#new-apikey').value.trim();
+    const norm = (u) => String(u || '').trim().replace(/[/]+$/, '');
+    const baseUrl = $('#cfg-baseurl').value.trim();
+    const rawKey = $('#cfg-apikey').value.trim();
     const models = modelRows.map((r) => ({ id: r.id.trim(), name: (r.name || r.id).trim() })).filter((m) => m.id);
-    if (!baseUrl) { $('#provider-action-hint').textContent = '请填写 Base URL'; return; }
-    if (!apiKey) { $('#provider-action-hint').textContent = '请填写 API Key（提供商必须带密钥才能测试连通性/在线探测图片能力）'; return; }
-    if (!models.length) { $('#provider-action-hint').textContent = '请至少添加一个模型（先点「获取列表」勾选，或手动填一行）'; return; }
+    const pid = $('#cfg-provider')?.value || '';
+    // 先按选中项找；没有选中项（直接填地址的部署）就按地址匹配已有提供商——
+    // 否则这类部署"给当前服务补个模型"会被误要求填 Key（2026-09-27 实测）。
+    const cur = (state.providers || []).find((x) => x.id === pid)
+      || (state.providers || []).find((x) => norm(x.baseURL) === norm(baseUrl));
+    // 空/掩码 = 沿用已保存的 Key（合并块里预填的就是它）；只有填了新明文才覆盖。
+    const keyKept = !rawKey || rawKey === '******';
+    if (!baseUrl) { setProviderHint('请填写 Base URL'); return; }
+    if (keyKept && !(cur && norm(cur.baseURL) === norm(baseUrl) && cur.hasKey)) {
+      setProviderHint('请填写 API Key（新服务必须带密钥）'); return;
+    }
+    if (!models.length) { setProviderHint('请至少添加一个模型（先点「获取列表」勾选，或手动填一行）'); return; }
     try {
-      const r = await api('/api/providers', { method: 'POST', body: JSON.stringify({ baseUrl, apiKey, models }) });
-      $('#provider-action-hint').textContent = r.created ? '已添加新提供商，并自动切换为当前模型。' : '该 Base URL 已存在，模型已合并进该提供商。';
+      const preset = document.querySelector('#new-service-preset')?.value || '';
+      const apiKey = keyKept ? '' : rawKey;
+      const r = await api('/api/providers', { method: 'POST', body: JSON.stringify({ baseUrl, apiKey, models, preset }) });
+      setProviderHint(r.created ? '已添加并切换为当前服务。' : '已保存（同地址合并模型，Key 未改动）。');
       modelRows = [{ id: '', name: '' }];
       renderModelRows();
-      $('#new-baseurl').value = '';
-      $('#new-apikey').value = '';
       setTimeout(() => loadSettings(), 500);
     } catch (e) {
-      $('#provider-action-hint').textContent = `添加失败：${e.message}`;
+      setProviderHint(`添加失败：${e.message}`);
+    }
+  });
+
+  const newServicePreset = $('#new-service-preset');
+  if (newServicePreset) newServicePreset.addEventListener('change', () => {
+    const svc = MODEL_SERVICES_UI.find((x) => x.id === newServicePreset.value);
+    const note = $('#new-service-note');
+    const input = $('#cfg-baseurl');
+    const oldHost = hostOfUrl(input?.value || '');
+    if (svc && svc.id === 'custom' && input) {
+      // 选「自定义」= 我要填自己的地址：清空地址框，思考区随之切到"未识别"的说明，
+      // 而不是继续显示上一家的档位与提示（2026-09-28 实测反馈）。
+      input.value = '';
+    } else if (svc && svc.baseUrl && input) {
+      input.value = svc.baseUrl;
+    }
+    const newHost = hostOfUrl(input?.value || '');
+    if (note) note.textContent = svc ? svc.note : '';
+    // 换了主机：Key 框里的掩码属于旧服务，清掉并提示——否则会拿旧 Key 去请求新服务，
+    // 表现为"获取列表失败/401"，用户会误以为"这家拉不到列表"（2026-09-27 实测反馈）。
+    const keyBox = $('#cfg-apikey');
+    const hostChanged = oldHost !== newHost;
+    if (keyBox && keyBox.value === '******' && oldHost && hostChanged) {
+      keyBox.value = '';
+      if (note) {
+        note.textContent = newHost
+          ? `${svc ? svc.note : ''}（换了服务：请填这家的 API Key）`
+          : `${svc ? svc.note : ''}（请填你的服务地址与 API Key）`;
+      }
+    }
+    syncThinkingUi(input?.value || '');
+  });
+
+  // 思考模式分段选择：委托到稳定容器（两条档位条随供应商切换会重建，委托保证点击始终有效）。
+  // 点段位=显式选择：统一模式下自动取消「跟随默认」；分设模式下两条互不影响。
+  const thinkingControls = $('#thinking-controls');
+  const thinkingDefaultCb = $('#cfg-thinking-default');
+  const thinkingSplitCb = $('#cfg-thinking-split');
+  if (thinkingControls) {
+    thinkingControls.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('.seg-item');
+      if (!btn) return;
+      const seg = btn.closest('.seg');
+      seg?.querySelectorAll('.seg-item').forEach((b) => b.classList.toggle('selected', b === btn));
+      if (seg && seg.id === 'thinking-seg' && thinkingDefaultCb && !(thinkingSplitCb && thinkingSplitCb.checked)) {
+        thinkingDefaultCb.checked = false;
+        seg.classList.remove('dim');
+      }
+      state.thinkingTouched = true;
+    });
+  }
+  if (thinkingDefaultCb) {
+    thinkingDefaultCb.addEventListener('change', () => {
+      const seg = document.getElementById('thinking-seg');
+      if (seg) seg.classList.toggle('dim', thinkingDefaultCb.checked);
+      state.thinkingTouched = true;
+    });
+    // 初始置灰同步不算"用户动过控件"
+    const seg0 = document.getElementById('thinking-seg');
+    if (seg0) seg0.classList.toggle('dim', thinkingDefaultCb.checked);
+  }
+  if (thinkingSplitCb) {
+    thinkingSplitCb.addEventListener('change', () => {
+      state.thinkingTouched = true;
+      // 勾/取消即时重建两条档位条（不用等保存）
+      syncThinkingUi($('#cfg-baseurl')?.value || '', undefined, thinkingSplitCb.checked);
+    });
+  }
+  // 地址变化（选预设/手改）→ 思考区立即跟着换家，不用等保存
+  const baseUrlInputForThink = $('#cfg-baseurl');
+  if (baseUrlInputForThink) baseUrlInputForThink.addEventListener('input', () => syncThinkingUi(baseUrlInputForThink.value));
+  // 自定义档位映射：边填边预览（解析失败就按空处理，不打断输入）
+  const thinkingParamsInput = $('#cfg-thinking-params');
+  if (thinkingParamsInput) thinkingParamsInput.addEventListener('input', () => {
+    let parsed;
+    try {
+      const raw = thinkingParamsInput.value.trim();
+      const o = raw ? JSON.parse(raw) : {};
+      parsed = (o && typeof o === 'object' && !Array.isArray(o)) ? o : {};
+    } catch { parsed = {}; }
+    syncThinkingUi($('#cfg-baseurl')?.value || '', parsed);
+  });
+
+  const probeThinkingBtn = $('#probe-thinking-btn');
+  if (probeThinkingBtn) probeThinkingBtn.addEventListener('click', async () => {
+    const out = $('#probe-thinking-result');
+    const show = (text) => {
+      state.lastProbeNote = text;   // 落到 state：设置页重渲染后结果还在，不再闪一下就没
+      if (out) { out.textContent = text; out.style.display = ''; }
+    };
+    if (out) { out.textContent = '探测中…（发一条最小请求）'; out.style.display = ''; }
+    try {
+      // 用"你此刻选中的档位"实测（不用先保存）：勾了跟随默认按配置走，否则取当前段位；
+      // 额外参数也按输入框现值（解析失败则退回已保存值）。
+      const cbNow = document.querySelector('#cfg-thinking-default');
+      const segNow = document.querySelector('#thinking-seg .seg-item.selected');
+      const thinkingNow = cbNow && cbNow.checked ? 'on' : (segNow?.dataset.v || undefined);
+      let extraNow;
+      try {
+        const raw = String(document.querySelector('#cfg-extra-body')?.value || '').trim();
+        if (raw) extraNow = JSON.parse(raw);
+      } catch { /* 输入框 JSON 非法：忽略，探测按已保存值走 */ }
+      const rawKeyNow = String(document.querySelector('#cfg-apikey')?.value || '').trim();
+      const r = await api('/api/providers/probe-thinking', {
+        method: 'POST',
+        body: JSON.stringify({
+          providerId: state.config?.api?.provider || '',
+          model: state.config?.api?.model || '',
+          thinking: thinkingNow,
+          extraBody: extraNow,
+          baseUrl: String(document.querySelector('#cfg-baseurl')?.value || '').trim(),
+          apiKey: (rawKeyNow && rawKeyNow !== '******') ? rawKeyNow : ''
+        })
+      });
+      show(r?.result?.note || '完成');
+      // 不整页 loadSettings()：那会把刚填、还没保存的地址/Key/档位抹掉（实测反馈）。
+      // 只把探测结论并入本地状态，再就地刷新思考区（提示/摘要/档位条）。
+      const res = r?.result || {};
+      if (state.config?.api) {
+        state.config.api.thinkingProbe = {
+          checkedAt: Date.now(),
+          ok: res.ok === true,
+          canDisable: (res.canDisable === undefined ? null : res.canDisable),
+          reasoningTokens: Number(res.reasoningTokens) || 0,
+          note: String(res.note || '').slice(0, 300),
+          baseUrl: String(document.querySelector('#cfg-baseurl')?.value || '').trim()
+        };
+      }
+      syncThinkingUi(String(document.querySelector('#cfg-baseurl')?.value || '').trim());
+    } catch (e) {
+      show(`失败：${e.message}`);
     }
   });
 
@@ -10584,7 +10978,7 @@ function openPersonaCreateModal() {
 function openModelPicker() {
   const providers = state.providers || [];
   if (!providers.length) {
-    $('#provider-hint').textContent = '模型目录为空：请先在下方的“手动添加提供商”里添加。';
+    $('#provider-hint').textContent = '还没有模型：请先在「模型 API」里选服务预设或填地址，再点「获取列表」添加。';
     return;
   }
   const overlay = modelModalShell({
@@ -10643,7 +11037,7 @@ function openModelPicker() {
 function openMemoryModelPicker() {
   const providers = state.providers || [];
   if (!providers.length) {
-    $('#mem-model-hint').textContent = '模型目录为空：请先到「模型 API」页签添加提供商。';
+    $('#mem-model-hint').textContent = '模型目录为空：请先到「模型 API」页签选服务预设或填地址添加。';
     return;
   }
   const overlay = modelModalShell({
@@ -11156,6 +11550,63 @@ async function saveConfig({ quiet = false } = {}) {
     const priceCached = priceEditable ? (Number(val('#cfg-price-cached', 0)) || 0) : (Number(c.api.priceCachedPerM) || 0);
     patch.api = {
       vision: chk('#cfg-vision', c.api.vision !== false),
+      // 思考模式：每供应商独立（thinkingByService[主机]）。只有用户真的动过控件才写，
+      // 避免"保存别的字段"顺手改动；全局 api.thinking 保持不动（作为未配置供应商的兜底）。
+      // 勾了「聊天单独设档」→ 存 {chat, default} 对象（各任务按用途取，与你手写的配置同形）；
+      // 否则存单个语义值（'on' = 跟随服务商默认）。
+      thinkingByService: (() => {
+        const map = c.api?.thinkingByService || {};
+        if (!state.thinkingTouched) return map;
+        const host = hostOfUrl(val('#cfg-baseurl', c.api?.baseUrl) || c.api?.baseUrl);
+        if (!host) return map;
+        const segVal = (id) => document.querySelector(`#${id} .seg-item.selected`)?.dataset.v || '';
+        if (document.querySelector('#cfg-thinking-split')?.checked) {
+          const obj = {};
+          for (const key of ['chat', 'judge', 'write', 'default']) {
+            obj[key] = segVal(`thinking-seg-${key}`) || 'on';
+          }
+          return { ...map, [host]: obj };
+        }
+        const cb = document.querySelector('#cfg-thinking-default');
+        if (cb && cb.checked) return { ...map, [host]: 'on' };
+        const v = segVal('thinking-seg');
+        if (v) return { ...map, [host]: v };
+        return map;
+      })(),
+      // 自定义档位映射：非法 JSON 保留原值；清空要"真删"——deepMerge 只并集不删键，
+      // 必须走 __replace__ 整体替换（否则删掉的键/清空动作永远不生效，实测）。
+      thinkingParams: (() => {
+        const node = document.querySelector('#cfg-thinking-params');
+        if (!node) return c.api?.thinkingParams || {};   // 控件不在场（保存其他区块）→ 原值
+        const raw = node.value.trim();
+        if (!raw) return { __replace__: {} };
+        try {
+          const o = JSON.parse(raw);
+          if (o && typeof o === 'object' && !Array.isArray(o)) return { __replace__: o };
+          throw new Error('not-object');
+        } catch {
+          const h = document.querySelector('#cfg-thinking-params-hint');
+          if (h) { h.textContent = 'JSON 解析失败：已保留原值。格式示例：{"low":{"reasoning_effort":"low"}}'; h.className = 'hint error'; }
+          return c.api.thinkingParams || {};
+        }
+      })(),
+      // 高级逃生口：非法 JSON 保留原值；同样要能"清空"（__replace__）——否则配错一个会让所有
+      // 请求 400 的 extraBody 从界面上永远清不掉（实测）。
+      extraBody: (() => {
+        const node = document.querySelector('#cfg-extra-body');
+        if (!node) return c.api?.extraBody || {};   // 控件不在场（保存其他区块）→ 原值
+        const raw = node.value.trim();
+        if (!raw) return { __replace__: {} };
+        try {
+          const o = JSON.parse(raw);
+          if (o && typeof o === 'object' && !Array.isArray(o)) return { __replace__: o };
+          throw new Error('not-object');
+        } catch {
+          const h = document.querySelector('#cfg-extra-body-hint');
+          if (h) { h.textContent = 'JSON 解析失败：已保留原值。格式示例：{"reasoning":{"enabled":false}}'; h.className = 'hint error'; }
+          return c.api.extraBody || {};
+        }
+      })(),
       temperature: Number(val('#cfg-temperature', c.api.temperature)) || 0.8,
       maxRounds: Number(val('#cfg-maxrounds', c.api.maxRounds)) || 12,
       maxRunTokens: clampInt(
@@ -11521,6 +11972,11 @@ async function saveConfig({ quiet = false } = {}) {
 
   const data = await api('/api/config', { method: 'POST', body: JSON.stringify(patch) });
   state.config = data.config;
+  state.thinkingTouched = false;
+  // 思考区（摘要/提示/段位）跟着新配置立即刷新——否则"改了但摘要还是旧值"（2026-09-27 实测）。
+  if (document.getElementById('thinking-seg-slot')) {
+    syncThinkingUi(val('#cfg-baseurl', state.config?.api?.baseUrl) || state.config?.api?.baseUrl || '');
+  }
   syncGraduatedFeatureNavigation(state.config);
   if (!quiet) setStatusLabel('#model-label', `模型：${state.config.api.model || '未设置'}`);
   return data;
