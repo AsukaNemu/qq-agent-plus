@@ -434,6 +434,18 @@ function participationText(level) {
   }
 }
 
+/**
+ * 这一行需要补的引用块前缀（没有就返回空串）。
+ * 实时链路（segmentsToText）已经把引用块写进 m.text；只有"结构化 reply 还在、正文里却没有"
+ * 的存量记录（合并转发展开会整段覆盖正文）才由渲染时补，且用的是同一个 formatQuoteRef。
+ * 判定按"正文是否已经以同一个前缀开头"，不再猜 `[引用 `（带空格的老形态在存档里是折叠过的）。
+ */
+function quotePrefixFor(entry) {
+  const prefix = formatQuoteRef(entry?.reply);
+  if (!prefix) return '';
+  return String(entry?.text || '').startsWith(prefix) ? '' : prefix;
+}
+
 // withId：是否带 "#消息id" 前缀。id 只在需要引用/看图的场景展示（触发批、带图消息），
 // 纯文本历史行不带，避免整屏数字噪音。
 function formatEntry(m, { withId = true } = {}) {
@@ -447,10 +459,7 @@ function formatEntry(m, { withId = true } = {}) {
   const adminTag = !m.self && senderId && senderId === String(getConfig().admin?.ownerUin || '').trim()
     ? '[管理员] '
     : '';
-  // 实时链路（segmentsToText）已经把引用块写进 m.text，这里只兜底"只有结构化 reply"的存量记录；
-  // 两处走同一个 formatQuoteRef，保证带 #消息id、自己的引用标"我"。
-  // 前缀判定不依赖方括号内的空白：存档里是折叠过的 `[引用某人：原文]`，带空格判会漏（会重复贴一次引用）。
-  const replyPrefix = !String(m.text || '').startsWith('[引用') ? formatQuoteRef(m.reply) : '';
+  const replyPrefix = quotePrefixFor(m);
   const hasMid = m.mid !== null && m.mid !== undefined && String(m.mid) !== '';
   const idPrefix = withId && hasMid ? `#${m.mid} ` : '';
   return `[${formatShortTime(m.ts)}] ${idPrefix}${adminTag}${who}：${replyPrefix}${m.text}`;
@@ -661,9 +670,10 @@ function triggerLabels(entry, ctx) {
   if ((botName && lower.includes(botName)) || (nick && lower.includes(nick))) labels.push('提到我');
   if (selfNote && lower.includes(selfNoteLower)) labels.push('提到我（备注名）');
   if (/[?？]$/.test(text.trim()) || /[吗呢]/.test(text)) labels.push('提问');
-  // 不带空格判：存档里的引用块是 `[引用某人：原文]`（方括号内空白被 sanitize 折叠过），
-  // 老写法 `startsWith('[引用 ')` 在真实消息上从来没命中过。
-  if (text.startsWith('[引用')) labels.push('引用');
+  // 与渲染同源：标签认"这一行最终会不会出现引用块"，而不是猜正文前缀。
+  // 注意别只写 `startsWith('[引用 ')`（带空格）：存档里的引用块是 `[引用某人：原文]`，
+  // 方括号内空白被 sanitize 折叠过，老写法在真实消息上从来没命中过。
+  if (String(text).startsWith('[引用') || quotePrefixFor(entry)) labels.push('引用');
   if (text.includes('[拍一拍]')) labels.push('拍一拍');
   return labels;
 }
@@ -735,7 +745,11 @@ export function buildUserPrompt(ctx) {
   // 把【过去状态】实际带了多少条写回 session，供 get_recent_messages 的 offset 补偿：
   // 这些消息模型已经看过，翻页时应当跳过，否则 offset=N 拿到的仍是重复内容。
   // （此前该属性从未被赋值，导致 tools.js 的补偿恒为 0，翻页工具形同失效。）
-  if (ctx.session && typeof ctx.session === 'object') ctx.session.pastStateCount = past.count;
+  // 触发批也被排除在 past 之外，但模型同样看过 —— 只算 past.count 会少跳 T 条，
+  // 翻页结果开头就会重复触发批那几条（历史说明里推荐了翻页工具，这里一并算对）。
+  if (ctx.session && typeof ctx.session === 'object') {
+    ctx.session.pastStateCount = past.count + (ctx.triggerEntries?.length || 0);
+  }
 
   const parts = [];
 
@@ -772,7 +786,7 @@ export function buildUserPrompt(ctx) {
     parts.push('【生命周期续接】' + (staleNote ? staleNote + String.fromCharCode(10) : '')
       + '此前轮次已按原顺序放在上文；这里只处理本次新增消息，不要重复回复旧消息。');
   } else if (past.text) {
-    parts.push(`【过去状态】${staleNote ? staleNote + String.fromCharCode(10) : ''}以下是这个会话最近的聊天记录（按时间排序，你的发言标为"我"；这些都已经看过；带图的消息前有 #消息id，看图/收藏表情工具要用它）。这里只带了最近 ${past.count} 条，#消息id 按时间递增，可以用它判断谁先谁后；要看更早的记录用 get_recent_messages 往前翻：\n${past.text}`);
+    parts.push(`【过去状态】${staleNote ? staleNote + String.fromCharCode(10) : ''}以下是这个会话最近的聊天记录（按时间排序，越往下越新；你的发言标为"我"；这些都已经看过；每行的 #消息id 用来定位具体某条 —— 引用、看图、收藏表情、翻页工具都要用它，个别行如拍一拍没有 id）。这里只带了最近 ${past.count} 条；同一个会话里 #消息id 通常随时间递增，可以用它核对先后（遇到被补课的旧消息、或 id 跳号时，以行序为准）。要看更早的记录用 get_recent_messages 往前翻：\n${past.text}`);
   } else {
     parts.push('【过去状态】（暂无历史记录，这是你第一次参与这个会话）');
   }

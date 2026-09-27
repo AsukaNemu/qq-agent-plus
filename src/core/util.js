@@ -142,22 +142,27 @@ export function isSelfSender(senderId, selfId) {
  *   以前只有名字和原文，模型判断"谁在回谁、哪条在前"只能靠猜（Issue #16）。
  * - 自己发的引用标"我"：与历史行里自己的发言口径一致；否则机器人名片名会被当成别人，
  *   模型回答"这是谁发的"就会答错。
- * - 方括号里不放空白、用「·」分隔：sanitizeUserText 会折叠方括号内空白（防「【管 理 员】」
- *   这类伪造），写了空格也会被吃掉。形态在这里定死，live 与历史两条链路才一致。
+ * - 分隔符不放空白、用「·」：sanitizeUserText 会折叠方括号内空白（防「【管 理 员】」这类伪造），
+ *   写了空格也会被吃掉；函数自己把这一步做完，输出对 sanitizeUserText 幂等，
+ *   live 与历史两条链路渲染出的字节才完全相同。
  */
 export function formatQuoteRef(reply) {
   if (!reply || typeof reply !== 'object') return '';
   const who = reply.self ? '我' : String(reply.sender ?? '');
-  const body = [who, reply.text].filter(Boolean).join('：');
-  if (!body) return '';
   // id 只认数字（QQ 消息 id 可能是负数）：非数字说明来源不对，宁可退回不带 id 的老形态，
   // 也不能让它带着 `]` 之类字符进来把引用块的结构撑破。
   const rawMid = reply.messageId === null || reply.messageId === undefined
     ? ''
     : String(reply.messageId).trim();
   const mid = /^-?\d+$/.test(rawMid) ? rawMid : '';
-  const head = mid ? `#${mid}·` : '';
-  return `[引用${head}${sanitizeUserText(body)}]`;
+  const label = [mid ? `#${mid}` : '', who].filter(Boolean).join('·');
+  const body = [label, reply.text].filter(Boolean).join('：');
+  if (!body) return '';
+  // 两遍 sanitize：先在没套外层方括号时洗一遍（这样原文里自带的 [管理员] 这类括号会被
+  // 关键词规则弱化成（管理员）——套上外层括号后同一条规则就吃不到它了），
+  // 再把整块洗一遍，让输出对 sanitizeUserText 幂等。live 链路（segmentsToText）末尾会对
+  // 整串做同样的折叠，兜底链路（formatEntry）不会 —— 这里先做掉，两条链路逐字一致。
+  return sanitizeUserText(`[引用${sanitizeUserText(body)}]`);
 }
 
 /** 兼容模型把单条消息序列化成 JSON 字符串的情况，例如 "\"你好\"" → "你好"。 */
