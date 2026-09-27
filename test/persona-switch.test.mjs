@@ -72,9 +72,13 @@ test('换人设打时间戳；清空交接接口清掉交接并关线程', async
   assert.ok(memory.getHandoff(chatKey), '交接要先写进去');
   store.close();
 
-  const reset = await request('/api/persona/reset-handoffs', { method: 'POST' });
+  // 破坏性操作要 confirm 门槛（与删表情/删记忆那批接口同款）
+  const noConfirm = await request('/api/persona/reset-handoffs', { method: 'POST' });
+  assert.equal(noConfirm.status, 409, '不带 confirm 应被拒');
+  const reset = await request('/api/persona/reset-handoffs', { method: 'POST', body: { confirm: true } });
   assert.equal(reset.status, 200);
   assert.ok(reset.body.chats >= 1, '要报告清了几个会话');
+  assert.equal(typeof reset.body.activeRuns, 'number', '要报告是否有在途运行（会写回旧交接）');
   const memoryAfter = new MemoryStore();
   assert.equal(memoryAfter.getHandoff(chatKey), null, '交接要被清掉');
   const storeAfter = new ChatStore(0, { dataDir: root });

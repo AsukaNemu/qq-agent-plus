@@ -180,8 +180,14 @@ export class StickerManager {
     // 直接发出去群友看到的是一张坏图 —— 先探一下，探不通就明确报"已失效"（2026-09-27）。
     try {
       const safeUrl = await validateImageUrl(sticker.url);
-      const { buffer } = await safeFetchBinary(safeUrl, 64 * 1024, AbortSignal.timeout(8000));
-      if (!buffer?.length) throw new Error('内容为空');
+      try {
+        // 只取一小段探活；"响应体超过 N 字节"说明图比这个上限大 —— 链接是好的，不能判死
+        // （2026-09-27 审查 P1：绝大多数表情图都 >64KiB，那样会把好链接全判死）
+        const { buffer } = await safeFetchBinary(safeUrl, 64 * 1024, AbortSignal.timeout(8000));
+        if (!buffer?.length) throw new Error('内容为空');
+      } catch (error) {
+        if (!/响应体超过/.test(String(error?.message || ''))) throw error;
+      }
     } catch (error) {
       const dead = new Error(`这张的图片链接已经失效（${String(error?.message ?? error)}），发出去会是一张坏图`);
       dead.code = 'STICKER_LINK_DEAD';
@@ -423,6 +429,8 @@ export class StickerManager {
     const now = Date.now();
     if (this.qqCountAt && now - this.qqCountAt < 600000) return this.qqFull === true;
     if (typeof this.onebot?.call !== 'function') return false;
+    // 失败也记一笔（60 秒）：协议端不可达时，表情页不必每次都等它超时（2026-09-27 审查 P2）
+    if (this.qqFailAt && now - this.qqFailAt < 60000) return false;
     try {
       const data = await this.onebot.call('fetch_custom_face_detail', { count: 500 }, 30000, null);
       const list = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : null);
@@ -433,6 +441,7 @@ export class StickerManager {
       if (this.qqFull) console.log('[sticker] QQ 收藏表情已满（' + list.length + '/500），这张改存本地库');
       return this.qqFull;
     } catch {
+      this.qqFailAt = now;
       return false;
     }
   }
@@ -481,14 +490,23 @@ export class StickerManager {
   }
 
   /** 判断一张图值不值得收（工具收藏与自动收藏共用同一口径：只收真正的表情包）。 */
-  async judgeImage({ url = '', message = null } = {}) {
+  async judgeImage({ url = '', message = null, signal = null } = {}) {
     if (!url) return { save: false, reason: '这条消息里没有可收藏的图片' };
-    return this.#judgeSticker({ url }, message);
+    return this.#judgeSticker({ url }, message, signal);
+  }
+
+  /** 现在还能不能收藏（限频闸门）：工具层在"看图判断"之前先问一句，别白跑一次视觉调用。 */
+  collectRateLimited(now = Date.now()) {
+    const times = (this.collectTimes || []).filter((t) => now - t < 3600000);
+    this.collectTimes = times;
+    return times.length >= Math.max(1, Number(getConfig().sticker?.maxCollectPerHour) || 10);
   }
 
   /** 一次极小的视觉判断：这张图收不收？收的话备注写什么？ */
-  async #judgeSticker(media, message) {
-    const signal = AbortSignal.timeout(90000);
+  async #judgeSticker(media, message, outerSignal = null) {
+    const timeoutSignal = AbortSignal.timeout(90000);
+    // 主运行被中止/超时后，这次视觉判断也该停（否则工具早返回了它还在跑）
+    const signal = outerSignal ? AbortSignal.any([outerSignal, timeoutSignal]) : timeoutSignal;
     const dataUrl = await this.#stickerDataUrl(media.url, signal);
     const botName = resolveSelfName(getConfig().persona || {}, this.onebot?.selfNickname || '');
     const sender = String(message?.senderName || '群友').trim().slice(0, 20) || '群友';
@@ -621,10 +639,13 @@ export class StickerManager {
     // 入库即落盘：消息图片的链接是临时地址（带 rkey、随时可能 400），只存 URL 的条目
     // 过一阵子就发不出去了（实测有一条已失效）。落盘后发送走 base64，永不过期。
     let localFile = '';
+    let assetFile = '';
     try {
       const safeUrl = await validateImageUrl(url);
       const { buffer } = await safeFetchBinary(safeUrl, MAX_STICKER_BYTES, signal);
-      localFile = this.#writeAsset(buffer, id).relativeFile;
+      const asset = this.#writeAsset(buffer, id);
+      localFile = asset.relativeFile;
+      assetFile = asset.file;
     } catch (error) {
       throw new Error(`这张图取不到（${String(error?.message ?? error)}），没有收藏`);
     }
@@ -646,7 +667,13 @@ export class StickerManager {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
-    this.saveEntries([...this.entries, entry]);
+    try {
+      this.saveEntries([...this.entries, entry]);
+    } catch (error) {
+      // 写库失败就别把刚落的图留在磁盘上（与 addManual 同款：失败要收尾干净）
+      try { fs.rmSync(assetFile, { force: true }); } catch { /* 清不掉无害 */ }
+      throw error;
+    }
     this.collectTimes.push(now);
     return entry;
   }

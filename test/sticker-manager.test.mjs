@@ -374,3 +374,52 @@ test('表情策略里不再点名某张卡的专属表情（示例中性化）',
   assert.equal(hint.includes('大肥鱼'), false);
   assert.match(hint, /那行开头的备注名/);
 });
+
+
+test('收藏落盘后能真的发出去（AI 收藏 ≠ 只能发图片链接；P0 回归）', async (t) => {
+  const http = await import('node:http');
+  // 1×1 PNG（合法签名即可）
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6300010000050001' + '0d0a2db4' + '0000000049454e44ae426082', 'hex');
+  const server = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'image/png' }); res.end(png); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => new Promise((r) => server.close(r)));
+  const { updateConfig, DEFAULT_CONFIG } = await import('../src/core/config.js');
+  updateConfig({ security: { ...DEFAULT_CONFIG.security, allowPrivateImageHosts: true }, sticker: { ...DEFAULT_CONFIG.sticker, collectEnabled: true } });
+  const manager = new StickerManager({ async call() { return []; } });
+  const entry = await manager.collect('-777', { url: `http://127.0.0.1:${server.address().port}/a.png`, note: 'P0 回归' });
+
+  // 用真实的 send_sticker 工具 + 真实 manager：AI 收藏的条目不报"地址不合法"
+  const senderCalls = [];
+  const tool = buildToolDefs().find((x) => x.name === 'send_sticker');
+  const ctx = {
+    chatKey: 'group:1',
+    signal: AbortSignal.timeout(20000),
+    stickers: manager,
+    session: { leaseId: 'lease-1', sent: [], feedbacks: [] },
+    store: { hasUncertainEffects: () => false, findByMid: () => null, appendSelf: () => {} },
+    sender: { sendSticker: async (chatKey, sticker) => { senderCalls.push(sticker); return { message_id: 1 }; } },
+    onebot: { call: async () => [] },
+    emit: () => {}
+  };
+  const result = await tool.execute(ctx, { stickerId: entry.localNote || 'P0 回归' });
+  assert.equal(result?.isError, undefined, `不该被拒发：${JSON.stringify(result).slice(0, 160)}`);
+  assert.equal(senderCalls.length, 1, '要真的走一次发送');
+  assert.match(String(senderCalls[0].url), /^base64:\/\//, '发送用的是本地文件（base64），不是过期链接');
+});
+
+test('老条目探活：图比探活上限大也不算失效（P1 回归）', async (t) => {
+  const http = await import('node:http');
+  const big = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(200 * 1024, 7)]);
+  const server = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'image/png' }); res.end(big); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => new Promise((r) => server.close(r)));
+  const { updateConfig, DEFAULT_CONFIG } = await import('../src/core/config.js');
+  updateConfig({ security: { ...DEFAULT_CONFIG.security, allowPrivateImageHosts: true } });
+  const manager = new StickerManager({ async call() { return []; }, async getMsg() { throw new Error('源消息已过期'); } });
+  manager.saveEntries([...manager.entries, {
+    id: 'collected_-888', resId: 'collected_-888', url: `http://127.0.0.1:${server.address().port}/big.png`,
+    source: 'ai', desc: '大图老条目', useCount: 0, lastUsedAt: 0, createdAt: new Date().toISOString()
+  }]);
+  const found = await manager.findForSend('collected_-888');
+  assert.ok(found, '链接是好的（只是图大），不能被判失效');
+});

@@ -346,9 +346,10 @@ export function buildToolDefs() {
           if (!sticker.url) return err(`表情 ${sticker.id} 没有可发送的图片地址`);
           const targetError = messageTargetError(ctx, args);
           if (targetError) return err(targetError);
-          const managedInline = sticker.source === 'manual'
-            && Boolean(sticker.localFile)
-            && sticker.url.startsWith('base64://');
+          // 有本地文件的就是"托管内联"：findForSend 会给 base64，别过 validateImageUrl（它只收 http(s)）。
+          // 原来这里写死 source==='manual'，而"收藏即落盘"之后 AI 收藏项也带 localFile + base64
+          // —— 会被判"图片地址不合法"永远发不出去（2026-09-27 审查 P0）。
+          const managedInline = Boolean(sticker.localFile) && sticker.url.startsWith('base64://');
           if (!managedInline) {
             try {
               await validateImageUrl(sticker.url); // 只允许公网 http(s)，防止本地库被污染后诱导 OneBot 抓内网
@@ -453,12 +454,20 @@ export function buildToolDefs() {
           if (!imageMedia) return err('该消息没有可收藏的图片');
           // 与"自动收藏"同一口径：先判一下这是不是真表情包 —— 只靠模型自己的判断，
           // 生活照/自拍/形象图会混进表情库，之后按图片发出去（用户 2026-09-27 反馈）
+          if (typeof ctx.stickers.collectRateLimited === 'function' && ctx.stickers.collectRateLimited()) {
+            return err('收藏太频繁了（每小时有上限），过一会儿再收');
+          }
           const verdict = await ctx.stickers.judgeImage({
             url: imageMedia.url,
-            message: { mid: entry.mid, senderName: entry.senderName || '' }
+            message: { mid: entry.mid, senderName: entry.senderName || '' },
+            signal: ctx.signal
           });
-          if (verdict?.save !== true) {
-            return err(`这张不收（${verdict?.reason || '不像表情包'}）：只收以后聊天用得上的表情包，生活照/截图/自拍不存`);
+          if (!verdict) {
+            // 没判断出来（模型没提交/被服务商内容过滤）与"判断为不收"是两回事，别混成一句结论
+            return err('这次没判断出来（图片可能被服务商拦截或模型没提交决定），过会儿再试一次；确实想留就用 collect 的备注口径直接写清楚');
+          }
+          if (verdict.save !== true) {
+            return err(`这张不收（${verdict.reason || '不像表情包'}）：只收以后聊天用得上的表情包，生活照/截图/自拍不存`);
           }
           // 与 send_message/send_sticker 一样归一化：模型常传 "#123"，直接当 id 会生成
           // collected_#123，而刷新逻辑只认 collected_123，收藏的表情链接就永远不刷新。

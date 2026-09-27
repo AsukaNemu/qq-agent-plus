@@ -285,3 +285,35 @@ test('send_sticker 的工具描述不再点名默认人设的表情（示例中�
   assert.equal(description.includes('大肥鱼'), false);
   assert.match(description, /那行开头的备注名/);
 });
+
+
+test('collect_sticker：判断没出来 ≠ 这张不收（别给一个并不存在的结论）', async () => {
+  const { updateConfig, DEFAULT_CONFIG } = await import('../src/core/config.js');
+  updateConfig({ sticker: { ...DEFAULT_CONFIG.sticker, collectEnabled: true } });
+  const f = context({
+    store: {
+      findByMid: () => ({ mid: '1710457251', media: [{ kind: 'image', url: 'https://example.com/a.jpg' }], senderId: '42', senderName: '群友', text: '图' }),
+      recent: () => []
+    },
+    stickers: { judgeImage: async () => null, collect: async () => { throw new Error('不该走到这里'); } }
+  });
+  const result = await tool('collect_sticker').execute(f.ctx, { messageId: '1710457251', note: 'x' });
+  assert.match(JSON.stringify(result), /没判断出来/);
+  assert.equal(JSON.stringify(result).includes('这张不收'), false);
+});
+
+test('collect_sticker：限频时不再白跑一次看图判断', async () => {
+  const { updateConfig, DEFAULT_CONFIG } = await import('../src/core/config.js');
+  updateConfig({ sticker: { ...DEFAULT_CONFIG.sticker, collectEnabled: true } });
+  let judged = 0;
+  const f = context({
+    store: {
+      findByMid: () => ({ mid: '1710457251', media: [{ kind: 'image', url: 'https://example.com/a.jpg' }], senderId: '42', senderName: '群友', text: '图' }),
+      recent: () => []
+    },
+    stickers: { collectRateLimited: () => true, judgeImage: async () => { judged += 1; return { save: true }; }, collect: async () => ({ id: 'x' }) }
+  });
+  const result = await tool('collect_sticker').execute(f.ctx, { messageId: '1710457251', note: 'x' });
+  assert.equal(judged, 0, '限频了就别再调模型');
+  assert.match(JSON.stringify(result), /收藏太频繁/);
+});

@@ -10362,7 +10362,7 @@ function bindSettingsEvents(c) {
     if (!confirmed) return;
     resetHandoffBtn.disabled = true;
     try {
-      const res = await api('/api/persona/reset-handoffs', { method: 'POST' });
+      const res = await api('/api/persona/reset-handoffs', { method: 'POST', body: JSON.stringify({ confirm: true }) });
       const hint = $('#persona-reset-handoff-hint');
       if (hint) hint.textContent = `已清空 ${res.chats || 0} 个群的交接（关闭了 ${res.threadsClosed || 0} 个进行中的线程）。`;
     } catch (error) {

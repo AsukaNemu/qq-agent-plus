@@ -2041,14 +2041,30 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       // 清掉交接能让新卡立刻生效（2026-09-27 实测：换卡 26 小时后仍在用旧卡口癖）。
       if (pathname === '/api/persona/reset-handoffs' && method === 'POST') {
         if (!keyEndpointAllowed(req)) return json(res, 403, { error: '请求来源不被信任，已拒绝。' });
-        const chats = store.listChats();
+        const body = await readBody(req).catch(() => ({}));
+        // 破坏性操作统一 confirm 门槛（与删表情/删记忆那批接口同款）
+        if (body?.confirm !== true) {
+          return json(res, 409, { error: '清空交接是破坏性操作：请带 confirm=true 再调用（控制台按钮已带）' });
+        }
+        // 范围要含"只有交接、还没有聊天记录"的会话（记忆目录里可能有 group_*/private_*）
+        const chats = [...new Set([...store.listChats(), ...(memory.listChats?.() || [])])];
         let closed = 0;
         for (const chatKey of chats) {
           try { memory.clearHandoff(chatKey); } catch { /* 单个会话失败不阻断其余 */ }
           try { if (store.closeConversationThread(chatKey, 'persona-changed')) closed += 1; } catch { /* 没有线程就跳过 */ }
         }
-        log(`[persona] 换了人设：已清空 ${chats.length} 个会话的交接与线程状态`);
-        return json(res, 200, { ok: true, chats: chats.length, threadsClosed: closed });
+        // 在途运行会在结束时把"它那一轮"的交接写回来（那一轮用的是换卡前的提示词）：
+        // 明确告诉调用方，必要时过一会儿再点一次（2026-09-27 审查 P2）
+        const runs = Number(orchestrator?.activeRuns?.size ?? 0) || 0;   // chatKey -> sessionId
+        log(`[persona] 换了人设：已清空 ${chats.length} 个会话的交接与线程状态`
+          + (runs > 0 ? `（另有 ${runs} 个运行进行中，结束后会写回它们那轮的交接，可稍后再清一次）` : ''));
+        return json(res, 200, {
+          ok: true,
+          chats: chats.length,
+          threadsClosed: closed,
+          activeRuns: runs,
+          note: runs > 0 ? '有正在进行的会话：它们结束时会写回换卡前那轮的交接，建议过几分钟再清一次' : ''
+        });
       }
 
       // 本机语音转写：状态查询与"点一下安装"（只有控制台来源放行；不擅自重启服务）
