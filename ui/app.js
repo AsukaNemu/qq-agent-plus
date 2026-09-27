@@ -6870,7 +6870,7 @@ function renderMemorySettingsSection(c) {
       <div class="field"><label>单次最多发现几人</label>
         <input type="number" id="cfg-mem-discover-max" min="1" max="20" value="${esc(mem.discoverMaxMembers ?? 3)}" /></div>
     </div>
-    <div class="hint">自动整理时，把"最近 2000 条里发言达到这个条数、且还没有任何印象"的群友挑出来，读他的发言提炼新印象（单次最多挑上面那个人数）。<b>调高会让新人更难进入记忆</b>，调到 20 以上时发言少的人可能永远不会有印象；模型自己很少主动记，这里是主要入口。默认 20 条 / 3 人。</div>`;
+    <div class="hint">整理（含自动整理与「整理本群记忆」）时，把"最近 2000 条里发言达到这个条数、且还没有任何印象"的群友挑出来，读他的发言提炼新印象（单次最多挑上面那个人数）。<b>门槛越高，新人越难进入记忆</b>：高于群里多数人的发言量时，这些人可能永远不会有印象。模型自己很少主动记，这里是主要入口。默认 20 条 / 3 人。</div>`;
 }
 
 function renderExperimentalSettingsSection(c) {
@@ -8639,6 +8639,19 @@ function clampInt(raw, min, max, fallback) {
   return Math.min(max, Math.max(min, Math.round(n)));
 }
 
+/**
+ * 记忆"发现新人"门槛的取值口径（与「每小时最多转写」一致）：
+ * 清空 / 非法输入保持原值；0 或负数回默认；其余按 [1, max] 收口 ——
+ * 手输 9999 会存进配置并让"发现新人"事实上永久失效，右端必须夹住。
+ */
+function memThreshold(rawValue, current, max, fallback) {
+  const raw = String(rawValue ?? '').trim();
+  if (raw === '') return Number(current) || fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(max, Math.round(n));
+}
+
 /*
  * 滑条换算（前端显示用）。
  *
@@ -10371,7 +10384,9 @@ function bindSettingsEvents(c) {
     try {
       const res = await api('/api/persona/reset-handoffs', { method: 'POST', body: JSON.stringify({ confirm: true }) });
       const hint = $('#persona-reset-handoff-hint');
-      if (hint) hint.textContent = `已清空 ${res.chats || 0} 个群的交接（关闭了 ${res.threadsClosed || 0} 个进行中的线程）。`;
+      // 有在途运行时要如实提示：那一轮结束时会把换卡前的交接写回（后端在 note 里写明了）。
+      const activeNote = res.note ? ` ${res.note}` : '';
+      if (hint) hint.textContent = `已清空 ${res.chats || 0} 个群的交接（关闭了 ${res.threadsClosed || 0} 个进行中的线程）。${activeNote}`;
     } catch (error) {
       const hint = $('#persona-reset-handoff-hint');
       if (hint) hint.textContent = `清空失败：${error?.message ?? error}`;
@@ -10986,8 +11001,8 @@ async function saveConfig({ quiet = false } = {}) {
       model: val('#cfg-mem-model', c.memory?.model || '').trim(),
       consolidateMinIntervalMs: Number(val('#cfg-mem-interval', c.memory?.consolidateMinIntervalMs ?? 21600000)) || 21600000,
       // 发现新人的门槛：这两项决定"聊天多但零印象"的人能不能进记忆
-      discoverMinMessages: Math.max(1, Math.round(Number(val('#cfg-mem-discover-min', c.memory?.discoverMinMessages ?? 20))) || 20),
-      discoverMaxMembers: Math.max(1, Math.round(Number(val('#cfg-mem-discover-max', c.memory?.discoverMaxMembers ?? 3))) || 3)
+      discoverMinMessages: memThreshold(val('#cfg-mem-discover-min', c.memory?.discoverMinMessages ?? 20), c.memory?.discoverMinMessages, 500, 20),
+      discoverMaxMembers: memThreshold(val('#cfg-mem-discover-max', c.memory?.discoverMaxMembers ?? 3), c.memory?.discoverMaxMembers, 20, 3)
     };
   }
 

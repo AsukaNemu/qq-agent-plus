@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { DATA_DIR } from './config.js';
+import { safeSlice } from './util.js';
 
 function entry(row) {
   if (!row) return null;
@@ -311,9 +312,10 @@ export class ChatStore {
       const messages = [];
       let chars = 0;
       for (const m of pending) {
-        const length = Math.min(m.text.length, 2000) + 100;
+        const cut = safeSlice(m.text, 2000);
+        const length = cut.length + 100;
         if (messages.length && chars + length > maxChars) break;
-        messages.push({ ...m, text: m.text.length > 2000 ? `${m.text.slice(0, 2000)} [truncated; use get_message_detail]` : m.text });
+        messages.push({ ...m, text: cut.length < m.text.length ? `${cut} [truncated; use get_message_detail]` : m.text });
         chars += length;
       }
       if (!messages.length) return null;

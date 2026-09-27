@@ -61,7 +61,12 @@ test('转发记录/引用预览里的 @ 是别人的话，不算叫我', () => {
   // 不是这条消息在叫我（以前只在开头认，就是为了挡这些）
   const fwd = msg('[合并转发 共2条]\n张三：@888 帮我查下\n李四：收到', { mentionsSelf: false });
   assert.deepEqual(labelsOf(fwd), []);
-  const quoted = msg('[引用 小明：@888 帮我看下]这啥意思', { mentionsSelf: false });
+  // 真·引用消息在存档里一定带结构化 reply（「引用」标签现在以它为准：只看正文前缀的话，
+  // 群友手打一条以 [引用… 开头的普通消息也会被贴上标签）
+  const quoted = msg('[引用 小明：@888 帮我看下]这啥意思', {
+    mentionsSelf: false,
+    reply: { messageId: '9001', sender: '小明', text: '@888 帮我看下' }
+  });
   assert.deepEqual(labelsOf(quoted), ['引用']);
   // 别人的号在转发里，也不该说成"别人在 @ 别人"——转述内容不参与点名牌
   const fwdOther = msg('[合并转发 共1条]\n张三：@999 查下', { mentionsSelf: false });

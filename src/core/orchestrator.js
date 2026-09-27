@@ -2086,10 +2086,11 @@ export class Orchestrator {
       // 再"发现"聊天记录里的活跃群友：他们发言很多却没有任何印象。
       // 没有这一步，记忆为空的群（如刚启用记忆的群）点整理只会得到
       // "没有可整理的群友"，功能形同虚设。
-      const discoverMin = Math.max(1,
-        Number(cfg.memory?.discoverMinMessages) || Orchestrator.DISCOVER_MIN_MESSAGES);
-      const discoverMax = Math.max(1,
-        Number(cfg.memory?.discoverMaxMembers) || Orchestrator.DISCOVER_MAX_MEMBERS);
+      // 两端都夹：只夹下界的话，手输 9999 会存进配置并让"发现新人"事实上永久失效
+      const discoverMin = Math.min(500, Math.max(1,
+        Number(cfg.memory?.discoverMinMessages) || Orchestrator.DISCOVER_MIN_MESSAGES));
+      const discoverMax = Math.min(20, Math.max(1,
+        Number(cfg.memory?.discoverMaxMembers) || Orchestrator.DISCOVER_MAX_MEMBERS));
       const discovered = [...stats.memberMsgCount.entries()]
         .filter(([uid, n]) => n >= discoverMin && !knownUserIds.has(uid))
         .sort((a, b) => b[1] - a[1])

@@ -1163,6 +1163,39 @@ try {
       + (memOk ? '' : ` -> ${JSON.stringify(posted?.memory)}`));
   }
 
+  // 门槛两端都要收口：手输 9999 不能存进去（会把"发现新人"事实上永久关掉，或一次建出上百条印象）
+  {
+    let posted = null;
+    const outs = [];
+    const cases = [
+      { min: '9999', max: '999', want: [500, 20] },
+      { min: '0', max: '-3', want: [20, 3] },
+      { min: '8.6', max: '4.4', want: [9, 4] }
+    ];
+    for (const item of cases) {
+      vm.runInContext("state.settingsSection = 'memory';", ctx);
+      vm.runInContext(`state.config = ${JSON.stringify({ ...cfg, memory: { ...(cfg.memory || {}), discoverMinMessages: 20, discoverMaxMembers: 3 } })};`, ctx);
+      document.querySelector('#cfg-mem-discover-min').value = item.min;
+      document.querySelector('#cfg-mem-discover-max').value = item.max;
+      const before = sandbox.fetch;
+      sandbox.fetch = async (url, options) => {
+        if (String(url).includes('/api/config') && options?.method === 'POST') {
+          posted = JSON.parse(options.body);
+          return { ok: true, status: 200, json: async () => ({ config: { ...cfg, memory: posted.memory } }), text: async () => '' };
+        }
+        return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+      };
+      try { await ctx.saveConfig({ quiet: true }); } catch { /* 看 patch */ }
+      sandbox.fetch = before;
+      const got = [posted?.memory?.discoverMinMessages, posted?.memory?.discoverMaxMembers];
+      if (got[0] !== item.want[0] || got[1] !== item.want[1]) outs.push(`${item.min}/${item.max} -> ${JSON.stringify(got)}（期望 ${JSON.stringify(item.want)}）`);
+    }
+    const clampOk = outs.length === 0;
+    clampOk ? pass++ : fail++;
+    console.log('  ' + (clampOk ? 'OK   ' : 'FAIL ') + '设置页：记忆门槛两端收口（1–500 / 1–20，清空回默认）'
+      + (clampOk ? '' : ` -> ${outs.join('；')}`));
+  }
+
   // 每小时上限的收口口径要与显示/后端一致：非正数按 12、超上限夹到 200（不是夹到 1）
   {
     const cases = [

@@ -2376,7 +2376,8 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         // "历史里的旧口癖/自称不作数"（换卡后它会被自己的旧发言锚住，实测能锚一天以上）
         if (patch?.persona && typeof patch.persona === 'object') {
           const before = cfgNow.persona || {};
-          const changed = ['roleText', 'templateId', 'behaviorProfile', 'customRules', 'botName']
+          const changed = ['roleText', 'templateId', 'behaviorProfile', 'customRules', 'botName',
+            'selfNickname', 'participation']
             .some((key) => String(patch.persona[key] ?? before[key] ?? '') !== String(before[key] ?? ''));
           if (changed) patch.persona.changedAt = Date.now();
         }

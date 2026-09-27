@@ -661,7 +661,9 @@ function triggerLabels(entry, ctx) {
   // 与渲染同源：标签认"这一行最终会不会出现引用块"，而不是猜正文前缀。
   // 注意别只写 `startsWith('[引用 ')`（带空格）：存档里的引用块是 `[引用某人：原文]`，
   // 方括号内空白被 sanitize 折叠过，老写法在真实消息上从来没命中过。
-  if (String(text).startsWith('[引用') || quotePrefixFor(entry)) labels.push('引用');
+  // 只认"真的带引用"：结构化 reply 在，或正文是我们的降级占位符。
+  // 不能只看 `startsWith('[引用')` —— 群友手打一条以「[引用…」开头的普通消息也会被贴上标签。
+  if (entry?.reply || String(text).startsWith('[引用消息]')) labels.push('引用');
   if (text.includes('[拍一拍]')) labels.push('拍一拍');
   return labels;
 }

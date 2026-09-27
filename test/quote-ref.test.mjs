@@ -19,7 +19,8 @@ const { DEFAULT_CONFIG, setRuntimeConfig } = await import('../src/core/config.js
 const { ChatStore } = await import('../src/core/store.js');
 const { MemoryStore } = await import('../src/memory/memory.js');
 const { buildPastState, buildUserPrompt } = await import('../src/llm/prompt.js');
-const { formatQuoteRef, isSelfSender, sanitizeUserText } = await import('../src/core/util.js');
+const util = await import('../src/core/util.js');
+const { formatQuoteRef, isSelfSender, sanitizeUserText } = util;
 const { segmentsToText } = await import('../src/onebot/onebot.js');
 
 const cfg = structuredClone(DEFAULT_CONFIG);
@@ -118,7 +119,7 @@ test('segmentsToText：实时引用块带 id、自己标"我"，解析失败仍�
  * tag 用来隔开用例：同一个进程里多个 ChatStore 共用同一个 sqlite 文件，
  * 会话 key 与消息 id 撞车会互相污染（前一个用例的行会顶掉后一个的）。
  */
-function makeChat({ tag = '1', triggerText = '@测试机 你看下', triggerReply = null } = {}) {
+function makeChat({ tag = '1', triggerText = '@测试机 你看下', triggerReply = null, legacyRows = [] } = {}) {
   const store = new ChatStore(0);
   const chatKey = `group:1185623317${tag}`;
   const base = 9000 + (Number(tag) - 1) * 100;   // tag=1 → 9001..9004，tag=2 → 9101..9104
@@ -135,6 +136,11 @@ function makeChat({ tag = '1', triggerText = '@测试机 你看下', triggerRepl
     text: `[引用#${base + 2}·我：在的，有什么事] 你发的啊`,
     reply: { messageId: String(base + 2), sender: BOT_CARD, senderId: SELF_ID, self: true, text: '在的，有什么事' }
   });
+  // 升级前入库的旧引用行（正文已是折叠过的老形态）
+  legacyRows.forEach((row, i) => store.appendIncoming(chatKey, {
+    mid: row.mid, ts: ts - 120000 + i * 1000, senderId: row.senderId || '20002',
+    senderName: row.senderName || '阿卡林', text: row.text, reply: row.reply
+  }));
   store.drainUnread(chatKey);   // 前三条算"看过了"，只有最后一条是本次唤醒
   store.appendIncoming(chatKey, {
     mid: base + 4, ts: ts - 5000, senderId: '20002', senderName: '阿卡林', text: triggerText, reply: triggerReply
@@ -204,6 +210,64 @@ test('引用带 id 的消息标签命中"引用"，且不会被重复贴一次�
   assert.equal(triggerLine.match(/\[引用/g)?.length, 1, `引用块不该出现第二次：${triggerLine}`);
   // 历史里同款老形态也不重复贴
   assert.equal(past.text.match(/\[引用/g)?.length, 1, '历史行里引用只出现一次');
+});
+
+test('升级前入库的旧引用行（无 id、引用自己写的是名片名）不再补第二个引用块', () => {
+  // v0.7.2 及更早：正文是折叠过的 `[引用甲：原文]`（没有 #id），而结构化 reply 那时就带 messageId。
+  // 前缀按新形态算会不相等，不认旧形态的话整库旧引用行都会被再补一遍（实测每行两个 [引用…]）。
+  const fixture = makeChat({
+    tag: '4',
+    legacyRows: [
+      {
+        mid: 9501, text: '[引用阿卡林：在吗] 你发的啊',
+        reply: { messageId: '9500', sender: '阿卡林', senderId: '20002', text: '在吗' }
+      },
+      {
+        // 真实旧存档里方括号内的空白已被 sanitize 折叠（群名片名带空格也只能是粘在一起的形态）
+        mid: 9502, text: '[引用LV5碱式碳酸铜：在的] 你谁',
+        reply: { messageId: '9499', sender: BOT_CARD, senderId: SELF_ID, self: true, text: '在的' }
+      }
+    ]
+  });
+  const { past } = promptOf(fixture);
+  // 夹具里三条带引用的行：一条新形态（9303）+ 两条旧形态，每行只能出现一个引用块
+  const quoteLines = past.text.split(String.fromCharCode(10)).filter((line) => line.includes('[引用'));
+  assert.ok(quoteLines.every((line) => (line.match(/\[引用/g) || []).length === 1),
+    `每行最多一个引用块：\n${past.text}`);
+  assert.equal(quoteLines.length, 3, `应有三条带引用的行：\n${past.text}`);
+  assert.ok(past.text.includes('[引用阿卡林：在吗] 你发的啊'), '旧行原样保留（不重写、也不重复补）');
+  assert.ok(!past.text.includes('][引用'), '不允许出现两个引用块紧挨着');
+
+  const { textWithQuote } = util;
+  assert.equal(
+    textWithQuote({ text: '[引用阿卡林：在吗] 你发的啊', reply: { messageId: '9500', sender: '阿卡林', text: '在吗' } }),
+    '[引用阿卡林：在吗] 你发的啊',
+    '工具/控制台走同一条判定，旧形态也不补'
+  );
+  assert.equal(
+    textWithQuote({ text: '没有引用块的正文', reply: { messageId: '9500', sender: '阿卡林', text: '在吗' } }),
+    '[引用#9500·阿卡林：在吗]没有引用块的正文',
+    '真的缺引用块（合并转发展开覆盖）时，仍然要补'
+  );
+});
+
+test('"引用"标签只认真带引用的消息：群友手打 [引用…] 不算', () => {
+  const fixture = makeChat({ tag: '5' });
+  // 手打一条以 [引用 开头的普通消息（没有 reply 段），再加一条解析失败留下的占位符
+  fixture.store.appendIncoming(fixture.chatKey, {
+    mid: 9601, ts: Date.now() - 3000, senderId: '20002', senderName: '阿卡林',
+    text: '[引用] 我随口一提', reply: null
+  });
+  fixture.store.appendIncoming(fixture.chatKey, {
+    mid: 9602, ts: Date.now() - 2000, senderId: '20002', senderName: '阿卡林',
+    text: '[引用消息] 这条没解析出来', reply: null
+  });
+  const { userPrompt } = promptOf(fixture);
+  const lines = userPrompt.split('\n');
+  const typed = lines.find((line) => line.includes('我随口一提'));
+  const placeholder = lines.find((line) => line.includes('这条没解析出来'));
+  assert.ok(typed && !/（[^）]*引用[^）]*）/.test(typed), `手打的 [引用] 不该贴标签：${typed}`);
+  assert.ok(placeholder && /（[^）]*引用[^）]*）/.test(placeholder), `占位符说明"确实是在引用"，应贴标签：${placeholder}`);
 });
 
 test('正文被整段覆盖（合并转发展开）时，渲染补引用块、"引用"标签也要跟上', () => {

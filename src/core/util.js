@@ -147,11 +147,20 @@ export function isSelfSender(senderId, selfId) {
  *   live 与历史两条链路渲染出的字节才完全相同。
  */
 export function formatQuoteRef(reply) {
+  return buildQuoteRef(reply);
+}
+
+/**
+ * withId=false / labelSelf=false 只用于"识别升级前入库的旧引用块"：
+ * v0.7.2 及更早写的是 `[引用说话人：原文]`（没有 id，引用自己时写的是群名片名而不是"我"）。
+ * 生成时一律用默认参数。
+ */
+function buildQuoteRef(reply, { withId = true, labelSelf = true } = {}) {
   if (!reply || typeof reply !== 'object') return '';
-  const who = reply.self ? '我' : String(reply.sender ?? '');
+  const who = labelSelf && reply.self ? '我' : String(reply.sender ?? '');
   // id 只认数字（QQ 消息 id 可能是负数）：非数字说明来源不对，宁可退回不带 id 的老形态，
   // 也不能让它带着 `]` 之类字符进来把引用块的结构撑破。
-  const rawMid = reply.messageId === null || reply.messageId === undefined
+  const rawMid = !withId || reply.messageId === null || reply.messageId === undefined
     ? ''
     : String(reply.messageId).trim();
   const mid = /^-?\d+$/.test(rawMid) ? rawMid : '';
@@ -166,7 +175,7 @@ export function formatQuoteRef(reply) {
 }
 
 /**
- * 这条记录需要补的引用块前缀（不需要就返回空串）；需要时返回 "引用块 + 正文" 的完整文本。
+ * 这条记录需要补的引用块前缀（不需要就返回空串）；需要时由 textWithQuote 拼成完整文本。
  * 正常消息在 ingest 时就把引用块写进正文了；只有"结构化 reply 还在、正文里却没有"的记录
  * （回复 + 合并转发卡片：展开转发时用展开文本整段覆盖了正文）需要在展示时补。
  * 提示词渲染与工具/控制台返回都走它，同一个模型在两个窗口看到的形状才一致。
@@ -174,7 +183,14 @@ export function formatQuoteRef(reply) {
 export function quotePrefixFor(entry) {
   const prefix = formatQuoteRef(entry?.reply);
   if (!prefix) return '';
-  return String(entry?.text || '').startsWith(prefix) ? '' : prefix;
+  const text = String(entry?.text || '');
+  if (text.startsWith(prefix)) return '';
+  // 升级前入库的那批引用行是旧形态：没有 #消息id，引用自己时写的是群名片名。
+  // 它们的结构化 reply 当时就带着 messageId，前缀比对会不相等 —— 不认这一形态的话，
+  // 整库旧引用行都会被再补一个引用块（实测每行出现两个 [引用…]）。
+  const legacy = buildQuoteRef(entry?.reply, { withId: false, labelSelf: false });
+  if (legacy && text.startsWith(legacy)) return '';
+  return prefix;
 }
 
 /** 展示用正文：正文里缺引用块时补上（其余情况原样返回）。 */

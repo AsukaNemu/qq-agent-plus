@@ -1,5 +1,5 @@
 import { IdentityStore } from '../identity/identity-store.js';
-import { sanitizeUserText } from '../core/util.js';
+import { safeSlice, sanitizeUserText } from '../core/util.js';
 
 let activeMemoryStore = null;
 let patched = false;
@@ -22,7 +22,7 @@ function normalizeMemoryView(userId, maxMemories = 6) {
   const globalMemories = sorted.slice(0, limit).map((item) => ({
     // 印象正文可能含模型转述的群友【…】段头，下游（好友评估等提示词）不再二次清洗 ——
     // 与 memory-global.js formatForPrompt 的防线保持同一口径，在这里统一收口。
-    content: sanitizeUserText(String(item?.content || '').replace(/\s+/g, ' ').trim().slice(0, 300)),
+    content: sanitizeUserText(safeSlice(String(item?.content || '').replace(/\s+/g, ' ').trim(), 300)),
     observedAt: Number(item?.lastObservedAt) || Number(item?.createdAt) || 0,
     sourceChatKeys: [...new Set((Array.isArray(item?.sourceChatKeys) ? item.sourceChatKeys : [])
       .map(String)

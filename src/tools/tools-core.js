@@ -464,7 +464,7 @@ export function buildToolDefs() {
           });
           if (!verdict) {
             // 没判断出来（模型没提交/被服务商内容过滤）与"判断为不收"是两回事，别混成一句结论
-            return err('这次没判断出来（图片可能被服务商拦截或模型没提交决定），过会儿再试一次；确实想留就用 collect 的备注口径直接写清楚');
+            return err('这次没判断出来（图片可能被服务商拦截或模型没提交决定），过会儿再试一次；确实想留就再调一次 collect_sticker，把 note 写清楚');
           }
           if (verdict.save !== true) {
             return err(`这张不收（${verdict.reason || '不像表情包'}）：只收以后聊天用得上的表情包，生活照/截图/自拍不存`);
