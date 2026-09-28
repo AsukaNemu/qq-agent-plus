@@ -48,7 +48,35 @@
 | 省 Token 模式 | `src/core/token-saver.js`（新增）、`src/core/config-legacy.js`、`src/llm/prompt.js`、`src/core/orchestrator.js`、`src/memory/memory-global.js`、`src/features/daily-moments.js`、`src/features/qzone-interactions.js`、`ui/app.js`、`src/console/app.js` | 「设置 -> 省 Token」三档，只给上下文档位条数、单次运行轮数与预算、交接/印象注入字符数、表情清单条数**夹上限**，不改写用户设置；关掉即恢复原样 | 本仓库新增 |
 | 关闭上游调试探针 | `src/*.js`、`ui/*.js` | 上游作者留在源码里的调试上报（指向其开发机私网地址）全部关掉 | `apply-disable-upstream-debug.sh` |
 
-## 0. 引用、记忆与人设（v0.7.3 起）
+## 0. 思考控制与表情匹配（v0.7.4 起）
+
+- **思考控制（按渠道翻译档位、每家独立、可按任务分设）**：`src/core/provider-presets.js`（新增）、
+  `src/llm/llm.js`、`src/core/providers.js`、`src/console/app.js`、`ui/app.js`、`src/core/config-legacy.js`。
+  失败模式：思考原先只有"开/关"两态、只写一种参数形态，而各家的开关根本不是同一个参数 —— Command Code 认
+  `reasoning_effort`（且没有"关"档，`thinking` 字段被网关静默吞掉）、DeepSeek 官方认 `thinking.type=disabled`、
+  通义认 `enable_thinking` + `thinking_budget`、OpenAI 用 `none` 当"关"……写死的形态在别的渠道上要么静默失效、
+  要么被 400 拒绝。现行做法：语义层只表达意图（跟随服务商默认 / 关 / 低 / 中 / 高 / 最高），由渠道预设按
+  baseUrl 主机名翻译成该家真实形态；预设只列官方文档给出的档位（智谱 GLM-5.3/4.7/4.5V 强制思考、Command Code
+  无 off 档 → 都不列"关"）。三处细分：**按供应商独立**（`api.thinkingByService[host]` 覆盖全局 `api.thinking`）、
+  **按任务分设**（`{chat, judge, write, default}`：聊天 / 判断·总结 / 写作 / 其他，例如"聊天关、判断开"，
+  带 `purpose` 的调用点在编排器、表情判断、身份/关系试航、空间互动等处）、**两条逃生口**（`extraBody` 直接并进
+  请求体、优先级最高；`thinkingParams` 给不在预设内的渠道自定义档位映射；控制台里清空 JSON 要 `__replace__` 才真删）。
+  能力实测（控制台按钮）只报实测到的事实：选"关掉"给"能不能关"的结论，选档位只报这一档能否通过、不含关闭结论；
+  请求被 400 拒绝且错误提到 thinking/reasoning 参数时自动摘掉该参数重试一次。默认值不变（`thinking: 'on'`、
+  跟随服务商默认），升级不影响既有实例。
+- **表情匹配：send_sticker 报「找不到表情」（Issue #17）**：`src/onebot/stickers.js`。
+  失败模式：`findSticker` 把标签与备注同池做双向包含、再要求唯一命中，别的表情的短标签擦边命中会把真正的备注
+  命中一起否决 → 库里有也返回 null；模型把清单里「备注 [标签]（用过N次）（stickerId：…）」整行抄回来时同样匹配不上。
+  现行做法：分级匹配（备注优先，只在同一级内要求唯一）id/md5/url → 备注精确相等 → 备注包含查询 → 查询包含备注 →
+  标签；展示性修饰做成"由长到短"的形态阶梯、从最完整形态开始试（备注自身以括号结尾如「裂开（崩溃）」时不会被
+  剥短形态劫持到别的条目）；能从「（stickerId：xxx）」里抠出 id 兜底。生产库 37 条清单行 + 截断行实测 66/66 命中。
+- **工具报错写进 journal 并统一脱敏**：`src/core/orchestrator.js`、`src/core/redact.js`（新增）。
+  失败模式：工具失败只进控制台异常面板，journal 里查不到，排查时容易漏（Issue #17 的补充建议）。现行做法：
+  同一判定口径下补一行 `[tool] … 出错：…`，文本走统一脱敏（与 incident-pilot 入库同一套规则），并把
+  `access_token` / `api_key` 这类带下划线前缀的参数名补进规则（旧规则只认 `?token=` / `?key=`，会漏掉本项目
+  OneBot 实际写在查询串上的 `access_token`）。
+
+## 1. 引用、记忆与人设（v0.7.3 起）
 
 - **引用块带被引用那条的消息 id**：`src/core/util.js`（`formatQuoteRef` / `quotePrefixFor` / `textWithQuote`）、
   `src/onebot/onebot.js`、`src/llm/prompt.js`、`src/tools/tools-core.js`、`src/console/app.js`。
@@ -85,7 +113,7 @@
   收藏即落盘（`sticker-assets/`），清单标出来源与发送形态（〔QQ收藏表情〕/〔本地图库·发出去是图片〕），
   发送前探活、失效不发并给出可照做的提示；QQ 收藏夹上限 500（非会员）因此本地库保留。
 
-## 1. 语音转写与视频（v0.7.2 起）
+## 2. 语音转写与视频（v0.7.2 起）
 
 - **多供应商语音转写**：`src/llm/asr-openai.js`、`asr-local.js`（本机 whisper.cpp）、`src/llm/seed-asr.js`（火山 Seed-ASR）、
   `asr-dashscope.js`（阿里云百炼）、`asr-baidu.js`、`asr-tencent.js`（TC3 签名）、`asr-iflytek.js`（签名 WSS 分帧）+
@@ -103,14 +131,14 @@
   `src/tools/tools-core.js`（`get_message_images` 按 kind 分流）。失败模式：只采音轨时模型会回"视频只能听声音"
   （用户实测反馈），画面根本没进过模型的眼睛。
 
-## 2. 对话行为
+## 3. 对话行为
 
 - **分条发言（多气泡）**：`src/llm/prompt.js`。失败形态有两种：一是"把想说的全塞进一条长消息"，二是"用空格把两句连成一条"。补丁注释记录，v1 之前实测 90% 的情况只发一条；v2 在尾部加了"别把一轮压成一句点评"，并明确"一轮常见 2-3 条短句、单条多数 ≤30 字、别一口气刷 4 条以上"。配套的 `humanRhythm` / 主体性文本属于上游自带内容，未通过脚本改动。
 - **提示词调优**：`src/llm/prompt.js`、`src/llm/qzone-interaction-prompt.js`。把"被 @ 或直接提问时优先判断是否需要回应"改成"被 @、点名或直接提问时默认要回一句（可以短、可以敷衍、可以怼回去），只有明显与你无关、对方 @ 别人、或纯刷屏误 @ 时才不回"（v0.6.3 起把其中的"可以怼回去"进一步软化为"也可以就回一句不痛不痒的"）；同时统一了"图库可以自己攒"的用法说明。
 - **聊天关思考**：`src/llm/llm.js`、`src/core/orchestrator.js`。聊天主调用传 `purpose:'chat'`，不携带 thinking 字段；判断/写作类调用不传，走 `default:'on'`。配置 `api.thinking = {chat:'off', default:'on'}`；脚本幂等，写配置前才停服务。
 - **看图先读情绪**：`src/llm/prompt.js`、`src/tools/tools-core.js`。模型看表情包/图片时容易去"描述画面"；改成先定性情绪再回话，v2 进一步收紧并给出正反例。顺手修了一个缺失：看库内表情时只给了 `desc`，没给模型自己写的 `localNote`。
 
-## 3. 发送链路健壮性
+## 4. 发送链路健壮性
 
 - **消息 id 归一化**：`src/tools/tools-core.js`、`src/core/store.js`。模型常把提示词里的 `#123` 连 `#` 一起传回来，而 OneBot 只认纯数字 id。关键教训：`tools-core.js` 用到的 `normalizeMid` 必须在同一个文件里定义（`store.js` 里那份是模块私有、没有 export），早先只替换调用点没插 helper，结果每次 `send_message` / `send_sticker` / `send_face` 都抛 `normalizeMid is not defined`，机器人一个字都发不出去。所以脚本把"插 helper"和"替换调用点"绑在一起，并且在最后自检两者必须同时存在。
 - **发送网络级重试**：`src/onebot/sender.js`。协议端重启或连接被掐时会抛 `fetch failed`，原来直接丢消息（用户视角是"它没回我"）；网络层错误重试一次即可救回，限频/参数类错误不重试（重试也没用）。回归用例见 `test/local/test-sender-retry.mjs`。
@@ -118,7 +146,7 @@
 - **启动/重连补课**：`src/console/app.js`。服务重启或协议端断线期间，消息事件会丢——消息根本没进库，也就永远没人回。做法：连上 OneBot（含重连）后从协议端拉一次最近历史，把库里没有的消息按 mid 去重补进来；≤30 分钟的按新消息处理（会触发回应），更早的只补进记录、不吵人。
 - **自检与静态扫描**：`src/ops.js scan`（原为 `ops/check-undefined-calls.sh` + `ops/scan-undefined-calls.py`，现已并入项目代码）。上面那次"整夜发不出一个字"的事故表现像"静默/掉线"，很难查；于是加了一个只记日志、永远 `exit 0`、不阻断启动的自检，挂在服务启动链上，另配 `src/ops.js audit` 的补丁标记检查做部署验收。
 
-## 4. 贴纸（表情包）系统
+## 5. 贴纸（表情包）系统
 
 - **自动收藏**：`src/onebot/sticker-manager.js`、`src/onebot/stickers.js`、`src/console/app.js`、`src/core/config-legacy.js`。让模型看一眼别人发的图，自己判断值不值得收（值得就存并写备注）；入口改成异步判断，不阻塞消息处理。条目保留 `srcKey` 作为去重键。
 - **收藏判断健壮性**：`src/onebot/sticker-manager.js`。两个失败模式：模型有时把决定写成 `<tool_call>` 文本或裸 JSON（判断逻辑只认结构化 `tool_calls` → 决定丢失）；`max_tokens=200` 会被"思考"吃掉（实测思考 80-595 token），截断后一个字段都收不到 → 提到 600。另外内容过滤是概率性的（实测同图 20/20 通过、偶发被挡），把尝试次数 2 提到 3，并把"被服务商内容过滤"和"模型没提交"在日志里分开。
@@ -126,7 +154,7 @@
 - **查找与备注**：`src/onebot/stickers.js`、`src/tools/tools-core.js`、`src/onebot/sticker-manager.js`。线上连续出现 5 次"找不到表情 NNN"，编号其实来自来信里的 `[表情NNN]` 标签，模型却拿去当表情库 id 查。于是：来信把系统表情标成 `[QQ表情N 名字]`；找不到时把有效 id 回给模型；`findSticker` 增加"唯一命中"的模糊兜底，提示改为直接用备注名选图；备注上限 16 → 24 字（真图实测里 16 字会把一句话硬切）。
 - **标签与收录规则**：`src/console/app.js`、`src/llm/prompt.js`、`src/tools/tools-core.js`、`src/onebot/stickers.js`、`src/onebot/sticker-manager.js`。表情包消息显示 `[表情包]`（普通图仍是 `[图片]`）；收藏规则收紧到"只认真正的表情包"，生活照/随手拍/自拍不收；相关文案统一叫"表情包"。
 
-## 5. 主动发言与空间互动
+## 6. 主动发言与空间互动
 
 - **开话题节奏**：`src/core/orchestrator.js`。间隔定为 2.5-3.5 小时；"没有安静的群"这种空转不算消耗本轮（45 分钟后再看）。概率、冷场阈值属于部署方偏好，脚本不强制。
 - **间隔守卫**：`src/core/orchestrator.js`。tick 第一次在启动后 15 秒触发，所以每重启一次就会多一次开话题判定，与"几小时才概率开一次"的设定不符。改为把"上次判定时间"落盘，重启后不足一个间隔直接跳过（补丁标记 `minGapMs`、`writeProactiveLastAttempt`）。
@@ -136,7 +164,7 @@
 - **抓取容错与通知阈值**：`src/features/qzone-interactions.js`、`ui/app.js`。好友动态这条外呼在腾讯侧被限流时会回 `{code:-10001, message:"network busy"}`（协议端原样透传），而它此前是硬失败：一次限流就让整轮——包括评论检查和已积压的未读——全部不跑，还会立刻顶一条"错误"级异常通知。现在抓取失败先等 45 秒重试一次（中止信号可打断等待）；仍失败只记 `run.feedError`，本轮继续跑评论检查与积压，运行记录标为「好友动态未取到」并在控制台显示原因；失败计数与退避照旧（2→4→8→16→30 分钟），连续第 3 次才发异常通知；失败轮不算建立动态基线，免得把上线前的旧动态当成新内容。用例：`test/qzone-interactions.test.mjs`、`test/local/test-qzone-backoff.mjs`、`test/local/test-qzone-intervals.mjs`。
 - **每日说说容错**：`src/features/daily-moments.js`。空间列表读不到时跳过查重，不阻断发布。
 
-## 6. 运维与控制台
+## 7. 运维与控制台
 
 - **控制台端口探测**：`src/console/integrations.js`。上游把 SnowLuma / noVNC 地址写死为旧端口 15099 / 16081，而 Linux 全栈部署实际使用 5099 / 6081，导致"服务与访问控制"页误报"不可达"。改为按实际部署端口探测，并修正改 SnowLuma 密码时的地址兜底端口。
 - **控制台自动登录**：`ui/app.js`（地址栏带 `?token=` 时先自动登录，成功后清掉 URL 里的明文令牌再重载，避免留在浏览历史）、`src/console/app.js`（登录 cookie 加 `Max-Age`，避免关掉浏览器就要重新输令牌）。
