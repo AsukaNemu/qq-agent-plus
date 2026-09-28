@@ -182,6 +182,9 @@ export async function probeThinking({ providerId = '', baseUrl = '', apiKey = ''
     ...(sendPatch || {}),
     ...((extra && typeof extra === 'object' && !Array.isArray(extra)) ? extra : {})
   };
+  // 与 chatCompletion 同款守卫：thinkingParams / extraBody 带 stream:true 时，探测响应的
+  // 解析失败会被吞成空对象、得出"实测已关闭"的错误结论落盘（复审 2026-09-28）。
+  if (body.stream === true) body.stream = false;
   const startedAt = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error('超时')), 25000);

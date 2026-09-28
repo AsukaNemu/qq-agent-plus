@@ -36,8 +36,12 @@ const knownBase = `http://127.0.0.1:${knownTarget.address().port}/v1`;
 const otherBase = `http://127.0.0.1:${otherTarget.address().port}/v1`;
 
 fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify({
-  // 已知地址 = api.baseUrl 指向 knownTarget；otherTarget 端口不同 = 未知地址
-  server: { port: 40000 + Math.floor(Math.random() * 20000), host: '127.0.0.1' },
+  // 已知地址 = api.baseUrl 指向 knownTarget；otherTarget 端口不同 = 未知地址。
+  // 控制台端口先探测一个空闲口再用（固定段随机端口在并发跑测试时会偶发撞车）。
+  server: { port: await new Promise((resolve) => {
+    const s = http.createServer();
+    s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); });
+  }), host: '127.0.0.1' },
   api: { baseUrl: knownBase, apiKey: 'stored-key-123', model: 'm1' }
 }));
 

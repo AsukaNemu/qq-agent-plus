@@ -390,8 +390,10 @@ export async function chatCompletion({
   // 额外请求参数（控制台「高级」）：用户按自己服务商的文档填，最高优先级合并，
   // 表外渠道/怪癖网关不必等适配（例：某些网关要 {"reasoning":{"enabled":false}}）。
   // overrides（专用模型/兜底）请求同样合并——文档承诺的是"每次请求"（审查 2026-09-28）。
-  const extraRaw = overrides && overrides.extraBody !== undefined
-    ? overrides.extraBody
+  // 注意兜底路（pickFallback）spread 了 effectiveApi 自带 extraBody；记忆专用模型路的
+  // overrides 没有这个字段，必须回落到配置里的 api.extraBody（复审 2026-09-28 抓过）。
+  const extraRaw = overrides
+    ? (overrides.extraBody !== undefined ? overrides.extraBody : getConfig()?.api?.extraBody)
     : api.extraBody;
   const extraBody = extraRaw && typeof extraRaw === 'object' && !Array.isArray(extraRaw)
     ? extraRaw : null;

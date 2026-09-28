@@ -10558,7 +10558,12 @@ function bindSettingsEvents(c) {
     const sameProviderHost = !!(prov && hostOfUrl(prov.baseURL || '') === hostOfUrl(urlNow));
     const rawKeyNow = String(document.querySelector('#cfg-apikey')?.value || '').trim();
     const keyKept = !rawKeyNow || rawKeyNow === '******';
-    const knownHost = sameProviderHost || hostOfUrl(state.config?.api?.baseUrl || '') === hostOfUrl(urlNow);
+    // 与后端 storedKeyAllowedFor 同口径（整条 URL 归一化，不只比主机）——否则同主机不同路径
+    // 的地址后端不会发已存 Key、前端却不给指引，用户只看到裸 401（复审 2026-09-28）。
+    const normUrl = (v) => String(v || '').trim().replace(/\/+$/, '').toLowerCase();
+    const knownUrls = [state.config?.api?.baseUrl, ...(state.providers || []).map((p) => p?.baseURL)]
+      .map(normUrl).filter(Boolean);
+    const knownHost = knownUrls.includes(normUrl(urlNow));
     probeThinkingBtn.disabled = true;
     try {
       // 用"你此刻选中的档位"实测（不用先保存）：分设模式发四行现值对象（后端按 chat 档实测），

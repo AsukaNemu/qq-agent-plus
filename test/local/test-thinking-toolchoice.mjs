@@ -129,7 +129,9 @@ try {
     overrides: { baseUrl: 'https://api.deepseek.com/v1', apiKey: 'k2', model: 'm2', timeoutMs: 20000 }
   });
   cases.push(['overrides 专用模型按它自己的渠道取思考形状（不串主渠道）',
-    bodies[0]?.thinking?.type === 'disabled' && bodies[0]?.reasoning_effort === undefined]);
+    bodies[0]?.thinking?.type === 'disabled' && bodies[0]?.reasoning_effort === undefined
+    // extraBody 契约：overrides 未显式带 extraBody 时回落到配置里的 api.extraBody
+    && bodies[0]?.top_p === 0.9]);
 } finally {
   globalThis.fetch = originalFetch;
 }
