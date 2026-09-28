@@ -24,6 +24,7 @@ import {
   updateConfig
 } from './config.js';
 import { cappedByTokenSaver, effectiveRunLimits, tokenSaverCapsOf } from './token-saver.js';
+import { redactText } from './redact.js';
 // ── 主动开话题的时间段：窗口外不主动开口（聊天回复不受影响）──
 
 // 主动开话题的"上次判定时间"要落盘：否则服务一重启，15 秒后的第一个 tick 就又能开一次话题，
@@ -1698,6 +1699,10 @@ export class Orchestrator {
           && result.incidentCaptured !== true
           && result.reportIncident !== false
         ) {
+          // 工具报错也写一行 journal（Issue #17 反馈：只进控制台异常面板、journal 里查不到，
+          // 排查时容易漏）。同一判定口径：reportIncident:false 的工具照旧不刷。
+          // 脱敏走 incident-pilot 同款规则——错误串里可能带上 URL 查询串里的 access_token。
+          console.warn(`[tool] ${name} 出错：${redactText(String(result.content || '工具执行失败').replace(/\s+/g, ' '), 160)}`);
           this.getIncidentPilot()?.capture(new Error(String(result.content || '工具执行失败')), {
             source: `tool:${name}`,
             category: 'tool',

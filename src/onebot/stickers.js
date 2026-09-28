@@ -126,6 +126,36 @@ export function mergeStickerLibrary(existing, fetched) {
   return out.filter((e) => e.source !== 'qq' || e.hidden || fetchedIds.has(e.id) || hasLocalData(e));
 }
 
+/** 剥掉清单里的展示性修饰，返回**由长到短**的形态阶梯：原文 → 去行首项目符号 → 每剥掉一段
+ *  尾部成对括号（[标签]/（用过N次）/（stickerId：…）/〔QQ收藏表情〕，可叠多层）各给一档。
+ *  模型把整行复制进来时靠它还原成备注名。从最完整形态开始试：备注自身就以括号结尾时
+ *  （如「裂开（崩溃）」），不会被剥短后的形态劫持到别的条目（审查 2026-09-28）。
+ *  `at > 0` 保证"整串就是一个括号段"（如「（stickerId：x）」）不被剥空——那种形态由 findSticker
+ *  里的 id 抠取兜住。 */
+function stripDisplayForms(text) {
+  const forms = [];
+  const push = (value) => {
+    const t = String(value || '').trim();
+    if (t && !forms.includes(t)) forms.push(t);
+  };
+  let out = String(text || '').trim();
+  push(out);
+  const lead = out.replace(/^[-*•·]\s*/, '');
+  if (lead !== out) { push(lead); out = lead; }
+  const pairs = [['[', ']'], ['【', '】'], ['（', '）'], ['(', ')'], ['〔', '〕']];
+  for (let guard = 0; guard < 12; guard += 1) {
+    let changed = false;
+    for (const [open, close] of pairs) {
+      if (out.endsWith(close)) {
+        const at = out.lastIndexOf(open);
+        if (at > 0) { out = out.slice(0, at).trim(); push(out); changed = true; break; }
+      }
+    }
+    if (!changed) break;
+  }
+  return forms;
+}
+
 export function findSticker(entries, ref) {
   const raw = String(ref ?? '').trim();
   if (!raw) return null;
@@ -142,19 +172,49 @@ export function findSticker(entries, ref) {
     return false;
   });
   if (direct) return direct;
-  const label = raw.toLowerCase();
-  const exactLabels = visible.filter((entry) =>
-    [entry.desc, entry.localNote].some((value) =>
-      String(value || '').trim().toLowerCase() === label));
-  if (exactLabels.length === 1) return exactLabels[0];
-  // 模糊兜底：模型经常只记得备注里的半句，唯一命中就认它；多处命中仍然要求精确 id
-  if (label.length >= 2) {
-    const loose = visible.filter((entry) =>
-      [entry.desc, entry.localNote, ...(Array.isArray(entry.tags) ? entry.tags : [])].some((value) => {
+  // 模型偶尔把「（stickerId：xxx）」原样带进来——从中抠出 id 再查一次
+  const idInRef = raw.match(/stickerId[：:]\s*([A-Za-z0-9_-]+)/);
+  if (idInRef) {
+    const byExtractedId = visible.find((e) => e.id === idInRef[1] || e.resId === idInRef[1]);
+    if (byExtractedId) return byExtractedId;
+  }
+
+  // 分级匹配（Issue #17）：备注命中优先于标签，且只在"同一级内"要求唯一。
+  // 旧实现把 tags 与备注同池、双向包含，短标签擦边会把真正的备注命中一起否决 → 明明库里有却报找不到。
+  // 形态阶梯由长到短地试：先按原文，再逐段剥掉展示性后缀（整行粘贴时靠这一步还原备注名）。
+  const forms = stripDisplayForms(raw);
+  for (const form of forms) {
+    const label = form.toLowerCase();
+    // ① 备注精确相等
+    const exact = visible.filter((entry) =>
+      [entry.desc, entry.localNote].some((value) =>
+        String(value || '').trim().toLowerCase() === label));
+    if (exact.length === 1) return exact[0];
+    if (exact.length > 1) continue;   // 同级重名：换一种形态再试，仍不行就 null（宁缺勿错）
+    if (label.length < 2) continue;
+    // ② 备注包含查询（"只记得半句"）
+    const noteHasQuery = visible.filter((entry) =>
+      [entry.desc, entry.localNote].some((value) => {
+        const text = String(value || '').trim().toLowerCase();
+        return text.length > 0 && text.includes(label);
+      }));
+    if (noteHasQuery.length === 1) return noteHasQuery[0];
+    if (noteHasQuery.length > 1) continue;
+    // ③ 查询包含备注（模型附带了多余的字，但不要短备注吞掉长查询：本级只认"备注被查询包住"）
+    const queryHasNote = visible.filter((entry) =>
+      [entry.desc, entry.localNote].some((value) => {
+        const text = String(value || '').trim().toLowerCase();
+        return text.length >= 2 && label.includes(text);
+      }));
+    if (queryHasNote.length === 1) return queryHasNote[0];
+    if (queryHasNote.length > 1) continue;
+    // ④ 标签（最弱一级，仅在前面都没命中时才用）
+    const tagHit = visible.filter((entry) =>
+      (Array.isArray(entry.tags) ? entry.tags : []).some((value) => {
         const text = String(value || '').trim().toLowerCase();
         return text.length > 0 && (text.includes(label) || label.includes(text));
       }));
-    if (loose.length === 1) return loose[0];
+    if (tagHit.length === 1) return tagHit[0];
   }
   return null;
 }

@@ -423,3 +423,42 @@ test('老条目探活：图比探活上限大也不算失效（P1 回归）', as
   const found = await manager.findForSend('collected_-888');
   assert.ok(found, '链接是好的（只是图大），不能被判失效');
 });
+
+test('Issue #17：备注命中不被标签擦边否决；整行粘贴（带标签/用量/stickerId）也能解析', () => {
+  const base = (id, desc, tags, localNote = '') => ({ id, desc, localNote, tags, url: `https://example.com/${id}.png` });
+  // 复现 A：另一个表情的 tag 是查询串的子串
+  const a = [
+    base('a', '立体大问号，配晚霞背景，适合表达疑惑/懵', ['疑惑']),
+    base('b', '对面一脸懵逼', ['问号', '懵'])
+  ];
+  assert.equal(findSticker(a, '立体大问号')?.id, 'a');
+  // 复现 B：模型把「备注 [标签]」整行复制进来（生产最常见形态）
+  const b = [
+    base('x', '海绵宝宝看破', ['看破', '懂了', '阴阳']),
+    base('y', '坏笑舔嘴', ['阴阳'])
+  ];
+  assert.equal(findSticker(b, '海绵宝宝看破')?.id, 'x');
+  assert.equal(findSticker(b, '海绵宝宝看破 [看破/懂了/阴阳]')?.id, 'x', '带标签的整行也要能解析');
+  // 整行粘贴（含项目符号/用量/stickerId/来源标记）
+  const line = '- 海绵宝宝看破 [看破/懂了/阴阳]（用过3次）（stickerId：x）（QQ收藏表情）';
+  assert.equal(findSticker(b, line)?.id, 'x', '清单整行原样粘贴也能解析');
+  assert.equal(findSticker(b, '（stickerId：y）')?.id, 'y', '从 stickerId 形态里抠 id');
+  // 同级重名仍然宁缺勿错
+  assert.equal(findSticker([...b, base('x2', '海绵宝宝看破', [])], '海绵宝宝看破'), null);
+  // 标签级命中仍然可用（没有备注命中时，且该标签唯一）
+  const c = [
+    base('x', '海绵宝宝看破', ['看破', '阴阳']),
+    base('y', '坏笑舔嘴', ['坏笑'])
+  ];
+  assert.equal(findSticker(c, '坏笑')?.id, 'y', '备注包含查询（只记得半句）命中');
+  assert.equal(findSticker(c, '阴阳')?.id, 'x', '标签只属于 x 时也能命中 x');
+  assert.equal(findSticker(b, '阴阳'), null, '同一标签命中多张时仍宁缺勿错');
+  // 备注自身以括号结尾：不能被"剥短后的形态"劫持到别的条目（审查 2026-09-28）
+  const d = [
+    base('d1', '裂开', []),
+    base('d2', '裂开（崩溃）', ['崩溃'])
+  ];
+  assert.equal(findSticker(d, '裂开（崩溃）')?.id, 'd2', '原文精确命中优先于剥短形态');
+  assert.equal(findSticker(d, '裂开（崩溃） [崩溃]')?.id, 'd2', '截断行（无 stickerId）从最完整形态开始试');
+  assert.equal(findSticker(d, '- 裂开（崩溃）')?.id, 'd2', '行首项目符号 + 括号结尾的备注');
+});

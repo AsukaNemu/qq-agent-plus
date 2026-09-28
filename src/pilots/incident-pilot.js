@@ -2,20 +2,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { redactText } from '../core/redact.js';
 
 const DB_NAME = 'incident-pilot.sqlite';
 const INCIDENT_STATES = new Set(['open', 'acknowledged', 'resolved']);
 const CHAT_MODES = new Set(['auto', 'blocked', 'continue']);
 const SEVERITY_ORDER = { info: 0, warning: 1, error: 2, critical: 3 };
 
-function cleanText(value, max = 1000) {
-  return String(value ?? '')
-    .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
-    .replace(/([?&](?:token|key|secret|password|authorization)=)[^&\s]+/gi, '$1[redacted]')
-    .replace(/\0/g, '')
-    .trim()
-    .slice(0, max);
-}
+// 脱敏规则统一在 core/redact.js（orchestrator 写 journal 的工具有错行同口径）
+const cleanText = redactText;
 
 function sanitizeDetails(value, depth = 0) {
   if (depth > 3) return '[truncated]';
