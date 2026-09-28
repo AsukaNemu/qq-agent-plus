@@ -26,16 +26,19 @@ Qzone moments, Qzone interactions and optional identity indexing.
 
 | Area | Main modules | Responsibility |
 | --- | --- | --- |
-| Bootstrap and HTTP | `server.js`, `app.js` | Dependency assembly, lifecycle, event ingestion, console API and SSE |
-| Protocol adapter | `onebot.js` | OneBot WebSocket reconnect, HTTP calls and QQ message normalization |
-| Durable state | `store.js` | Message deduplication, leases, outbox, lifecycle transcripts and checkpoints |
-| Agent control | `orchestrator.js` | Debounce, trigger policy, concurrency, model/tool loop and recovery |
-| Prompt and tools | `prompt.js`, `tools.js` | Persona context and tools restricted to the current chat |
-| Delivery | `sender.js` | Per-chat serialization, rate limits, message splitting and outbox completion |
-| Model access | `llm.js`, `providers.js` | Chat Completions, retries, provider credentials and usage |
-| Memory | `memory.js`, `identity-*.js` | Member impressions, handoff state and optional cross-chat identity index |
-| Scheduled social work | `daily-moments.js`, `qzone-interactions.js` | Independently persisted Qzone decisions and external effects |
-| Operations | `deploy.sh`, `manage.sh`, `scripts/*.mjs` | Installation, systemd service, health, backup and recovery actions |
+| Bootstrap and HTTP | `src/server.js`, `src/console/app.js` | Dependency assembly, lifecycle, event ingestion, console API and SSE |
+| Protocol adapter | `src/onebot/onebot.js` | OneBot WebSocket reconnect, HTTP calls and QQ message normalization |
+| Durable state | `src/core/store.js` | Message deduplication, leases, outbox, lifecycle transcripts and checkpoints |
+| Agent control | `src/core/orchestrator.js` | Debounce, trigger policy, concurrency, model/tool loop and recovery |
+| Prompt and tools | `src/llm/prompt.js`, `src/tools/` | Persona context and tools restricted to the current chat |
+| Delivery | `src/onebot/sender.js` | Per-chat serialization, rate limits, message splitting and outbox completion |
+| Model access | `src/llm/llm.js`, `src/core/providers.js`, `src/core/provider-presets.js` | Chat Completions, retries, provider credentials, usage and per-channel thinking presets |
+| Sticker system | `src/onebot/sticker-manager.js`, `src/onebot/stickers.js` | QQ favourites sync, notes, tiered lookup, auto-collect and local asset storage |
+| Memory | `src/memory/`, `src/identity/` | Member impressions, handoff state and cross-chat identity index |
+| Pilots (observability) | `src/pilots/` | Incident panel, relationship shadow evaluation, slang assets, multimodal-context pilot |
+| Scheduled social work | `src/features/daily-moments.js`, `src/features/qzone-interactions.js` | Independently persisted Qzone decisions and external effects |
+| Runtime guards | `src/core/token-saver.js`, `src/core/time-gate.js`, `src/core/redact.js` | Token ceilings, active-hour gating, log redaction |
+| Operations | `deploy.sh`, `manage.sh`, `scripts/*.mjs`, `src/ops.js` | Installation, systemd service, health, backup and recovery actions |
 
 `app.js` is the composition root. The protocol, persistence and orchestration
 classes are separate, but they run in one process and share the configured data

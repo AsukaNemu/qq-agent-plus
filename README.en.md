@@ -36,11 +36,22 @@ mode and its resolution are recorded in [CHANGES](docs/CHANGES.md).
   fallback parsing for inline tool calls.
 - **Sticker system** — auto-collect with QQ favourites first, fuzzy lookup fallback, sync guard so
   an API failure cannot wipe the local library.
-- **Proactive talk** — multiple active windows, interval guard, skip-reason logging, follow-up
-  nudge when nobody answers, catch-up for messages missed during restarts.
+- **Proactive talk** — three independently switchable links (cold-topic opener / follow-up
+  nudge when nobody answers / model-scheduled wake-up), multiple active windows, interval
+  guard, skip-reason logging, catch-up for messages missed during restarts.
 - **Model access** — thinking levels translated per channel preset, settable per provider and per
-  task (console -> advanced), retry on provider moderation refusals, automatic
-  fallback model.
+  task (Settings -> Model API -> "Advanced: thinking"), retry on provider moderation refusals,
+  automatic fallback model.
+- **Speech & video input** — voice/audio files and video soundtracks are transcribed before they
+  reach the chat model (no multimodal requirement). Hosted ASR by default (SiliconFlow endpoint
+  preset: paste one key, pull the model list once); switchable to Groq / Volcano Seed-ASR /
+  Alibaba / iFlytek / Tencent / Baidu / self-hosted, most with free tiers for new users. Also
+  **keyless local whisper.cpp** (offline, free, one click to install or fully remove in the
+  console, or `node scripts/install-asr-local.mjs`). QQ voice (SILK) is decoded locally — no
+  protocol-side transcoding; videos also get a 2x2 frame strip for the vision model plus separate
+  soundtrack transcription, so it sees and hears. ASR keys are configured separately from search;
+  an hourly quota gate applies, and muted-group pre-checks report the reason instead of sending
+  blindly.
 
 Configuration examples are in [docs/CONFIG-EXAMPLES.md](docs/CONFIG-EXAMPLES.md). Operations
 commands are collected in [src/ops.js](src/ops.js) and documented in [docs/OPS.md](docs/OPS.md).
@@ -408,9 +419,10 @@ is shown section by section (signature traits, AI-flavour blacklist and examples
 tags or chat bubbles) and every section can be edited on its own, reverted on its own, or the whole
 card restored. The behaviour profile is either the original group-chat
 style or the natural-and-reliable style, and both the role text and administrator rules can be
-edited, or a custom copy created from the current draft. Editing a file under `roles/` only affects
-the built-in templates of new installations; an existing instance keeps the role text saved in its
-configuration.
+edited, or a custom copy created from the current draft. The built-in card text is sourced
+from `roles/*.md`: while an instance is still bound to a built-in card, edits to the file take
+effect on restart and the console copy is refreshed automatically — no need to re-pick the card
+after changing it. Unbound custom text stays exactly as saved.
 
 ## Token saver
 
@@ -429,7 +441,7 @@ effective value for every item.
 | Global impressions injected (chars) | ≤3000 | ≤1500 |
 | Sticker list in the prompt | ≤5 | ≤3 |
 
-Context: the **fixed floor** of every model call (system prompt + 23 tool schemas) is about
+Context: the **fixed floor** of every model call (system prompt + 22-24 tool schemas depending on toggles) is about
 12k-15k tokens and cannot be changed by settings. Measured over 7 days on a live instance
 (867 calls / 18.4M tokens): input is 98.8% of all tokens, and the **uncached** part of the input
 accounts for 76% of the cost — so saving tokens means reading less history, running fewer rounds

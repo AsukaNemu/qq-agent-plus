@@ -215,8 +215,8 @@ The import option is available on the first installation only:
 ```bash
 bash deploy.sh --install-dir /mnt/data/qq-agent/app \
   --data-dir /mnt/data/qq-agent/data --host 127.0.0.1 --port 3210 \
-  --import-bridge /home/sourcecode/apps/qq-bridge/config.json \
-  --credential-file /home/sourcecode/.config/dsh/credentials.env
+  --import-bridge /home/<user>/apps/qq-bridge/config.json \
+  --credential-file /home/<user>/.config/dsh/credentials.env
 ```
 
 The first installation enters observe mode and does not activate replies
@@ -241,7 +241,7 @@ no automatic model calls and blocks text, stickers, pokes and test sends.
 Explicit administrator actions such as model testing or memory consolidation
 may still use the API. Activation skips the observe backlog by default.
 
-The console Token can be rotated under **Settings → Desktop → Console Security**.
+The console Token can be rotated under **Settings → System（系统） → Console Security（控制台安全）**.
 Enter the current Token and the new Token twice. A successful rotation updates
 the HttpOnly cookie and `data/console-access.txt` atomically from the user's
 perspective; the old Token and other browser sessions stop authenticating
