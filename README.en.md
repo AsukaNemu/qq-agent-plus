@@ -38,7 +38,8 @@ mode and its resolution are recorded in [CHANGES](docs/CHANGES.md).
   an API failure cannot wipe the local library.
 - **Proactive talk** — multiple active windows, interval guard, skip-reason logging, follow-up
   nudge when nobody answers, catch-up for messages missed during restarts.
-- **Model access** — per-purpose thinking switch, retry on provider moderation refusals, automatic
+- **Model access** — thinking levels translated per channel preset, settable per provider and per
+  task (console -> advanced), retry on provider moderation refusals, automatic
   fallback model.
 
 Configuration examples are in [docs/CONFIG-EXAMPLES.md](docs/CONFIG-EXAMPLES.md). Operations

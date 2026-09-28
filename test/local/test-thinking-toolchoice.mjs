@@ -66,6 +66,74 @@ try {
   globalThis.fetch = originalFetch;
 }
 
+// ── 2026-09-28 审查跟进：400 摘除重试 / extraBody 优先级 / overrides 思考形状 ──
+const { updateConfig } = await import(new URL('../../src/core/config.js', import.meta.url).href);
+const ok200 = () => Response.json({
+  choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+  usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+});
+const bad400 = (text) => new Response(
+  JSON.stringify({ error: { message: text, type: 'invalid_request_error' } }),
+  { status: 400 }
+);
+// responses 按次序消费，最后一个重复用（重试后成功的桩就是 [bad400, ok200]）
+const makeFetch = (responses) => async (_url, request) => {
+  bodies.push(JSON.parse(request.body));
+  const make = responses.length > 1 ? responses.shift() : responses[0];
+  return make();
+};
+
+try {
+  // 4) 无关 400（错误体只有 invalid_request_error、不提 thinking/reasoning）→ 不摘参、不重试：
+  //    旧判定里的 invalid/unknown/unexpected 泛词会误命中，白打一次注定失败的请求（审查 2026-09-28）
+  updateConfig({ api: { baseUrl: 'https://api.deepseek.com/v1', thinking: 'low' } });
+  bodies.length = 0;
+  globalThis.fetch = makeFetch([() => bad400('This model maximum context length is 8192 tokens, however messages resulted in 9000 tokens')]);
+  let err4 = '';
+  try { await chatCompletion({ messages: [{ role: 'user', content: 'hi' }] }); } catch (e) { err4 = String(e?.message ?? e); }
+  cases.push(['无关 400 不触发摘参重试（只发一次）', bodies.length === 1 && /模型 API HTTP 400/.test(err4)]);
+
+  // 5) 思考参数真被拒（错误提到参数名）→ 摘掉思考参数重试一次，extraBody 原样保留
+  updateConfig({ api: { baseUrl: 'https://api.deepseek.com/v1', thinking: 'low', extraBody: { top_p: 0.9 } } });
+  bodies.length = 0;
+  globalThis.fetch = makeFetch([() => bad400('Unknown parameter: reasoning_effort'), ok200]);
+  const r5 = await chatCompletion({ messages: [{ role: 'user', content: 'hi' }] });
+  cases.push(['思考参数被 400 拒绝 → 摘掉重试一次且保留 extraBody',
+    bodies.length === 2
+    && bodies[0]?.reasoning_effort === 'low' && bodies[0]?.top_p === 0.9
+    && bodies[1]?.reasoning_effort === undefined && bodies[1]?.top_p === 0.9
+    && r5.message?.content === 'ok']);
+
+  // 6) 优先级链条：内置字段 < thinking.patch < extraBody。
+  //    thinkingParams 的档位对象必须排在 max_tokens 之后（旧实现插在中间，两段语义不一致）
+  updateConfig({
+    api: {
+      baseUrl: 'https://example.com/v1',
+      thinking: 'low',
+      thinkingParams: { low: { max_tokens: 123 } }
+    }
+  });
+  bodies.length = 0;
+  globalThis.fetch = makeFetch([ok200]);
+  await chatCompletion({ messages: [{ role: 'user', content: 'hi' }], maxTokens: 500 });
+  cases.push(['thinkingParams 档位排在内置字段之后（可覆盖 max_tokens）', bodies[0]?.max_tokens === 123]);
+
+  // 7) overrides（记忆整理专用模型等）按 overrides 自己的地址取渠道形状：
+  //    主渠道 Command Code（off=近似 reasoning_effort:low），专用 DeepSeek 应发 thinking.type=disabled
+  updateConfig({ api: { baseUrl: 'https://api.commandcode.ai/provider/v1', thinking: 'off' } });
+  bodies.length = 0;
+  globalThis.fetch = makeFetch([ok200]);
+  await chatCompletion({
+    messages: [{ role: 'user', content: 'hi' }],
+    purpose: 'judge',
+    overrides: { baseUrl: 'https://api.deepseek.com/v1', apiKey: 'k2', model: 'm2', timeoutMs: 20000 }
+  });
+  cases.push(['overrides 专用模型按它自己的渠道取思考形状（不串主渠道）',
+    bodies[0]?.thinking?.type === 'disabled' && bodies[0]?.reasoning_effort === undefined]);
+} finally {
+  globalThis.fetch = originalFetch;
+}
+
 let ok = 0;
 for (const [name, pass] of cases) {
   if (pass) ok += 1;

@@ -16,6 +16,23 @@ test('redactText：Bearer 头与查询串里的令牌参数一律脱敏', () => 
   assert.equal(redactText('GET /api?a=1&api_key=abcd1234'), 'GET /api?a=1&api_key=[redacted]');
   assert.equal(redactText('?apikey=k1&token=t2&secret=s3&password=p4&authorization=a5'),
     '?apikey=[redacted]&token=[redacted]&secret=[redacted]&password=[redacted]&authorization=[redacted]');
+  // 百度换 token 的实际形态（asr-baidu.js）：client_id / client_secret 带下划线前缀
+  assert.equal(redactText('POST /oauth/token?grant_type=client_credentials&client_id=AK123&client_secret=SK456'),
+    'POST /oauth/token?grant_type=client_credentials&client_id=[redacted]&client_secret=[redacted]');
+  // session-key 这类连字符/下划线变体也认
+  assert.equal(redactText('GET /a?session-key=xyz'), 'GET /a?session-key=[redacted]');
+});
+
+test('redactText：JSON 体与 Basic/Cookie 头形态', () => {
+  // 错误信息里原样回显请求体时的兜底（命中面故意偏宽，宁多脱勿漏）
+  assert.equal(redactText('request body: {"apiKey":"abc123","model":"deepseek-v4"}'),
+    'request body: {"apiKey":"[redacted]","model":"deepseek-v4"}');
+  assert.equal(redactText('{"client_secret":"sk-abc","note":"keep"}'),
+    '{"client_secret":"[redacted]","note":"keep"}');
+  assert.equal(redactText('Authorization: Basic dXNlcjpwYXNz'), 'Authorization: Basic [redacted]');
+  assert.match(redactText('Cookie: session=abc123; next'), /^Cookie: \[redacted\]/);
+  // reasoning_effort 这类非敏感键不动
+  assert.equal(redactText('{"reasoning_effort":"low"}'), '{"reasoning_effort":"low"}');
 });
 
 test('redactText：不该动的文本原样保留（只截断/去空字符）', () => {

@@ -6493,7 +6493,7 @@ function renderApiSection(c) {
         <div class="field">
           <label>额外请求参数（JSON）</label>
           <textarea id="cfg-extra-body" rows="3" style="width:100%" placeholder='例如 {"reasoning":{"enabled":false}}。留空 = 不附加。'>${esc(extraBodyText(c.api?.extraBody))}</textarea>
-          <div class="hint" id="cfg-extra-body-hint">填了就以最高优先级合并进每次请求（JSON 对象）；服务商文档里的怪参数都填这里，不用等适配。</div>
+          <div class="hint" id="cfg-extra-body-hint">填了就以最高优先级合并进每次请求（JSON 对象）；服务商文档里的怪参数都填这里，不用等适配。注意 stream 会被强制回非流式；model / messages / tools 会整段替换对应字段，排查异常时先清空这里。</div>
         </div>
       </div>
     </details>
@@ -8587,7 +8587,7 @@ const MODEL_SERVICES_UI = [
     note: '可关闭；档位 low / high / max。模型例：deepseek-flash（V4.1 Flash，支持图片）/ deepseek-v4-pro。' },
   { id: 'zhipu', label: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', hosts: ['open.bigmodel.cn', 'api.z.ai'], levels: ['off', 'low', 'high', 'max'], canDisable: true,
     note: '档位 low/high/max（GLM-5.3 系官方枚举）；默认开启思考、档位默认 max。GLM-5.3 系与 4.7/4.5V 强制思考、关不掉（会被安全兜底忽略）。模型例：glm-5.3-flash（若「获取列表」拉不到就手填）。' },
-  { id: 'qwen', label: '通义千问（百炼）', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', hosts: ['dashscope.aliyuncs.com'], levels: ['off', 'low', 'medium', 'max'], canDisable: true,
+  { id: 'qwen', label: '通义千问（百炼）', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', hosts: ['dashscope.aliyuncs.com'], levels: ['off', 'low', 'medium', 'max'], canDisable: null,
     defaultNote: '混合思考模型随模型；qwen3.8-omni-flash 默认 xhigh',
     note: '官方文档：enable_thinking 可关；档位仅 qwen3.8-omni-flash 支持（低/中/最高=low/medium/max，官方把 high/max 映射到 xhigh）；其他模型用 thinking_budget（走「额外请求参数」）。模型例：qwen-max / qwen3-*。' },
   { id: 'openai', label: 'OpenAI 官方', baseUrl: 'https://api.openai.com/v1', hosts: ['api.openai.com'], levels: ['off', 'low', 'medium', 'high', 'max'], canDisable: null,
@@ -8651,6 +8651,21 @@ function syncThinkingUi(url, paramsOverride, splitOverride) {
   if (seg && cb && !split) seg.classList.toggle('dim', cb.checked);
   const summary = document.querySelector('#thinking-advanced summary');
   if (summary) summary.textContent = `高级：思考模式${thinkingAdvancedSummary(fake)}`;
+  // 探测结论文案只在"当前地址确实有实测记录"时保留：换了供应商/地址还挂着上一家的
+  // 实测结论，会和提示行的「未实测」自相矛盾（审查 2026-09-28）。
+  const noteNode = document.getElementById('probe-thinking-result');
+  if (noteNode && state.lastProbeNote) {
+    const urlHost = hostOfUrl(fake.api.baseUrl);
+    const probeP = (fake.providers || []).find((x) => x.id === fake.api?.provider);
+    const probeAlive = (probeP && probeP.thinkingProbe && probeP.thinkingProbe.ok !== false
+        && hostOfUrl(probeP.baseURL) === urlHost)
+      || (fake.api?.thinkingProbe && fake.api.thinkingProbe.ok !== false
+        && hostOfUrl(fake.api.thinkingProbe.baseUrl) === urlHost);
+    if (!probeAlive) {
+      state.lastProbeNote = '';
+      noteNode.style.display = 'none';
+    }
+  }
 }
 function uiServiceOfUrl(url) {
   try {
@@ -10488,6 +10503,9 @@ function bindSettingsEvents(c) {
         seg.classList.remove('dim');
       }
       state.thinkingTouched = true;
+      // 记下"动的是哪一家的档位条"：换家后未重新点选时，保存不得把回退显示值物化到新家
+      //（审查 2026-09-28）。三个入口（统一条/跟随默认/分设开关）同口径。
+      state.thinkingTouchedHost = hostOfUrl($('#cfg-baseurl')?.value || '');
     });
   }
   if (thinkingDefaultCb) {
@@ -10495,6 +10513,7 @@ function bindSettingsEvents(c) {
       const seg = document.getElementById('thinking-seg');
       if (seg) seg.classList.toggle('dim', thinkingDefaultCb.checked);
       state.thinkingTouched = true;
+      state.thinkingTouchedHost = hostOfUrl($('#cfg-baseurl')?.value || '');
     });
     // 初始置灰同步不算"用户动过控件"
     const seg0 = document.getElementById('thinking-seg');
@@ -10503,6 +10522,7 @@ function bindSettingsEvents(c) {
   if (thinkingSplitCb) {
     thinkingSplitCb.addEventListener('change', () => {
       state.thinkingTouched = true;
+      state.thinkingTouchedHost = hostOfUrl($('#cfg-baseurl')?.value || '');
       // 勾/取消即时重建两条档位条（不用等保存）
       syncThinkingUi($('#cfg-baseurl')?.value || '', undefined, thinkingSplitCb.checked);
     });
@@ -10530,33 +10550,50 @@ function bindSettingsEvents(c) {
       if (out) { out.textContent = text; out.style.display = ''; }
     };
     if (out) { out.textContent = '探测中…（发一条最小请求）'; out.style.display = ''; }
+    // 快照：探测要几秒钟，响应回来时输入框可能已被改掉——合并与刷新一律用点击时的值
+    //（否则"已实测"会标到没测过的地址上，审查 2026-09-28）。
+    const urlNow = String(document.querySelector('#cfg-baseurl')?.value || '').trim();
+    const pid = String(state.config?.api?.provider || '');
+    const prov = (state.providers || []).find((x) => x && x.id === pid) || null;
+    const sameProviderHost = !!(prov && hostOfUrl(prov.baseURL || '') === hostOfUrl(urlNow));
+    const rawKeyNow = String(document.querySelector('#cfg-apikey')?.value || '').trim();
+    const keyKept = !rawKeyNow || rawKeyNow === '******';
+    const knownHost = sameProviderHost || hostOfUrl(state.config?.api?.baseUrl || '') === hostOfUrl(urlNow);
+    probeThinkingBtn.disabled = true;
     try {
-      // 用"你此刻选中的档位"实测（不用先保存）：勾了跟随默认按配置走，否则取当前段位；
-      // 额外参数也按输入框现值（解析失败则退回已保存值）。
-      const cbNow = document.querySelector('#cfg-thinking-default');
-      const segNow = document.querySelector('#thinking-seg .seg-item.selected');
-      const thinkingNow = cbNow && cbNow.checked ? 'on' : (segNow?.dataset.v || undefined);
+      // 用"你此刻选中的档位"实测（不用先保存）：分设模式发四行现值对象（后端按 chat 档实测），
+      // 统一条发单值；勾了跟随默认按配置走；额外参数也按输入框现值（解析失败则退回已保存值）。
+      let thinkingNow;
+      if (document.querySelector('#cfg-thinking-default')?.checked) {
+        thinkingNow = 'on';
+      } else if (document.querySelector('#cfg-thinking-split')?.checked) {
+        const segVal = (id) => document.querySelector(`#${id} .seg-item.selected`)?.dataset.v || '';
+        thinkingNow = {};
+        for (const key of ['chat', 'judge', 'write', 'default']) thinkingNow[key] = segVal(`thinking-seg-${key}`) || 'on';
+      } else {
+        thinkingNow = document.querySelector('#thinking-seg .seg-item.selected')?.dataset.v || undefined;
+      }
       let extraNow;
       try {
         const raw = String(document.querySelector('#cfg-extra-body')?.value || '').trim();
         if (raw) extraNow = JSON.parse(raw);
       } catch { /* 输入框 JSON 非法：忽略，探测按已保存值走 */ }
-      const rawKeyNow = String(document.querySelector('#cfg-apikey')?.value || '').trim();
       const r = await api('/api/providers/probe-thinking', {
         method: 'POST',
         body: JSON.stringify({
-          providerId: state.config?.api?.provider || '',
+          // providerId 只在"实测地址就是该 provider 存的地址"时带上：否则结论会记到
+          // 没被实测的 provider 名下（审查 2026-09-28）。
+          providerId: sameProviderHost ? pid : '',
           model: state.config?.api?.model || '',
           thinking: thinkingNow,
           extraBody: extraNow,
-          baseUrl: String(document.querySelector('#cfg-baseurl')?.value || '').trim(),
-          apiKey: (rawKeyNow && rawKeyNow !== '******') ? rawKeyNow : ''
+          baseUrl: urlNow,
+          apiKey: keyKept ? '' : rawKeyNow
         })
       });
-      show(r?.result?.note || '完成');
+      const res = r?.result || {};
       // 不整页 loadSettings()：那会把刚填、还没保存的地址/Key/档位抹掉（实测反馈）。
       // 只把探测结论并入本地状态，再就地刷新思考区（提示/摘要/档位条）。
-      const res = r?.result || {};
       if (state.config?.api) {
         state.config.api.thinkingProbe = {
           checkedAt: Date.now(),
@@ -10564,12 +10601,18 @@ function bindSettingsEvents(c) {
           canDisable: (res.canDisable === undefined ? null : res.canDisable),
           reasoningTokens: Number(res.reasoningTokens) || 0,
           note: String(res.note || '').slice(0, 300),
-          baseUrl: String(document.querySelector('#cfg-baseurl')?.value || '').trim()
+          baseUrl: urlNow
         };
       }
-      syncThinkingUi(String(document.querySelector('#cfg-baseurl')?.value || '').trim());
+      syncThinkingUi(urlNow);
+      const suffix = (keyKept && !knownHost && res.ok === false)
+        ? '（提示：未保存的地址不会使用已保存的 Key；该服务需要鉴权时，先在上方填这家的 Key 再测。）'
+        : '';
+      show(`${res.note || '完成'}${suffix}`);
     } catch (e) {
       show(`失败：${e.message}`);
+    } finally {
+      probeThinkingBtn.disabled = false;
     }
   });
 
@@ -11558,7 +11601,9 @@ async function saveConfig({ quiet = false } = {}) {
         const map = c.api?.thinkingByService || {};
         if (!state.thinkingTouched) return map;
         const host = hostOfUrl(val('#cfg-baseurl', c.api?.baseUrl) || c.api?.baseUrl);
-        if (!host) return map;
+        // 只写"用户点选时所在的那一家"：换家后没重新点选就保存，写出去的是界面的回退显示值，
+        // 而且会盖到新家头上（审查 2026-09-28）。
+        if (!host || host !== state.thinkingTouchedHost) return map;
         const segVal = (id) => document.querySelector(`#${id} .seg-item.selected`)?.dataset.v || '';
         if (document.querySelector('#cfg-thinking-split')?.checked) {
           const obj = {};
@@ -11973,6 +12018,7 @@ async function saveConfig({ quiet = false } = {}) {
   const data = await api('/api/config', { method: 'POST', body: JSON.stringify(patch) });
   state.config = data.config;
   state.thinkingTouched = false;
+  state.thinkingTouchedHost = '';
   // 思考区（摘要/提示/段位）跟着新配置立即刷新——否则"改了但摘要还是旧值"（2026-09-27 实测）。
   if (document.getElementById('thinking-seg-slot')) {
     syncThinkingUi(val('#cfg-baseurl', state.config?.api?.baseUrl) || state.config?.api?.baseUrl || '');

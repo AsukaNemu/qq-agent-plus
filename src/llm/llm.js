@@ -127,6 +127,8 @@ const thinkingToolChoiceWarned = new Set();
 const thinkingUnsupportedWarned = new Set();
 // 模型级差异兜底：个别模型/网关不认思考参数会 400 —— 去掉参数重试一次（每个模型只提示一次）。
 const thinkingParamRejectedWarned = new Set();
+// extraBody 里写 stream:true 会被强制回 false（本端固定非流式解析），只提示一次。
+let extraBodyStreamWarned = false;
 
 /** 当前连接的地址主机（每供应商独立设置按它取）。 */
 function currentHost() {
@@ -161,17 +163,27 @@ function currentServiceId() {
   }
 }
 
-function thinkingFor(purpose) {
+function thinkingFor(purpose, overrides = null) {
   let raw = null;
   let customParams = null;
+  let serviceId = '';
   try {
     const cfg = getConfig();
-    // 先取"当前供应商自己的条"，没有才退回全局设置（每供应商独立）。
-    raw = effectiveThinkingRaw(cfg?.api, currentHost());
     customParams = cfg?.api?.thinkingParams;
+    if (overrides?.baseUrl) {
+      // 专用模型/兜底这类 overrides 调用按 overrides 自己的地址取每供应商设置与渠道形状，
+      // 不串用主渠道的（审查 2026-09-28：主渠道 Command Code、专用 DeepSeek 时，
+      // 旧逻辑会把 reasoning_effort 发给 DeepSeek——"换家不串味"正是这套预设的设计目标）。
+      raw = effectiveThinkingRaw(cfg?.api, hostOf(overrides.baseUrl));
+      const svc = modelServiceOfBaseUrl(overrides.baseUrl);
+      serviceId = svc ? svc.id : '';
+    } else {
+      // 先取"当前供应商自己的条"，没有才退回全局设置（每供应商独立）。
+      raw = effectiveThinkingRaw(cfg?.api, currentHost());
+      serviceId = currentServiceId();
+    }
   } catch { /* 取不到就走默认 */ }
   const intent = normalizeThinkingIntent(raw, purpose);
-  const serviceId = currentServiceId();
   if (intent === 'on') return { mode: 'on', patch: null, approx: false, effectiveOff: false, serviceId };
   // 自定义/表外渠道优先用用户的档位映射（api.thinkingParams）。
   const resolved = resolveThinkingPatch(serviceId, intent, customParams);
@@ -325,7 +337,7 @@ export async function chatCompletion({
   const api = overrides || effectiveApi();
   // 聊天这类"随口回一句"的任务关掉思考：省一半输出 token、少 1~3 秒；
   // 判断/写作类（表情包要不要收、说说、空间互动、身份评估）不传 purpose，继续思考。
-  const thinking = thinkingFor(purpose);
+  const thinking = thinkingFor(purpose, overrides);
   const thinkingOff = thinking.effectiveOff;
   const body = {
     model: api.model,
@@ -342,7 +354,6 @@ export async function chatCompletion({
     })),
     stream: false
   };
-  if (thinking.patch) Object.assign(body, thinking.patch);
   if (tools && tools.length > 0) {
     body.tools = tools;
     // 思考模式与强制 tool_choice 不兼容：部分网关（DeepSeek 系）会整次请求 400
@@ -373,11 +384,27 @@ export async function chatCompletion({
   })())) {
     body.prompt_cache_key = String(cacheKey).slice(0, 64);
   }
+  // 思考参数档位的优先级排在温度/工具选择/输出上限之后（与"extraBody 最高优先级"同一条链：
+  // 内置字段 < thinking.patch < extraBody），不再插在中间造成两段语义不一致（审查 2026-09-28）。
+  if (thinking.patch) Object.assign(body, thinking.patch);
   // 额外请求参数（控制台「高级」）：用户按自己服务商的文档填，最高优先级合并，
   // 表外渠道/怪癖网关不必等适配（例：某些网关要 {"reasoning":{"enabled":false}}）。
-  const extraBody = api.extraBody && typeof api.extraBody === 'object' && !Array.isArray(api.extraBody)
-    ? api.extraBody : null;
+  // overrides（专用模型/兜底）请求同样合并——文档承诺的是"每次请求"（审查 2026-09-28）。
+  const extraRaw = overrides && overrides.extraBody !== undefined
+    ? overrides.extraBody
+    : api.extraBody;
+  const extraBody = extraRaw && typeof extraRaw === 'object' && !Array.isArray(extraRaw)
+    ? extraRaw : null;
   if (extraBody) Object.assign(body, extraBody);
+  if (body.stream === true) {
+    // 响应解析固定走非流式（res.json()），stream:true 只会得到解析失败、还被当成可重试错误
+    // 连打三次（表现为"已读不回"）——强制回 false 并提示一次（审查 2026-09-28）。
+    if (!extraBodyStreamWarned) {
+      extraBodyStreamWarned = true;
+      console.warn('[llm] 额外请求参数里的 stream:true 已忽略：本端固定按非流式解析响应。');
+    }
+    body.stream = false;
+  }
 
   const controller = new AbortController();
   const timeoutMs = Math.max(5000, Number(api.timeoutMs) || 180000);
@@ -404,8 +431,12 @@ export async function chatCompletion({
       // 模型级差异：个别模型/网关不认识思考参数会整次 400 —— 一个可选参数不该让消息发不出去。
       // 去掉"我们自己加的"思考参数重试一次（extraBody 是用户显式填的，不动）。
       const patchKeys = thinking.patch ? Object.keys(thinking.patch) : [];
+      // 400 且错误文本提到我们发的思考参数词面（thinking/reasoning 覆盖 thinking.type、
+      // reasoning_effort、enable_thinking 三个族，结构化错误的 error.param 值也在响应体里）。
+      // 别用 invalid/unknown/unexpected 这类泛词：上下文超长等无关 400 的错误体几乎都带
+      // "invalid_request_error"，会误判成参数被拒——白重试一次还打误导日志（审查 2026-09-28）。
       const paramRejected = res.status === 400 && patchKeys.length
-        && /thinking|reasoning|enable_thinking|unsupported|unknown|unexpected|invalid/i.test(text);
+        && /thinking|reasoning/i.test(text);
       if (paramRejected) {
         const retryBody = { ...body };
         for (const k of patchKeys) delete retryBody[k];

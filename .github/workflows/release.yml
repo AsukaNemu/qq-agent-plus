@@ -59,10 +59,23 @@ jobs:
 
       - name: 生成发布说明草稿
         run: |
+          # 基准 tag 必须显式排除当前 tag：旧 tag 被重打（creatordate 变新）会让"第二新"取到
+          # 错误的上一个 tag，区间合法但内容是错的（审查 2026-09-28）；仓库只有当前一个 tag
+          # 时回落到最近 20 条提交。
+          PREV_TAG="$(git tag --sort=-creatordate | grep -vx "${GITHUB_REF_NAME}" | head -1 || true)"
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="${PREV_TAG}..${GITHUB_REF_NAME}"
+          else
+            RANGE=""
+          fi
           {
             echo "## 本次改动"
             echo
-            git log --no-merges --pretty=format:'- %s (%h)' "$(git tag --sort=-creatordate | sed -n '2p')..${GITHUB_REF_NAME}" 2>/dev/null || git log --no-merges --pretty=format:'- %s (%h)' -20
+            if [ -n "$RANGE" ]; then
+              git log --no-merges --pretty=format:'- %s (%h)' "$RANGE" 2>/dev/null || git log --no-merges --pretty=format:'- %s (%h)' -20
+            else
+              git log --no-merges --pretty=format:'- %s (%h)' -20
+            fi
             echo
             echo
             echo "安装与部署见 [docs/OPS.md](docs/OPS.md)。"

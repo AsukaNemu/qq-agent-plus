@@ -2386,6 +2386,33 @@ try {
     fail++; console.log('  FAIL 批量价格弹窗抛错: ' + (e && e.message));
   }
 
+  // ── UI 预设表与后端 MODEL_SERVICES 同步 ──
+  // MODEL_SERVICES_UI 是后端表的手工副本：单边改了 hosts/levels/canDisable 会让档位条展示错档
+  // （2026-09-28 审查）。这里逐家比对，改表漏同步直接红。
+  {
+    const { MODEL_SERVICES } = await import('../src/core/provider-presets.js');
+    const uiTable = vm.runInContext(
+      'MODEL_SERVICES_UI.map((s) => ({ id: s.id, hosts: s.hosts || [], levels: s.levels || [], canDisable: s.canDisable }))',
+      ctx
+    );
+    const backend = new Map(MODEL_SERVICES.map((s) => [s.id, {
+      hosts: s.hosts || [],
+      levels: (s.thinking && s.thinking.uiLevels) || [],
+      canDisable: s.thinking ? s.thinking.canDisable : null
+    }]));
+    const mismatch = uiTable.filter((u) => {
+      const b = backend.get(u.id);
+      if (!b) return true;
+      return JSON.stringify([...u.hosts].sort()) !== JSON.stringify([...b.hosts].sort())
+        || JSON.stringify(u.levels) !== JSON.stringify(b.levels)
+        || u.canDisable !== b.canDisable;
+    });
+    const okSync = uiTable.length === backend.size && mismatch.length === 0;
+    okSync ? pass++ : fail++;
+    console.log('  ' + (okSync ? 'OK   ' : 'FAIL ') + 'UI 预设表与后端 MODEL_SERVICES 一致'
+      + (okSync ? '' : ' -> ' + JSON.stringify(mismatch)));
+  }
+
 } catch (e) {
   fail++;
   console.log('\n加载 app.js 失败: ' + (e && e.message));

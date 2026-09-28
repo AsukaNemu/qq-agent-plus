@@ -168,7 +168,11 @@ export function findSticker(entries, ref) {
     if (e.id === raw || e.resId === raw) return true;
     if (e.md5 && e.md5 === md5) return true;
     const eUrl = String(e.url || '').replace(/\/+$/, '').replace(/^https?:\/\//i, '');
-    if (eUrl && urlNormalized && (eUrl === urlNormalized || eUrl.includes(urlNormalized) || urlNormalized.includes(eUrl))) return true;
+    // 双向子串只对"长得像 URL"的查询开放（含 / 或 .）：短词（如备注里的 "gif"）会撞上任何
+    // 恰好含它的图片链接，把发错图伪装成命中（2026-09-28 审查收紧；该级为既有行为）。
+    const urlish = /[./]/.test(urlNormalized);
+    if (eUrl && urlNormalized && (eUrl === urlNormalized
+      || (urlish && (eUrl.includes(urlNormalized) || urlNormalized.includes(eUrl))))) return true;
     return false;
   });
   if (direct) return direct;

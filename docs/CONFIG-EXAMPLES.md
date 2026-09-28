@@ -3,18 +3,37 @@
 配置写在数据目录的 `config.json`（默认 `data/config.json`，含密钥，已被 Git 忽略）。
 下面是本分支新增或调整过的键，其余键保持上游默认即可。
 
-## api.thinking：按用途控制思考模式
+## api.thinking：思考档位（v0.7.4 起可按渠道/按供应商/按任务分设）
+
+语义值：`on`（跟随服务商默认，也是默认值）/ `off` / `low` / `medium` / `high` / `max`。
+程序按你填的 Base URL 识别渠道（内置 8 家预设），把档位翻译成该家真实参数；
+预设没有的档位不会出现在控制台档位条上（例如 Command Code 没有"关"）。
 
 ```json
 {
   "api": {
-    "thinking": { "chat": "off", "default": "on" }
+    "thinking": { "chat": "off", "default": "on" },
+    "thinkingByService": {
+      "api.deepseek.com": "low",
+      "open.bigmodel.cn": { "chat": "off", "judge": "high", "write": "max", "default": "on" }
+    },
+    "thinkingParams": { "low": { "reasoning_effort": "low" } },
+    "extraBody": { "reasoning": { "enabled": false } }
   }
 }
 ```
 
-- `chat`：聊天场景是否带思考（`off` 降低延迟与成本；部分模型忽略该字段，行为不受影响）。
-- `default`：判断、写作等其余用途；`on` 保留思考。
+- `thinking`：全局兜底。字符串 = 所有任务一档；对象 = 按任务分设，`chat`（聊天）/ `judge`
+  （判断·总结：记忆整理、身份与关系评估、收表情）/ `write`（每日动态、空间互动文案）/ `default`（其他）。
+- `thinkingByService`：**按供应商独立**，键是 Base URL 的主机名（含端口、小写）。某家配了自己的条，
+  就覆盖全局 `thinking`；没配的家用全局。控制台 → 设置 → 高级选项里点档位条保存后自动写入。
+- `thinkingParams`：**自定义档位映射**，给不在预设内的渠道用（键 = 档位名，值 = 该档实际发送的参数对象）。
+  渠道识别不出来时会优先用它。
+- `extraBody`：**额外请求参数**，以最高优先级合并进每次模型请求（含专用模型/兜底请求）；
+  服务商文档里的怪参数都填这里。注意 `stream` 会被强制回非流式；`model` / `messages` / `tools`
+  会整段替换对应字段。清空 JSON 时控制台走 `__replace__` 才能真删（deepMerge 只并集不删键）。
+- 控制台「测试思考能力」按钮可按当前地址与 Key 实测：选"关掉"给"能不能关"的结论，
+  选档位只报这一档能否通过；请求被 400 拒绝且错误提到 thinking/reasoning 参数时自动摘掉重试一次。
 
 ## api.fallback：兜底模型
 

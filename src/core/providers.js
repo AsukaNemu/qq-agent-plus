@@ -1,7 +1,7 @@
 // 多提供商模型目录：统一使用 OpenAI 兼容接口，由控制台维护。
 import { getConfig, updateConfig } from './config.js';
 import { assertTimeAllowed, watchTimeWindow } from './time-gate.js';
-import { modelServiceOfBaseUrl, thinkingPatchFor, resolveThinkingPatch, normalizeThinkingIntent } from './provider-presets.js';
+import { modelServiceOfBaseUrl, modelServiceById, thinkingPatchFor, resolveThinkingPatch, normalizeThinkingIntent, effectiveThinkingRaw, hostOf } from './provider-presets.js';
 
 /** 当前生效的提供商目录（配置里的 providers）。 */
 export function currentProviders() {
@@ -153,9 +153,18 @@ export async function probeThinking({ providerId = '', baseUrl = '', apiKey = ''
   const modelId = String(model || cfg?.api?.model || (p?.models || [])[0] || '').trim();
   if (!base) throw new Error('请先填写 Base URL');
   if (!modelId) throw new Error('请先选择/填写模型 ID');
-  const service = (p && p.preset && modelServiceOfBaseUrl(p.baseURL)) || modelServiceOfBaseUrl(base);
-  const serviceId = p?.preset || service?.id || '';
-  const intent = normalizeThinkingIntent(thinking !== undefined ? thinking : cfg?.api?.thinking, 'chat');
+  // 渠道形状按"实测地址"解析：p.preset 只在 provider 存的地址与实测地址同主机时才可信——
+  // 换了地址未保存就探测，按旧家形状发参数会得出错误结论（审查 2026-09-28）。
+  const presetApplies = !!(p?.preset && p.baseURL && hostOf(p.baseURL) === hostOf(base));
+  const service = modelServiceOfBaseUrl(base)
+    || (presetApplies ? modelServiceById(p.preset) : null);
+  const serviceId = (presetApplies ? p.preset : '') || service?.id || '';
+  // 档位意图：调用方显式给了就用它的；否则按"实测地址"取每供应商设置（分设配置也参与），
+  // 不再退回裸的全局 api.thinking（审查 2026-09-28：分设模式下探测测的应是该家配置的档）。
+  const intent = normalizeThinkingIntent(
+    thinking !== undefined ? thinking : effectiveThinkingRaw(cfg?.api, hostOf(base)),
+    'chat'
+  );
   // 探测两类问题，语义分开（终审 P1：此前把"当前档位"的实测结果误当"能关闭"落盘）：
   //  - 选择是 off / 未设(on)：测"这个渠道能不能关掉思考" → canDisable 有结论（含近似档说明）；
   //  - 选择是具体档位：只报"该档位实发与思考 token"，不下"可关闭"的结论。
@@ -202,7 +211,7 @@ export async function probeThinking({ providerId = '', baseUrl = '', apiKey = ''
         note: `探测请求失败 HTTP ${res.status}${errText ? `：${errText}` : ''}`,
         ...(levels ? { levels } : {})
       };
-      saveProbe(p, result);
+      saveProbe(p, result, base);
       return result;
     }
     const usage = payload?.usage || {};
@@ -226,13 +235,13 @@ export async function probeThinking({ providerId = '', baseUrl = '', apiKey = ''
       note = `已按「${intent}」档实测：思考 token ${reasoningTokens || 0}${hasReasoning ? '' : '（未见思考痕迹）'}；本次不含"能否关闭"的结论，选「关闭」再测即可。`;
     }
     const result = { ok: true, latencyMs, serviceId, sentPatch: sendPatch, hasReasoning, canDisable, reasoningTokens, note };
-    saveProbe(p, result);
+    saveProbe(p, result, base);
     return result;
   } catch (error) {
     const latencyMs = Date.now() - startedAt;
     const msg = String(error?.cause?.message ?? error?.message ?? error);
     const result = { ok: false, latencyMs, serviceId, sentPatch: sendPatch, note: msg === '超时' ? '探测超时' : `探测失败：${msg}` };
-    saveProbe(p, result);
+    saveProbe(p, result, base);
     return result;
   } finally {
     releaseTimeGuard();
@@ -241,9 +250,10 @@ export async function probeThinking({ providerId = '', baseUrl = '', apiKey = ''
 }
 
 /** 探测结果落盘（控制台展示「已实测」标记用）。
- *  有 provider 记录 → 记到该记录；没有（直接用顶层 api.baseUrl 的部署）→ 记到 api.thinkingProbe，
- *  同时带上 baseUrl，换地址后旧结论自动作废。 */
-function saveProbe(provider, result) {
+ *  归属按"实测地址"算（审查 2026-09-28）：实测地址与 provider 存的地址同主机 → 记到该 provider 名下；
+ *  否则记到 api.thinkingProbe 并带上实测的 baseUrl——换地址后旧结论自动作废，也
+ *  不会把测自新地址的结论挂在旧 provider 上。 */
+function saveProbe(provider, result, probedBase = '') {
   const snapshot = {
     checkedAt: Date.now(),
     ok: result.ok === true,
@@ -253,7 +263,10 @@ function saveProbe(provider, result) {
     note: String(result.note || '').slice(0, 300)
   };
   try {
-    if (provider?.id && provider.id.startsWith('custom_')) {
+    const sameHost = !!(provider?.id && provider.id.startsWith('custom_')
+      && provider.baseURL && probedBase
+      && hostOf(provider.baseURL) === hostOf(probedBase));
+    if (sameHost) {
       const providers = currentProviders().map((x) => {
         const { apiKey: _ak, ...rest } = x;
         return rest;
@@ -265,8 +278,7 @@ function saveProbe(provider, result) {
         return;
       }
     }
-    const cfg = getConfig();
-    updateConfig({ api: { thinkingProbe: { ...snapshot, baseUrl: normalizeBaseUrl(cfg?.api?.baseUrl || '') } } });
+    updateConfig({ api: { thinkingProbe: { ...snapshot, baseUrl: normalizeBaseUrl(probedBase || '') } } });
   } catch { /* 落盘失败不影响探测结果本身 */ }
 }
 
@@ -332,10 +344,12 @@ export function upsertProvider({ baseUrl, apiKey, models = [], preset = '' }) {
   if (apiKey) keys[id] = String(apiKey).trim();
   // 新建的提供商自动切换为当前模型（控制台"确认添加"的文案一直这么承诺，
   // 此前却只建目录不切换 —— 用户添加完看到「尚未选择模型」+ 空的模型目录框）。
+  // api.baseUrl 一并同步：控制台地址框回显与思考设置的归属键都读它，不同步会出现
+  // "界面显示旧地址、思考设置写到旧 host"（审查 2026-09-28）。
   updateConfig({
     providers,
     ...(apiKey ? { providerKeys: keys } : {}),
-    api: { provider: id, model: entries[0]?.id || '' }
+    api: { provider: id, model: entries[0]?.id || '', baseUrl: base }
   });
   return { provider: withResolvedKey(provider), created: true };
 }

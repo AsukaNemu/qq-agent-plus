@@ -56,8 +56,9 @@
   `reasoning_effort`（且没有"关"档，`thinking` 字段被网关静默吞掉）、DeepSeek 官方认 `thinking.type=disabled`、
   通义认 `enable_thinking` + `thinking_budget`、OpenAI 用 `none` 当"关"……写死的形态在别的渠道上要么静默失效、
   要么被 400 拒绝。现行做法：语义层只表达意图（跟随服务商默认 / 关 / 低 / 中 / 高 / 最高），由渠道预设按
-  baseUrl 主机名翻译成该家真实形态；预设只列官方文档给出的档位（智谱 GLM-5.3/4.7/4.5V 强制思考、Command Code
-  无 off 档 → 都不列"关"）。三处细分：**按供应商独立**（`api.thinkingByService[host]` 覆盖全局 `api.thinking`）、
+  baseUrl 主机名翻译成该家真实形态；档位表以官方文档/实测为准，个别未逐字核对的渠道在 `source` 里如实标注、
+  由"参数被 400 拒绝就摘除重试"兜底（Command Code 官方无"关"档 → 不列「关」；智谱列「关」并注明
+  GLM-5.3/4.7/4.5V 强制思考、选了也会被兜底忽略）。三处细分：**按供应商独立**（`api.thinkingByService[host]` 覆盖全局 `api.thinking`）、
   **按任务分设**（`{chat, judge, write, default}`：聊天 / 判断·总结 / 写作 / 其他，例如"聊天关、判断开"，
   带 `purpose` 的调用点在编排器、表情判断、身份/关系试航、空间互动等处）、**两条逃生口**（`extraBody` 直接并进
   请求体、优先级最高；`thinkingParams` 给不在预设内的渠道自定义档位映射；控制台里清空 JSON 要 `__replace__` 才真删）。
