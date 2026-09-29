@@ -234,3 +234,51 @@ test('私聊豁免开关：关着不带标记、开着对在册玩家带 gameSco
   assert.ok(onPrivs.length >= 6, '6 人各一条身份私聊');
   assert.ok(onPrivs.every((x) => x.options?.gameScoped === true), '开关开着且收件人在册 → 每条私聊都带豁免标记');
 });
+
+test('群里的"各种人"（老游戏）：非参与者投票不计；退出有退路；数字炸弹谁都能猜', async () => {
+  // 谁是卧底：没参加的人投"投 3"不计票
+  const w1 = makeWorld({ rng: () => 0.6 });
+  await w1.mgr.start({ chatKey: 'group:1', gameId: 'undercover' });
+  const order1 = w1.mgr.games.get('group:1').state.order;
+  for (const uid of order1) say(w1.store, uid, `群友${uid.slice(1)}`, '日常用品');
+  await w1.mgr.handleNewMessages('group:1');
+  w1.sent.length = 0;
+  say(w1.store, 'u99', '围观群众', '投 1');       // 局外人投票
+  await w1.mgr.handleNewMessages('group:1');
+  assert.equal(Object.keys(w1.mgr.games.get('group:1').state.votes || {}).length, 0, '局外人的票不计');
+
+  // 谁是卧底：局内人说"不玩了"→ 移出本局并播报（身份不公布）
+  const quitter = order1[0];
+  say(w1.store, quitter, `群友${quitter.slice(1)}`, '不玩了');
+  await w1.mgr.handleNewMessages('group:1');
+  const st = w1.mgr.games.get('group:1')?.state;
+  assert.ok(!st || st.eliminated.includes(quitter), '退出的人要从本局移出');
+  assert.ok(w1.sent.some((x) => /退出/.test(x.msgs[0])), '群里要播报退出');
+
+  // 数字炸弹：围观者也能猜（公共游戏，刻意的）——踩中照样结算
+  const w2 = makeWorld({ rng: () => 0.42 });   // 炸弹固定 43
+  await w2.mgr.start({ chatKey: 'group:1', gameId: 'number-bomb' });
+  w2.sent.length = 0;
+  say(w2.store, 'u99', '围观群众', '猜 43！');
+  await w2.mgr.handleNewMessages('group:1');
+  assert.equal(w2.mgr.games.has('group:1'), false, '围观者猜中也要结算');
+  assert.match(w2.sent.at(-1).msgs[0], /踩中炸弹 43/);
+});
+
+test('私聊静默消耗：插件认领但不回执的消息，同样标记已读、不唤醒模型', async () => {
+  const { store, sent, mgr } = makeWorld({ players: 6 });
+  await mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  const state = mgr.games.get('group:1').state;
+  const guard = state.roles.find((r) => r.role === 'guard');
+  const villager = state.roles.find((r) => r.role === 'villager');
+  sent.length = 0;
+  // 先正常提交一次（有回执）
+  const first = store.appendIncoming(`private:${guard.userId}`, { mid: 's1', ts: Date.now(), senderId: guard.userId, senderName: guard.name, text: `守 ${state.roles.findIndex((r) => r.userId === villager.userId) + 1}`, reply: null, media: [] });
+  assert.equal(await mgr.consumePrivateAction(`private:${guard.userId}`, first), true);
+  sent.length = 0;
+  // 同目标重复提交 → 插件静默消耗：接管（true）、标记已读、但一条消息都不发
+  const again = store.appendIncoming(`private:${guard.userId}`, { mid: 's2', ts: Date.now(), senderId: guard.userId, senderName: guard.name, text: first.text, reply: null, media: [] });
+  assert.equal(await mgr.consumePrivateAction(`private:${guard.userId}`, again), true, '静默也要算"接管"，否则会唤起模型');
+  assert.equal(sent.length, 0, '静默消耗不发任何消息');
+  assert.equal(store.findByMid(`private:${guard.userId}`, 's2').state, 'acked', '同样要标记已读');
+});

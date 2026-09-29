@@ -21,7 +21,7 @@ const PAIRS = [
 
 const alive = (s) => s.roles.filter((r) => !s.eliminated.includes(r.userId));
 
-export function create({ players, rng, now = 0 } = {}) {
+export function create({ players, rng, now = 0, reveal = true } = {}) {
   // 局部常量而不是直接用解构参数：ops scan 认不出解构出来的名字（会当成未定义调用点）
   const rand = typeof rng === 'function' ? rng : Math.random;
   const pair = PAIRS[Math.floor(rand() * PAIRS.length)];
@@ -35,6 +35,8 @@ export function create({ players, rng, now = 0 } = {}) {
   }));
   return {
     phase: 'speak',
+    // 结算是否公开词（控制台「结算时公开词与身份」那个勾；默认开）
+    reveal: reveal !== false,
     round: 1,
     maxRounds: 4,
     order: roles.map((r) => r.userId),
@@ -85,13 +87,13 @@ function tally(state, now = 0) {
   const rest = state.roles.filter((r) => !eliminated.includes(r.userId));
   const spyAlive = rest.some((r) => r.spy);
   if (!spyAlive) {
-    const words = state.roles.map((r) => `${r.name}=${r.word}`).join('，');
-    return { state: { ...state, eliminated, phase: 'ended' }, effects: [...effects, { type: 'end', result: `平民获胜——卧底是 ${out.name}！词：${words}` }] };
+    const words = state.reveal === false ? '' : `词：${state.roles.map((r) => `${r.name}=${r.word}`).join('，')}`;
+    return { state: { ...state, eliminated, phase: 'ended' }, effects: [...effects, { type: 'end', result: `平民获胜——卧底是 ${out.name}！${words}` }] };
   }
   if (rest.length <= 2) {
     const spy = rest.find((r) => r.spy);
-    const words = state.roles.map((r) => `${r.name}=${r.word}`).join('，');
-    return { state: { ...state, eliminated, phase: 'ended' }, effects: [...effects, { type: 'end', result: `卧底获胜——只剩 ${rest.length} 人且卧底（${spy.name}）还在场。词：${words}` }] };
+    const words = state.reveal === false ? '' : `词：${state.roles.map((r) => `${r.name}=${r.word}`).join('，')}`;
+    return { state: { ...state, eliminated, phase: 'ended' }, effects: [...effects, { type: 'end', result: `卧底获胜——只剩 ${rest.length} 人且卧底（${spy.name}）还在场。${words}` }] };
   }
   return nextRound({ ...state, eliminated }, effects, now);
 }
@@ -112,11 +114,60 @@ function nextRound(state, effects, now = 0) {
   };
 }
 
+function checkWin(state) {
+  const rest = state.roles.filter((r) => !state.eliminated.includes(r.userId));
+  const spyAlive = rest.some((r) => r.spy);
+  if (!spyAlive) return 'good';
+  if (rest.length <= 2) return 'spy';
+  return '';
+}
+
+/** 玩家退出：移出本局、不公布身份；该他发言就直接跳过，票已投的就作废。 */
+function quitPlayer(state, me, now = 0) {
+  const s = JSON.parse(JSON.stringify(state));
+  s.eliminated = [...s.eliminated, me.userId];
+  delete s.votes[me.userId];
+  const i = s.order.indexOf(me.userId);
+  if (i >= 0) {
+    s.order = s.order.filter((x) => x !== me.userId);
+    if (i < s.cursor) s.cursor -= 1;
+  }
+  const effects = [
+    { type: 'private', userId: me.userId, text: '【谁是卧底】好，把你移出本局了，接下来正常聊天就行（不再催你发言）。' },
+    { type: 'public', text: `👋 ${me.name} 退出了本局（身份不公布），还剩 ${s.roles.length - s.eliminated.length} 人。` }
+  ];
+  const win = checkWin(s);
+  if (win === 'good') {
+    const words = s.reveal === false ? '' : `词：${s.roles.map((r) => `${r.name}=${r.word}`).join('，')}`;
+    return { state: { ...s, phase: 'ended' }, effects: [...effects, { type: 'end', result: `平民获胜——卧底（${me.name}）退出了本局。${words}` }] };
+  }
+  if (win === 'spy') {
+    const spy = s.roles.filter((r) => !s.eliminated.includes(r.userId)).find((r) => r.spy);
+    const words = s.reveal === false ? '' : `词：${s.roles.map((r) => `${r.name}=${r.word}`).join('，')}`;
+    return { state: { ...s, phase: 'ended' }, effects: [...effects, { type: 'end', result: `卧底获胜——只剩 ${s.roles.length - s.eliminated.length} 人，卧底（${spy.name}）还在场。${words}` }] };
+  }
+  // 发言阶段退出的正好是当前发言者：跳过他就继续；所有存活者都发完 → 进投票
+  if (s.phase === 'speak' && s.cursor >= s.order.length) {
+    s.phase = 'vote';
+    s.votes = {};
+    s.phaseStartedAt = now;
+    effects.push({ type: 'public', text: `第 ${s.round} 轮发言结束，开始投票：发「投 3」或「投 @他」都行。` });
+  } else if (s.phase === 'vote' && Object.keys(s.votes).length >= s.roles.filter((r) => !s.eliminated.includes(r.userId)).length) {
+    const out = tally(s, now);
+    return { state: out.state, effects: [...effects, ...out.effects] };
+  }
+  return { state: s, effects };
+}
+
 export function onMessage(state, msg, { now = 0 } = {}) {
   const s = JSON.parse(JSON.stringify(state));
   const uid = String(msg.userId);
   const me = s.roles.find((r) => r.userId === uid);
   if (!me || s.phase === 'ended' || s.eliminated.includes(uid)) return { state: s, effects: [] };
+  // 退出/观战：名单取"最近发过言的人"，得给不想玩的人一条退路
+  if (/^\s*(不玩了?|不参与|退出|退赛|弃权|我观战|观战|别带我)\s*[!！。.~～…]?\s*$/.test(String(msg.text || '').trim())) {
+    return quitPlayer(s, me, now);
+  }
 
   if (s.phase === 'speak') {
     if (s.order[s.cursor] !== uid) return { state: s, effects: [] };

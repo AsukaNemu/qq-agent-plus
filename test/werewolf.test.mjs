@@ -168,3 +168,59 @@ test('夜数上限：到顶那一夜结束时判平局并公布身份（计时�
   assert.match(out.effects.at(-1).result, /平局/);
   assert.match(out.effects.at(-1).result, /身份：/);
 });
+
+test('群里的"各种人"：非参与者投票不计、刷屏不刷私聊、退出有退路、结算可按开关保密', () => {
+  // 1) 非参与者：在群里"投 3"、发行动词，都不进状态机
+  let s = newGame();
+  const seer = by(s, 'seer')[0];
+  s = pm(s, seer.userId, `查 ${idx(s, seer.userId)}`).state;
+  s = wolf.onTick(s, { now: s.phaseStartedAt + 95 * 1000, rng: () => 0 }).state;   // 天亮
+  for (const uid of s.order) s = wolf.onMessage(s, { userId: uid, text: '发言', ts: 1 }, { now: 1 }).state;
+  assert.equal(s.phase, 'vote');
+  const outsider = wolf.onMessage(s, { userId: 'u999', text: `投 ${idx(s, seer.userId)}`, ts: 2 }, { now: 2 });
+  assert.equal(Object.keys(outsider.state.votes).length, 0, '没参加的人投票不计');
+  assert.equal(outsider.effects.length, 0, '也不该由引擎回话（交给模型正常聊）');
+
+  // 2) 刷屏：同一目标重复提交 → 静默消耗（consume），不再逐条回执
+  let n = newGame();
+  const guard = by(n, 'guard')[0];
+  const target = by(n, 'villager')[0];
+  n = pm(n, guard.userId, `守 ${idx(n, target.userId)}`).state;
+  const again = pm(n, guard.userId, `守 ${idx(n, target.userId)}`);
+  assert.equal(again.consume, true, '同一目标重复提交要静默消耗');
+  assert.equal((again.effects || []).length, 0, '重复提交不再回执');
+  // 反复改目标超过每人每夜上限 → 后续静默，但行动仍然记下（最后一次生效）
+  let m = n;
+  let silent = 0;
+  for (let i = 0; i < 6; i += 1) {
+    const t = n.roles.filter((r) => r.alive)[i % 6];
+    const out = pm(m, guard.userId, `守 ${idx(m, t.userId)}`);
+    m = out.state;
+    if (out.consume && !(out.effects || []).length) silent += 1;
+  }
+  assert.ok(silent >= 1, '超过回执上限后要静默消耗（不回消息也不唤醒模型）');
+  assert.ok(m.pending.guard, '刷屏期间行动仍然被记下');
+
+  // 3) 退出：群里说"不玩了"也受理；退出一只狼局继续，狼全退光才结束
+  const q = newGame();
+  const [wa, wb] = by(q, 'wolf');
+  const q1 = wolf.onMessage(q, { userId: wa.userId, text: '不玩了', ts: 1 }, { now: 1 });
+  assert.equal(q1.state.phase, 'night', '还剩一只狼 → 局继续');
+  assert.equal(q1.state.roles.find((r) => r.userId === wa.userId).alive, false, '退出的人移出本局');
+  assert.equal(q1.state.roles.find((r) => r.userId === wa.userId).quit, true);
+  assert.ok(q1.effects.some((e) => e.type === 'public' && /退出/.test(e.text) && e.text.includes(wa.name)), '群里要播报退出（不公布身份）');
+  assert.ok(q1.effects.some((e) => e.type === 'private' && e.userId === wa.userId), '本人要收到确认');
+  const q2 = wolf.onMessage(q1.state, { userId: wb.userId, text: '退赛', ts: 2 }, { now: 2 });
+  assert.equal(q2.state.phase, 'ended', '狼全退光 → 结束');
+  assert.match(q2.effects.at(-1).result, /好人获胜/);
+
+  // 4) reveal=false：结算不公布身份（同一局把两只狼都劝退）
+  const r = { ...newGame(), reveal: false };
+  const [ra, rb] = by(r, 'wolf');
+  const r1 = wolf.onMessage(r, { userId: ra.userId, text: '退出', ts: 1 }, { now: 1 });
+  const r2 = wolf.onMessage(r1.state, { userId: rb.userId, text: '退出', ts: 2 }, { now: 2 });
+  assert.equal(r2.state.phase, 'ended');
+  const endText = r2.effects.at(-1).result;
+  assert.match(endText, /好人获胜/);
+  assert.equal(/身份：|狼人（|预言家/.test(endText), false, '关掉公开开关后结算不带身份');
+});

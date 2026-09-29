@@ -37,6 +37,8 @@ export class GroupGameManager {
       // 游戏期间私聊豁免（默认关）：开启后，引擎发给**本局在册玩家**的私聊不再要求对方
       // 在 allow.private 白名单里（报名=同意接收）；deny 仍然优先。模型自己的发送永远受白名单。
       allowGamePrivateDm: g.allowGamePrivateDm === true,
+      // 结算是否公开词/身份（界面上那个勾；之前只有 UI 在写、引擎从不读，是个死开关）
+      revealWords: g.revealWords !== false,
       maxDurationMin: Math.min(180, Math.max(5, Number(g.maxDurationMin) || 60)),
       dailyLimitPerChat: Math.min(50, Math.max(1, Number(g.dailyLimitPerChat) || 6))
     };
@@ -146,12 +148,14 @@ export class GroupGameManager {
       text: String(message?.text || ''),
       ts: Number(message?.ts) || this.now()
     }, { now: this.now(), deadline: g.deadlineAt });
-    if (!out?.effects?.length) return false;      // 没解析出来 → 交回普通链路
+    // 插件可以用 consume:true 表示"我认领了这条但不必回执"（例如同一目标的重复提交、
+    // 或回执已经超过每人每夜上限）——静默消耗，既不回消息也不唤醒模型
+    if (!out?.effects?.length && out?.consume !== true) return false;   // 没解析出来 → 交回普通链路
     g.state = out.state;
     g.privateSeen = g.privateSeen && typeof g.privateSeen === 'object' ? g.privateSeen : {};
     g.privateSeen[uid] = Math.max(Number(g.privateSeen[uid] || 0), Number(message?.id) || 0);
     this.#save();
-    await this.#applyEffects(found.groupKey, out.effects);
+    await this.#applyEffects(found.groupKey, out.effects || []);
     // 就地标记已读：这条私聊不再唤醒模型（省调用 + 零泄密面）
     try { this.store.markRead(chatKey, [Number(message?.id)]); } catch { /* 标记失败不影响本局 */ }
     if (out.state?.phase === 'ended') this.#finishIfEnded(found.groupKey);
@@ -181,7 +185,7 @@ export class GroupGameManager {
         }, { now: this.now(), deadline: g.deadlineAt });
         state = out.state;
         effects.push(...(out.effects || []));
-        if (out.effects?.length) { try { this.store.markRead(key, [Number(m.id)]); } catch { /* 忽略 */ } }
+        if (out.effects?.length || out.consume === true) { try { this.store.markRead(key, [Number(m.id)]); } catch { /* 忽略 */ } }
       }
     }
     g.state = state;
@@ -238,7 +242,7 @@ export class GroupGameManager {
     if (roster.length < plugin.meta.minPlayers) {
       return { ok: false, error: `${plugin.meta.name}至少要 ${plugin.meta.minPlayers} 个最近发过言的群友（现在只有 ${roster.length} 个）` };
     }
-    const state = plugin.create({ players: roster, rng: this.rng, now });
+    const state = plugin.create({ players: roster, rng: this.rng, now, reveal: cfg.revealWords });
     // 不带 readOnly：触发开局的那些消息此刻还是 leased，取 readOnly 会拿到更小的 id，
     // 下一轮 tick 会把它们再喂一遍（2026-09-28 审查 P3）
     const last = this.store.recent(chatKey, { limit: 1, includeSelf: true });

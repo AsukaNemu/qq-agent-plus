@@ -26,10 +26,15 @@ const ROLE_TABLE = {
 };
 const ROLE_NAME = { wolf: '狼人', seer: '预言家', guard: '守卫', villager: '平民' };
 const MAX_NIGHTS = 6;
+// 每人每夜的回执上限：有人反复私聊刷行动时，超过就不再逐条回（静默消耗），
+// 免得把对方的私聊刷爆、也免得触发协议端限频
+const MAX_ACKS_PER_NIGHT = 4;
+// 退出/观战：不想被拉进局的人（名单取的是"最近发过言的人"，难免有不想玩的）
+const QUIT_RE = /^\s*(不玩了?|不参与|退出|退赛|弃权|我观战|观战|别带我)\s*[!！。.~～…]?\s*$/;
 
 const aliveList = (state) => state.roles.filter((r) => r.alive);
 
-export function create({ players, rng, now = 0 } = {}) {
+export function create({ players, rng, now = 0, reveal = true } = {}) {
   const rand = typeof rng === 'function' ? rng : Math.random;
   const list = (players || []).map((p) => ({
     userId: String(p.userId),
@@ -45,11 +50,13 @@ export function create({ players, rng, now = 0 } = {}) {
   const roles = shuffled.map((p, i) => ({ ...p, role: table[i] || 'villager', alive: true }));
   return {
     phase: 'night',
+    reveal: reveal !== false,   // 结算是否公开身份与夜晚记录（控制台那个勾）
     night: 1,
     roles,
     order: roles.map((r) => r.userId),
     cursor: 0,
     pending: { guard: '', wolves: {}, seer: '' },   // 本夜已收到的行动
+    ackCount: {},                                    // 每人每夜的回执计数（防刷屏）
     nightLog: [],                                    // 每晚结算，结束时公布
     phaseStartedAt: now,
     votes: {},
@@ -132,6 +139,32 @@ function nightReady(state) {
   return need.every(Boolean);
 }
 
+/**
+ * 玩家退出（"不玩了/退出/观战"）：移出本局、不公布身份，重算胜负。
+ * 名单取"最近发过言的人"，难免拉进不想玩的人——必须给一条体面的退路。
+ */
+function quitPlayer(state, me, now = 0) {
+  const s = JSON.parse(JSON.stringify(state));
+  const target = s.roles.find((r) => r.userId === me.userId);
+  if (!target || !target.alive) {
+    return { state: s, effects: [{ type: 'private', userId: me.userId, text: '【狼人杀】你本来就不在局里（或已经出局），不用退出。' }] };
+  }
+  target.alive = false;
+  target.quit = true;
+  const effects = [
+    { type: 'private', userId: me.userId, text: '【狼人杀】好，把你移出本局了，接下来你可以正常聊天或围观（不会给你发行动提示）。' },
+    { type: 'public', text: `👋 ${target.name} 退出了本局（不计胜负、身份不公布），剩下 ${aliveList(s).length} 人继续。` }
+  ];
+  const win = checkWin(s);
+  if (win) return { state: { ...s, phase: 'ended' }, effects: [...effects, winEffect(s, win)] };
+  // 退出的正好是当前该行动的人：别的行动都齐了就立刻结算
+  if (s.phase === 'night' && nightReady(s)) {
+    const out = resolveNight(s, Math.random, now);
+    return { state: out.state, effects: [...effects, ...out.effects] };
+  }
+  return { state: s, effects };
+}
+
 /** 结算夜晚：守卫挡刀 → 平安夜；否则狼刀目标出局；公布死讯（不公布身份）。 */
 function resolveNight(state, rng = Math.random, now = 0) {
   const s = JSON.parse(JSON.stringify(state));
@@ -171,6 +204,7 @@ function resolveNight(state, rng = Math.random, now = 0) {
     effects.push({ type: 'public', text: `🌅 天亮了（第 ${s.night} 夜）：平安夜，昨晚没有人出局。` });
   }
   s.pending = { guard: '', wolves: {}, seer: '' };
+  s.ackCount = {};
   const win = checkWin(s);
   if (win) return { state: { ...s, phase: 'ended' }, effects: [...effects, winEffect(s, win)] };
   s.phase = 'day';
@@ -195,11 +229,13 @@ function checkWin(state) {
 }
 
 function winEffect(state, win) {
-  const reveal = state.roles.map((r, i) => `${i + 1}=${r.name}（${ROLE_NAME[r.role]}${r.alive ? '' : '·已出局'}）`).join('，');
+  const head = win === 'wolf' ? '狼人获胜' : '好人获胜';
+  if (state.reveal === false) return { type: 'end', result: `${head}（本局未公开身份）。` };
+  const roles = state.roles.map((r, i) => `${i + 1}=${r.name}（${ROLE_NAME[r.role]}${r.alive ? '' : '·已出局'}）`).join('，');
   const nights = (state.nightLog || []).map((n) => `第 ${n.night} 夜：守${n.guard || '-'}／刀${n.wolf || '-'}${n.seer ? `／查${n.seer}${n.seerSawWolf ? '（狼）' : '（好人）'}` : ''}`).join('；');
   return {
     type: 'end',
-    result: `${win === 'wolf' ? '狼人获胜' : '好人获胜'}。身份：${reveal}。${nights ? `夜晚记录：${nights}` : ''}`
+    result: `${head}。身份：${roles}。${nights ? `夜晚记录：${nights}` : ''}`
   };
 }
 
@@ -229,8 +265,8 @@ function tally(state, now = 0) {
 function toNight(state, effects, now = 0) {
   const s = { ...state, phase: 'night', night: (state.night || 1) + 1, cursor: 0, votes: {}, phaseStartedAt: now || 0 };
   if (s.night > (state.maxNights || MAX_NIGHTS)) {
-    const reveal = s.roles.map((r, i) => `${i + 1}=${r.name}（${ROLE_NAME[r.role]}）`).join('，');
-    return { state: { ...s, phase: 'ended' }, effects: [...effects, { type: 'end', result: `夜晚数用尽，本局平局。身份：${reveal}` }] };
+    const tail = s.reveal === false ? '' : `身份：${s.roles.map((r, i) => `${i + 1}=${r.name}（${ROLE_NAME[r.role]}）`).join('，')}`;
+    return { state: { ...s, phase: 'ended' }, effects: [...effects, { type: 'end', result: `夜晚数用尽，本局平局。${tail}` }] };
   }
   const aliveNames = aliveList(s).map((r) => r.name).join('、');
   effects.push({ type: 'public', text: `🌙 天黑请闭眼（第 ${s.night} 夜，存活：${aliveNames}）。` });
@@ -243,7 +279,10 @@ export function onMessage(state, msg, { now = 0 } = {}) {
   const s = JSON.parse(JSON.stringify(state));
   const uid = String(msg.userId);
   const me = s.roles.find((r) => r.userId === uid);
-  if (!me || !me.alive || s.phase === 'ended') return { state: s, effects: [] };
+  if (!me || s.phase === 'ended') return { state: s, effects: [] };
+  // 群里说"不玩了"同样受理（有人只习惯在群里说话）
+  if (me.alive && QUIT_RE.test(String(msg.text || '').trim())) return quitPlayer(s, me, now);
+  if (!me.alive) return { state: s, effects: [] };
 
   if (s.phase === 'day') {
     if (s.order[s.cursor] !== uid) return { state: s, effects: [] };
@@ -278,31 +317,51 @@ export function onPrivateMessage(state, msg, { now = 0, rng = Math.random } = {}
   const uid = String(msg.userId);
   const me = s.roles.find((r) => r.userId === uid);
   if (!me) return { state: s, effects: [] };
+  // 退出/观战：任何阶段都受理（名单是"最近发过言的人"，有人并不想玩）
+  if (QUIT_RE.test(String(msg.text || ''))) return quitPlayer(s, me, now);
   if (s.phase !== 'night') return { state: s, effects: [] };   // 白天私聊照常聊天
   if (!me.alive) {
-    // 出局的玩家夜里私聊：明确告诉他没行动，别去猜活人的事
+    // 出局的玩家夜里私聊：明确告诉他没行动，别去猜活人的事（同样受配额，防刷屏）
+    const seen = Number(s.ackCount?.[uid] || 0);
+    s.ackCount = { ...(s.ackCount || {}), [uid]: seen + 1 };
+    if (seen >= MAX_ACKS_PER_NIGHT) return { state: s, effects: [], consume: true };
     return { state: s, effects: [{ type: 'private', userId: uid, text: '【狼人杀】你已经出局了，夜里没有行动，安心等到局末看身份吧。' }] };
   }
-  const num = () => idxOf(s, parseTarget(s, msg.text) || { userId: '?' }) || '?';
+  // 回执配额（每人每夜最多几条）：满了就静默消耗——行动照收，不再逐条回消息，
+  // 免得有人反复私聊把对方私聊刷爆、或触发协议端限频
+  const acks = Number(s.ackCount?.[uid] || 0);
+  const canAck = acks < MAX_ACKS_PER_NIGHT;
+  s.ackCount = { ...(s.ackCount || {}), [uid]: acks + 1 };
   if (me.role === 'villager') {
-    return { state: s, effects: [{ type: 'private', userId: uid, text: '【狼人杀】夜里你没有行动，安心等到天亮（有话白天在群里说）。' }] };
+    return canAck
+      ? { state: s, effects: [{ type: 'private', userId: uid, text: '【狼人杀】夜里你没有行动，安心等到天亮（有话白天在群里说）。' }] }
+      : { state: s, effects: [], consume: true };
   }
   const target = parseTarget(s, msg.text);
   if (!target) {
-    return { state: s, effects: [{ type: 'private', userId: uid, text: `【狼人杀】没看懂你的行动：回 1~${s.roles.length} 的编号或群名片都行（例如「${me.role === 'wolf' ? '刀' : me.role === 'seer' ? '查' : '守'} 3」）。` }] };
+    return canAck
+      ? { state: s, effects: [{ type: 'private', userId: uid, text: `【狼人杀】没看懂你的行动：回 1~${s.roles.length} 的编号或群名片都行（例如「${me.role === 'wolf' ? '刀' : me.role === 'seer' ? '查' : '守'} 3」）。` }] }
+      : { state: s, effects: [], consume: true };
   }
+  // 同一目标的重复提交：静默消耗（第一次已经回过执了，别再刷对方的私聊）
+  const sameAsBefore = (me.role === 'guard' && s.pending.guard === target.userId)
+    || (me.role === 'wolf' && s.pending.wolves[uid] === target.userId)
+    || (me.role === 'seer' && s.pending.seer === target.userId);
+  if (sameAsBefore) return { state: s, effects: [], consume: true };
+
   const effects = [];
   if (me.role === 'guard') {
     if (s.lastGuard && String(s.lastGuard) === target.userId) {
-      return { state: s, effects: [{ type: 'private', userId: uid, text: '【狼人杀】不能连着两晚守同一个人，今晚换一个。' }] };
+      return { state: s, effects: canAck ? [{ type: 'private', userId: uid, text: '【狼人杀】不能连着两晚守同一个人，今晚换一个。' }] : [], consume: !canAck };
     }
     s.pending.guard = target.userId;
-    effects.push({ type: 'private', userId: uid, text: `✔ 已记下：今晚守 ${idxOf(s, target)} 号 ${target.name}。` });
+    if (canAck) effects.push({ type: 'private', userId: uid, text: `✔ 已记下：今晚守 ${idxOf(s, target)} 号 ${target.name}。` });
   } else if (me.role === 'wolf') {
     s.pending.wolves[uid] = target.userId;
-    effects.push({ type: 'private', userId: uid, text: `✔ 已记下你的刀口：${idxOf(s, target)} 号 ${target.name}（狼队各自提交，多数一致生效；改主意就再发一条）。` });
+    if (canAck) effects.push({ type: 'private', userId: uid, text: `✔ 已记下你的刀口：${idxOf(s, target)} 号 ${target.name}（狼队各自提交，多数一致生效；改主意就再发一条）。` });
   } else if (me.role === 'seer') {
     s.pending.seer = target.userId;
+    // 查验结果**不受配额约束**：这是玩法信息，必须送达（一个晚上最多查一次，刷不出来）
     effects.push({ type: 'private', userId: uid, text: `🔮 查验结果：${idxOf(s, target)} 号 ${target.name} 是「${target.role === 'wolf' ? '狼人' : '好人'}」。` });
   }
   // 收齐就立刻结算夜晚（不干等 90 秒）
@@ -310,7 +369,7 @@ export function onPrivateMessage(state, msg, { now = 0, rng = Math.random } = {}
     const out = resolveNight(s, rng, now);
     return { state: out.state, effects: [...effects, ...out.effects] };
   }
-  return { state: s, effects };
+  return { state: s, effects, consume: !canAck && effects.length === 0 };
 }
 
 export function onTick(state, { now = 0, deadline = 0, rng = Math.random } = {}) {
@@ -351,7 +410,13 @@ export function summaryForModel(state) {
 }
 
 export function hostBrief(state) {
-  if (state.phase === 'night') return '现在是夜晚：群里可以正常闲聊，但别催行动内容（行动走私聊），也别猜谁的身份。';
-  if (state.phase === 'day') return '白天讨论中：顺着大家的话接，别替人报身份、别引导投谁，按号码称呼（"3 号"）。';
-  return '投票中：只报票数进度，不站队、不评价谁可疑。';
+  if (state.phase === 'night') {
+    return '现在是夜晚：群里可以正常闲聊，但别催行动内容（行动走私聊），也别猜谁的身份；'
+      + '有人嘴上说"刀谁/查谁"就当玩笑接过去，别追问、别当真。';
+  }
+  if (state.phase === 'day') {
+    return '白天讨论中：顺着大家的话接，别替人报身份、别引导投谁，按号码称呼（"3 号"）；'
+      + '没参加这局的人发言也正常回应，但别把他们的"投 X"当成有效票（只有在册玩家的票算数）。';
+  }
+  return '投票中：只报票数进度，不站队、不评价谁可疑；没参加的人投的票不算，被问到就说明一下。';
 }
