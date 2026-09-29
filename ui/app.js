@@ -6345,6 +6345,7 @@ function renderSettingsSidebar() {
     ['memory', '记忆'],
     ['experiments', '实验功能'],
     ['moments', '每日动态'],
+    ['reminders', '定时提醒'],
     ['qzone-interactions', '动态互动'],
     ['time-control', '时间控制'],
     ['token-saver', '省 Token'],
@@ -6404,6 +6405,34 @@ function bindCrossSectionControls() {
   }
   renderGroupChecklist('cfg-game-chats-box', state.config?.groupGame?.chats || []);
   renderGroupChecklist('cfg-digest-chats-box', state.config?.groupDigest?.chats || []);
+  // 定时提醒页：列表加载 + 取消按钮（事件挂在列表容器上做委托，行是动态渲染的）
+  const pendBox = $('#reminders-pending');
+  if (pendBox && !pendBox.dataset.bound) {
+    pendBox.dataset.bound = '1';
+    pendBox.addEventListener('click', async (e) => {
+      const btn = e.target?.closest?.('.reminder-cancel-btn');
+      if (!btn) return;
+      const row = btn.closest('.reminder-row');
+      if (!row) return;
+      btn.disabled = true;
+      try {
+        await api('/api/reminders/cancel', { method: 'POST', body: JSON.stringify({ id: row.dataset.id, chatKey: row.dataset.chatkey }) });
+        await loadRemindersView();
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = '重试';
+        if ($('#reminders-pending')) $('#reminders-pending').title = String(err?.message || err).slice(0, 120);
+      }
+    });
+  }
+  if ($('#settings-reminders')) {
+    loadRemindersView();
+    const refreshBtn = $('#reminders-refresh-btn');
+    if (refreshBtn && !refreshBtn.dataset.bound) {
+      refreshBtn.dataset.bound = '1';
+      refreshBtn.addEventListener('click', loadRemindersView);
+    }
+  }
 }
 
 function renderSettingsSection(c) {
@@ -6415,6 +6444,7 @@ function renderSettingsSection(c) {
     memory: () => renderMemorySettingsSection(c),
     experiments: () => renderExperimentalSettingsSection(c),
     moments: () => renderDailyMomentsSection(c),
+    reminders: () => renderRemindersSection(c),
     'qzone-interactions': () => renderQzoneInteractionSection(c),
     'time-control': () => renderTimeControlSection(c),
     'token-saver': () => renderTokenSaverSection(c),
@@ -8319,6 +8349,51 @@ function renderDailyMomentsSection(c) {
       <span id="digest-run-result" class="muted"></span>
       <span class="muted">试跑会真的把日报发到上面配置的群里</span>
     </div>`;
+}
+
+// ── 定时提醒（设置 → 定时提醒）──────────────────────────────────────────
+// 提醒本身是聊天里说"X 点提醒我 Y"由模型用 remind 工具立的；这一页管两件事：
+// 开关（关掉后工具与到期派发都停，数据保留）和已立提醒的查看/取消。
+function renderRemindersSection(c) {
+  return `
+    <h3 id="settings-reminders">定时提醒</h3>
+    <div class="hint">群友说「明天 9 点提醒我交作业」时它会把提醒记下来（落盘、重启不丢），到点用它自己的口吻说出来。
+      限制：单条 ≤200 字、最多设到 30 天后、单会话待触发 10 条 / 全局 50 条、离线导致迟到超 12 小时作废不补发。</div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-reminders-enabled" ${c.reminders?.enabled !== false ? 'checked' : ''} />
+      <label for="cfg-reminders-enabled">启用定时提醒（关掉后不再接受新提醒、到点也不派发；已存数据保留，重新打开继续用）</label></div>
+    <h3 style="margin-top:18px">待触发</h3>
+    <div id="reminders-pending"><span class="muted">正在读取…</span></div>
+    <h3 style="margin-top:18px">最近完成（触发 / 取消 / 过期）</h3>
+    <div id="reminders-recent"><span class="muted">正在读取…</span></div>
+    <div class="settings-actions">
+      <button class="btn btn-small" id="reminders-refresh-btn" type="button">刷新</button>
+      <span class="muted">取消某条立即生效，不需要保存；上面的开关改完要点「保存设置」</span>
+    </div>`;
+}
+
+/** 定时提醒页的列表加载（待触发 + 最近完成），取消后也走这里刷新。 */
+async function loadRemindersView() {
+  const pendBox = $('#reminders-pending');
+  const recBox = $('#reminders-recent');
+  if (!pendBox) return;   // 不在这一页（其他页面的渲染会走到这里，直接跳过）
+  let r = null;
+  try { r = await api('/api/reminders'); } catch (e) {
+    pendBox.innerHTML = `<span class="muted">读取失败：${esc(e?.message || e)}</span>`;
+    if (recBox) recBox.innerHTML = '';
+    return;
+  }
+  const rows = (items, done) => items.map((it) => {
+    const time = new Date(it.at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    const statusLabel = { fired: '已触发', canceled: '已取消', expired: '已过期' }[it.status] || String(it.status || '');
+    return `<div class="reminder-row" data-id="${esc(it.id)}" data-chatkey="${esc(it.chatKey)}">`
+      + `<span class="reminder-when">${esc(time)}</span>`
+      + `<span class="reminder-chat">${esc(formatChatTitle(it.chatKey, chatNameOf(it.chatKey)))}</span>`
+      + `<span class="reminder-text">${esc(it.text)}</span>`
+      + (done ? `<span class="muted">${esc(statusLabel)}</span>` : '<button type="button" class="btn btn-small reminder-cancel-btn">取消</button>')
+      + '</div>';
+  }).join('');
+  pendBox.innerHTML = (r?.pending || []).length ? rows(r.pending, false) : '<span class="muted">没有待触发的提醒（群友说"X 点提醒我 Y"就会出现在这里）</span>';
+  if (recBox) recBox.innerHTML = (r?.recent || []).length ? rows(r.recent, true) : '<span class="muted">暂无完成记录</span>';
 }
 
 function renderMomentWindowRow(window) {
@@ -12027,6 +12102,11 @@ async function saveConfig({ quiet = false } = {}) {
         games: ['number-bomb', 'undercover'].filter((g) => chk(g === 'number-bomb' ? '#cfg-game-bomb' : '#cfg-game-undercover', true)),
         ...(pickedGroups('cfg-game-chats-box') ? { chats: pickedGroups('cfg-game-chats-box') } : {})
       };
+  }
+
+  if (sec === 'reminders') {
+    // 这一页只有一个开关；列表与取消是即时操作，不走保存
+    patch.reminders = { enabled: chk('#cfg-reminders-enabled', c.reminders?.enabled !== false) };
   }
 
   if (sec === 'moments') {

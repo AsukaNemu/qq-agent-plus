@@ -1908,6 +1908,8 @@ export class Orchestrator {
 
   #fireDueReminders() {
     if (!this.reminders) return;
+    // 控制台开关（设置 → 定时提醒）：关掉后不派发，已存数据保留，重新打开继续用
+    if (getConfig().reminders?.enabled === false) return;
     const now = Date.now();
     // 离线太久（迟到 >12 小时）的直接作废：不补发一串"迟到的提醒"
     for (const item of this.reminders.expired(now)) {

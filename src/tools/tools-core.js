@@ -741,6 +741,8 @@ export function buildToolDefs() {
       async execute(ctx, args) {
         const store = ctx.reminders;
         if (!store) return err('当前环境不支持提醒');
+        // 控制台开关（设置 → 定时提醒）：关掉后不再接受新的提醒，已有数据保留
+        if (getConfig().reminders?.enabled === false) return err('定时提醒未启用（管理员可在控制台打开）');
         const action = String(args.action || '');
         // 提醒的绝对时间按项目统一口径（Asia/Shanghai）格式化：服务器时区不同时，
         // "明天 09:30" 会被格式化成另一个钟点误导模型（2026-09-29 审查 P2）

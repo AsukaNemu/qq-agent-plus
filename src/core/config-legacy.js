@@ -309,6 +309,12 @@ export const DEFAULT_CONFIG = {
     maxDurationMin: 60,
     dailyLimitPerChat: 6
   },
+  // 定时提醒（"X 点提醒我 Y"）：持久化、到点主动唤醒说出来。默认开；
+  // 关闭后 remind 工具与到期派发都停，已存数据保留（重新打开继续用）。
+  // 控制台「设置 → 定时提醒」可开关并查看/取消已立的提醒。
+  reminders: {
+    enabled: true
+  },
   // 每日群聊记忆总结与 QQ 空间动态
   dailyMoments: {
     enabled: false,

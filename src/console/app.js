@@ -2682,6 +2682,36 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         }
       }
 
+      if (pathname === '/api/reminders' && method === 'GET') {
+        // 控制台的提醒管理页：待触发全量 + 最近完成的（fired/canceled/expired）。
+        // 已完成的每个会话只保留最近几条（DONE_KEEP），这里再全局截断一次。
+        if (!reminders) return json(res, 200, { ok: true, enabled: false, pending: [], recent: [] });
+        const enabled = getConfig().reminders?.enabled !== false;
+        const fmt = (it) => ({
+          id: it.id, chatKey: it.chatKey, text: it.text, status: it.status || 'pending',
+          at: it.at, createdAt: it.createdAt, finishedAt: it.finishedAt || null
+        });
+        const pending = reminders.items
+          .filter((it) => it.status === 'pending')
+          .sort((a, b) => a.at - b.at)
+          .map(fmt);
+        const recent = reminders.items
+          .filter((it) => it.status && it.status !== 'pending')
+          .sort((a, b) => (b.finishedAt || b.at) - (a.finishedAt || a.at))
+          .slice(0, 30)
+          .map(fmt);
+        return json(res, 200, { ok: true, enabled, pending, recent });
+      }
+
+      if (pathname === '/api/reminders/cancel' && method === 'POST') {
+        // 管理员在控制台里取消：带 id + chatKey（与聊天里"算了别提醒了"同一存储操作）
+        const body = await readBody(req);
+        if (!reminders) return json(res, 400, { ok: false, error: '提醒功能不可用' });
+        const hit = reminders.cancel({ id: String(body?.id || ''), chatKey: String(body?.chatKey || '') });
+        if (!hit) return json(res, 404, { ok: false, error: '没找到这条待触发的提醒（可能已被触发或取消）' });
+        return json(res, 200, { ok: true, canceled: hit.id });
+      }
+
       if (pathname === '/api/identity-pilot/status' && method === 'GET') {
         return json(res, 200, identityPilotStatus());
       }

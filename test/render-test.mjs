@@ -145,7 +145,7 @@ try {
   const sections = [
     'renderSettingsSection', 'renderApiSection', 'renderSearchSection', 'renderAsrSection',
     'renderMemorySettingsSection', 'renderExperimentalSettingsSection',
-    'renderDailyMomentsSection',
+    'renderDailyMomentsSection', 'renderRemindersSection',
     'renderQzoneInteractionSection', 'renderTimeControlSection',
     'renderPersonaSection', 'renderAllowSection',
     'renderChatSection', 'renderDesktopSection', 'renderOnebotSection',
@@ -2424,7 +2424,7 @@ try {
       const cfgNow = JSON.parse(vm.runInContext('JSON.stringify(state.config || {})', ctx));
       return { ok: true, status: 200, json: async () => ({ ok: true, config: cfgNow }), text: async () => '{}' };
     };
-    const cases = [['asr', 'tts'], ['experiments', 'groupGame'], ['moments', 'groupDigest']];
+    const cases = [['asr', 'tts'], ['experiments', 'groupGame'], ['moments', 'groupDigest'], ['reminders', 'reminders']];
     const allKeys = cases.map(([, k]) => k);
     const results = [];
     for (const [sec, key] of cases) {
@@ -2484,6 +2484,21 @@ try {
     okGuard ? pass++ : fail++;
     console.log('  ' + (okGuard ? 'OK   ' : 'FAIL ') + '群勾选列表：没读完保留原白名单、读完后能清空'
       + (okGuard ? '' : ' -> ' + JSON.stringify(checks.map(([n, ok, v]) => n + '=' + ok + '(' + v + ')'))));
+  }
+
+  // ── 定时提醒设置页 ──
+  //    新增的 reminders 分区：开关 + 待触发/最近完成两个列表容器 + 刷新按钮都要在；
+  //    设置侧边栏与 sections 路由也要认识它（少接一条就是"侧边栏点了没反应"）。
+  {
+    vm.runInContext("state.settingsSection = 'reminders';", ctx);
+    const html = vm.runInContext('renderSettingsSection(state.config || {})', ctx);
+    const okPage = /id="cfg-reminders-enabled"/.test(html)
+      && /id="reminders-pending"/.test(html)
+      && /id="reminders-recent"/.test(html)
+      && /id="reminders-refresh-btn"/.test(html)
+      && /启用定时提醒/.test(html);
+    okPage ? pass++ : fail++;
+    console.log('  ' + (okPage ? 'OK   ' : 'FAIL ') + '定时提醒设置页：开关、两个列表容器、刷新按钮齐备');
   }
 
 } catch (e) {
