@@ -209,13 +209,14 @@ function resolveNight(state, rng = Math.random, now = 0) {
   if (win) return { state: { ...s, phase: 'ended' }, effects: [...effects, winEffect(s, win)] };
   s.phase = 'day';
   s.cursor = 0;
-  s.order = aliveList(s).map((r) => r.userId);
+  s.order = aliveList(s).map((r) => r.userId);   // 只用于"第几号人"的展示
+  s.spoken = [];                                  // 本白天说过话的人（谁想说就说）
   s.votes = {};
   // 计时起点必须在天亮这一刻就设：置 0 会让 onTick 里 `Number(0) || now` 恒等于 now，
   // 白天第一个发言者 AFK 时 90 秒超时永不生效（与卧底第 2 轮同款坑，2026-09-29）
   s.phaseStartedAt = now || 0;
-  const first = s.roles.find((r) => r.userId === s.order[0]);
-  effects.push({ type: 'public', text: `第 ${s.night} 天讨论：存活 ${s.order.length} 人，从 ${first?.name || '（没人）'} 开始，每人一句发言；说完发「投 3」投票。` });
+  const aliveNames = aliveList(s).map((r) => r.name).join('、');
+  effects.push({ type: 'public', text: `第 ${s.night} 天讨论：存活 ${aliveNames}。想说什么就说（不用等点名），也可以直接发「投 3」；都聊过或时间到就进投票。` });
   return { state: s, effects };
 }
 
@@ -285,14 +286,22 @@ export function onMessage(state, msg, { now = 0 } = {}) {
   if (!me.alive) return { state: s, effects: [] };
 
   if (s.phase === 'day') {
-    if (s.order[s.cursor] !== uid) return { state: s, effects: [] };
-    s.cursor += 1;
-    if (!s.phaseStartedAt) s.phaseStartedAt = now;
-    if (s.cursor >= s.order.length) {
+    // 真人不会按点名顺序说话：**谁想说就说**，谁说过一句就算发过言（不排顺序、不催人）；
+    // 所有人都说过、或到时间了 → 进投票。群里话多的人多刷几条不影响（去重靠 spoken 集合）。
+    s.spoken = Array.isArray(s.spoken) ? s.spoken : [];
+    if (!s.spoken.includes(uid)) s.spoken.push(uid);
+    // 边说边投的也认：发言阶段出现的"投 3"直接记成他的票（结算时不用再催）
+    const early = voteTargetOf(s, uid, msg.text);
+    if (early) s.votes[uid] = early;
+    const alive = aliveList(s);
+    const allVoted = alive.every((r) => s.votes[r.userId]);
+    if (s.spoken.length >= alive.length || allVoted) {
+      if (allVoted) return tally(s, now);
       s.phase = 'vote';
-      s.votes = {};
+      // 发言阶段提前投的票**要留着**（真人常常边说边投；清掉等于把票丢了）
+      s.votes = s.votes && typeof s.votes === 'object' ? s.votes : {};
       s.phaseStartedAt = now;
-      return { state: s, effects: [{ type: 'public', text: `发言结束，开始投票：发「投 3」或「投 @他」都行（存活的 ${s.order.length} 人各一票）。` }] };
+      return { state: s, effects: [{ type: 'public', text: `都聊得差不多了，开始投票：发「投 3」或「投 @他」都行（存活的 ${alive.length} 人各一票）。` }] };
     }
     return { state: s, effects: [] };
   }
@@ -309,6 +318,15 @@ export function onMessage(state, msg, { now = 0 } = {}) {
   }
 
   return { state: s, effects: [] };   // 夜里不看群消息
+}
+
+/** 从一条群消息里解析投票目标（"投 3"/"投 @阿狗"）；投自己不算，返回目标 userId 或 ''。 */
+function voteTargetOf(state, uid, text) {
+  const m = /投\s*@?([^\s，。！？!?,.]{1,12})/.exec(String(text || ''));
+  if (!m) return '';
+  const picked = parseTarget(state, m[1]);
+  if (!picked || picked.userId === uid) return '';
+  return picked.userId;
 }
 
 /** 私聊行动：夜里按角色收行动，收到就回执；解析不了返回空 effects（交回普通链路兜底）。 */
@@ -383,18 +401,14 @@ export function onTick(state, { now = 0, deadline = 0, rng = Math.random } = {})
     return resolveNight({ ...state, phaseStartedAt: now }, rng, now);
   }
   if (state.phase === 'day') {
+    // 白天到点：不等谁"接上"（真人群里没人按点名说话），直接进投票；
+    // 没说过话的也没关系——投票才是关键动作
     const s = JSON.parse(JSON.stringify(state));
-    const uid = s.order[s.cursor];
-    const who = s.roles.find((r) => r.userId === uid);
-    s.cursor += 1;
+    if (Object.keys(s.votes || {}).length) return tally(s, now);
+    s.phase = 'vote';
+    s.votes = {};
     s.phaseStartedAt = now;
-    const effects = [{ type: 'public', text: `${who?.name || '有人'} 没接上，先跳过。` }];
-    if (s.cursor >= s.order.length) {
-      s.phase = 'vote';
-      s.votes = {};
-      effects.push({ type: 'public', text: `发言结束，开始投票：发「投 3」或「投 @他」。` });
-    }
-    return { state: s, effects };
+    return { state: s, effects: [{ type: 'public', text: '讨论时间到，开始投票：发「投 3」或「投 @他」都行。' }] };
   }
   if (state.phase === 'vote') return tally(state, now);
   return { state, effects: [] };
@@ -402,7 +416,10 @@ export function onTick(state, { now = 0, deadline = 0, rng = Math.random } = {})
 
 export function summaryForModel(state) {
   const list = aliveList(state).map((r) => `${idxOf(state, r)}号${r.name}`).join('、');
-  const head = state.phase === 'night' ? `夜晚第 ${state.night} 夜（行动收集中）` : `第 ${state.night} 天（白天）`;
+  const head = state.phase === 'night' ? `夜晚第 ${state.night} 夜（行动收集中）`
+    : (state.phase === 'day'
+      ? `第 ${state.night} 天讨论中（已发言 ${(state.spoken || []).length}/${aliveList(state).length} 人，已投票 ${Object.keys(state.votes || {}).length} 票）`
+      : `第 ${state.night} 天投票中（已投 ${Object.keys(state.votes || {}).length} 票）`);
   const last = (state.nightLog || []).at(-1);
   const dawn = last ? (last.died ? `昨夜 ${last.died} 号出局` : '昨夜平安') : '';
   return `狼人杀进行中：${head}；存活 ${aliveList(state).length}/${state.roles.length} 人 —— ${list}${dawn ? `；${dawn}` : ''}。`
@@ -415,8 +432,8 @@ export function hostBrief(state) {
       + '有人嘴上说"刀谁/查谁"就当玩笑接过去，别追问、别当真。';
   }
   if (state.phase === 'day') {
-    return '白天讨论中：顺着大家的话接，别替人报身份、别引导投谁，按号码称呼（"3 号"）；'
-      + '没参加这局的人发言也正常回应，但别把他们的"投 X"当成有效票（只有在册玩家的票算数）。';
+    return '白天讨论中：谁想说就说，别催"轮到谁"、别按顺序点人（真人群不按点名），别替人报身份、别引导投谁，'
+      + '按号码称呼（"3 号"）；没参加这局的人发言也正常回应，但别把他们的"投 X"当成有效票（只有在册玩家的票算数）。';
   }
   return '投票中：只报票数进度，不站队、不评价谁可疑；没参加的人投的票不算，被问到就说明一下。';
 }

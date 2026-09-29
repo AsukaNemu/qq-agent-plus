@@ -97,9 +97,8 @@ console.log('  局面：', JSON.stringify(mgr.games.get(CHAT) || '已结束'));
 for (let i = 0; i < 12 && mgr.games.has(CHAT); i += 1) {
   const g = mgr.games.get(CHAT);
   if (g.state.phase === 'speak') {
-    const uid = g.state.order[g.state.cursor];
-    const name = g.state.roles.find((r) => r.userId === uid)?.name || uid;
-    say(uid, name, '我这边是白色的');
+    // 新模型：谁想说就说（去重靠 spoken 集合），这里让所有存活者各说一句推进
+    for (const r of g.state.roles.filter((x) => !g.state.eliminated.includes(x.userId))) say(r.userId, r.name, '我这边是白色的');
   } else {
     const alive = g.state.roles.filter((r) => !g.state.eliminated.includes(r.userId));
     for (const p of alive) {

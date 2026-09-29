@@ -224,3 +224,39 @@ test('群里的"各种人"：非参与者投票不计、刷屏不刷私聊、退
   assert.match(endText, /好人获胜/);
   assert.equal(/身份：|狼人（|预言家/.test(endText), false, '关掉公开开关后结算不带身份');
 });
+
+test('白天不按点名：乱序发言也算数、边说边投直接记票（真人群必然乱序）', () => {
+  let s = newGame();
+  const seer = by(s, 'seer')[0];
+  s = pm(s, seer.userId, `查 ${idx(s, seer.userId)}`).state;
+  s = wolf.onTick(s, { now: s.phaseStartedAt + 95 * 1000, rng: () => 0 }).state;
+  assert.equal(s.phase, 'day');
+  const alive = s.roles.filter((r) => r.alive);
+  // 最后一个号码的人抢先说话：照样算他发过言（旧实现会把这句丢掉）
+  const last = alive.at(-1);
+  let out = wolf.onMessage(s, { userId: last.userId, text: '我先说！我怀疑 1 号', ts: 1 }, { now: 1 });
+  assert.equal(out.state.phase, 'day', '还有人没说 → 继续讨论');
+  assert.ok(out.state.spoken.includes(last.userId), '乱序发言要算数');
+  assert.equal(out.effects.length, 0, '不为"没轮到"刷提示');
+  // 中间几位陆续说完（顺序随意、有人多说一句）
+  for (const r of alive.slice(0, -1).slice(1)) out = wolf.onMessage(out.state, { userId: r.userId, text: '我也说两句', ts: 2 }, { now: 2 });
+  out = wolf.onMessage(out.state, { userId: alive[0].userId, text: '我说完了', ts: 2 }, { now: 2 });
+  out = wolf.onMessage(out.state, { userId: last.userId, text: '再补一句', ts: 2 }, { now: 2 });
+  assert.equal(out.state.spoken.length, alive.length, '多说不重复计数');
+  // 最后一位边说边投 → 直接进投票，且他的票已经记下、不会被清掉
+  const first = alive[0];
+  out = wolf.onMessage(out.state, { userId: first.userId, text: `投 ${idx(out.state, last.userId)}`, ts: 3 }, { now: 3 });
+  assert.equal(out.state.phase, 'vote');
+  assert.equal(out.state.votes[first.userId], last.userId, '边说边投的票要保留');
+});
+
+test('白天到点不等人：谁都不说话也进投票，不再出现"XX 没接上"', () => {
+  let s = newGame();
+  const seer = by(s, 'seer')[0];
+  s = pm(s, seer.userId, `查 ${idx(s, seer.userId)}`).state;
+  s = wolf.onTick(s, { now: s.phaseStartedAt + 95 * 1000, rng: () => 0 }).state;
+  const out = wolf.onTick(s, { now: s.phaseStartedAt + 95 * 1000, rng: () => 0 });
+  assert.equal(out.state.phase, 'vote');
+  assert.match(out.effects[0].text, /时间到|开始投票/);
+  assert.equal(/没接上/.test(JSON.stringify(out.effects)), false, '真人群不点名，不该有"没接上"');
+});

@@ -39,8 +39,9 @@ export function create({ players, rng, now = 0, reveal = true } = {}) {
     reveal: reveal !== false,
     round: 1,
     maxRounds: 4,
-    order: roles.map((r) => r.userId),
+    order: roles.map((r) => r.userId),   // 只用于"第几号人"的展示（不再是发言顺序）
     cursor: 0,
+    spoken: [],                            // 本轮描述过的人（谁想说就说，不按点名）
     roles,
     votes: {},
     eliminated: [],
@@ -107,10 +108,9 @@ function nextRound(state, effects, now = 0) {
   const order = alive({ ...state, eliminated: state.eliminated }).map((r) => r.userId);
   return {
     // phaseStartedAt 必须在轮次切换时就起算：置 0 的话 onTick 里 `Number(0) || now` 恒等于
-    // now，150 秒的"跳过没说话的人"对每轮排头永远不生效，整局会卡到全局时长上限
-    // （2026-09-29 审查 P1，第 2 轮起必现）
-    state: { ...state, phase: 'speak', round, order, cursor: 0, votes: {}, phaseStartedAt: now || 0 },
-    effects: [...effects, { type: 'public', text: `第 ${round} 轮开始，从 ${state.roles.find((r) => r.userId === order[0])?.name} 开始，每人一句描述。` }]
+    // now，超时永远不生效，整局会卡到全局时长上限（2026-09-29 审查 P1，第 2 轮起必现）
+    state: { ...state, phase: 'speak', round, order, cursor: 0, spoken: [], votes: {}, phaseStartedAt: now || 0 },
+    effects: [...effects, { type: 'public', text: `第 ${round} 轮开始：想描述的就说（不用等点名，每人一句），也可以直接发「投 3」；都说过或时间到就进投票。` }]
   };
 }
 
@@ -170,14 +170,21 @@ export function onMessage(state, msg, { now = 0 } = {}) {
   }
 
   if (s.phase === 'speak') {
-    if (s.order[s.cursor] !== uid) return { state: s, effects: [] };
-    s.cursor += 1;
-    if (!s.phaseStartedAt) s.phaseStartedAt = now;
-    if (s.cursor >= s.order.length) {
+    // 真人不按点名说话：谁想描述就先说，说过一句就算过（不排顺序、不催"轮到谁"）；
+    // 所有人说过、或时间到 → 进投票。多说几句不影响（去重靠 spoken）。
+    s.spoken = Array.isArray(s.spoken) ? s.spoken : [];
+    if (!s.spoken.includes(uid)) s.spoken.push(uid);
+    // 边说边投也认：描述阶段出现的"投 3"直接记成他的票
+    const early = parseVoteTarget(s, msg);
+    if (early && early.userId !== uid) s.votes[uid] = early.userId;
+    const alive = s.roles.filter((r) => !s.eliminated.includes(r.userId));
+    if (s.spoken.length >= alive.length) {
+      if (alive.every((r) => s.votes[r.userId])) return tally(s, now);
       s.phase = 'vote';
-      s.votes = {};
+      // 发言阶段提前投的票要留着（清掉等于把票丢了）
+      s.votes = s.votes && typeof s.votes === 'object' ? s.votes : {};
       s.phaseStartedAt = now;
-      return { state: s, effects: [{ type: 'public', text: `第 ${s.round} 轮发言结束，开始投票：发「投 3」或「投 @他」都行。` }] };
+      return { state: s, effects: [{ type: 'public', text: `都说得差不多了，开始投票：发「投 3」或「投 @他」都行（存活 ${alive.length} 人各一票）。` }] };
     }
     return { state: s, effects: [] };
   }
@@ -201,16 +208,12 @@ export function onTick(state, { now = 0 } = {}) {
   const s = JSON.parse(JSON.stringify(state));
   s.phaseStartedAt = now;
   if (s.phase === 'speak') {
-    const uid = s.order[s.cursor];
-    const who = s.roles.find((r) => r.userId === uid);
-    s.cursor += 1;
-    const effects = [{ type: 'public', text: `${who?.name || '有人'} 没接上，先跳过。` }];
-    if (s.cursor >= s.order.length) {
-      s.phase = 'vote';
-      s.votes = {};
-      effects.push({ type: 'public', text: `第 ${s.round} 轮发言结束，开始投票：发「投 3」或「投 @他」。` });
-    }
-    return { state: s, effects };
+    // 描述阶段到点：不等谁"接上"（真人群里没人按点名说话），直接进投票
+    const s = JSON.parse(JSON.stringify(state));
+    s.phase = 'vote';
+    s.votes = {};
+    s.phaseStartedAt = now;
+    return { state: s, effects: [{ type: 'public', text: '时间到，开始投票：发「投 3」或「投 @他」都行。' }] };
   }
   if (s.phase === 'vote') {
     // 一票都没有时 tally 会"重置再等"，超时-重置会无限空转到时长上限；
@@ -225,14 +228,15 @@ export function summaryForModel(state) {
   if (state.phase === 'ended') return '谁是卧底已结束。';
   const list = state.roles.filter((r) => !state.eliminated.includes(r.userId)).map((r) => r.name).join('、');
   if (state.phase === 'speak') {
-    const who = state.roles.find((r) => r.userId === state.order[state.cursor]);
-    return `谁是卧底第 ${state.round} 轮：存活 ${list}；轮到 ${who?.name || '（全部说完）'} 描述自己的词（一句）。`;
+    const alive = state.roles.filter((r) => !state.eliminated.includes(r.userId));
+    const spoken = (state.spoken || []).length;
+    return `谁是卧底第 ${state.round} 轮：存活 ${list}；已描述 ${spoken}/${alive.length} 人（谁想说就说，没说的再等等）。`;
   }
   const voted = Object.keys(state.votes).length;
   return `谁是卧底第 ${state.round} 轮投票中：已投 ${voted}/${alive(state).length} 票，存活 ${list}。`;
 }
 
 export function hostBrief(state) {
-  if (state.phase === 'speak') return '轮到谁就等他说，别替人描述、别催超过一次；不要提到任何人的词。';
+  if (state.phase === 'speak') return '谁想描述就让他说，别按顺序点名、别催"轮到你"（真人群不按点名）；别替人描述、不要提到任何人的词。';
   return '投票阶段：不引导投给谁、不评价谁可疑，只报票数进度；绝不泄漏词或身份。';
 }

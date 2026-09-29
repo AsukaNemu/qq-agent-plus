@@ -97,12 +97,13 @@ test('谁是卧底：开局私聊发词 → 依次发言 → 投票淘汰 → �
   assert.equal(mgr.games.has('group:1'), false);
 });
 
-test('超时推进：当前发言者一直不接话 → 跳过并继续；时长上限到点自动结束', async () => {
+test('超时推进：没人描述 → 到点直接进投票（不点名、不刷"跳过"）；时长上限到点自动结束', async () => {
   const { store, sent, mgr, setClock, getClock } = makeWorld({ rng: () => 0 });
   await mgr.start({ chatKey: 'group:1', gameId: 'undercover' });
   setClock(getClock() + 200 * 1000);          // 超过 roundSeconds=150
   await mgr.tick();
-  assert.match(sent.at(-1).msgs[0], /没接上，先跳过/);
+  assert.equal(mgr.games.get('group:1')?.state.phase, 'vote', '描述阶段到点直接进投票');
+  assert.match(sent.at(-1).msgs[0], /时间到|开始投票/);
 
   // 拨到超过 maxDurationMin（60 分钟）→ 自动收尾
   const g = mgr.games.get('group:1');
@@ -112,9 +113,9 @@ test('超时推进：当前发言者一直不接话 → 跳过并继续；时长
   assert.equal(mgr.games.has('group:1'), false);
 });
 
-test('谁是卧底：第 2 轮起排头不说话也会被超时跳过（轮次切换即计时）', async () => {
+test('谁是卧底：第 2 轮没人描述也会到点进投票（轮次切换即计时，不卡在发言阶段）', async () => {
   // 回归 2026-09-29 审查 P1：nextRound 把 phaseStartedAt 置 0，onTick 里 `0 || now` 恒等 now，
-  // 150 秒计时永远不开始 → 第 2 轮排头 AFK 时整局卡到 45 分钟上限
+  // 150 秒计时永远不开始 → 整局卡到 45 分钟上限
   const { store, sent, mgr, setClock, getClock } = makeWorld({ rng: () => 0.6 });
   await mgr.start({ chatKey: 'group:1', gameId: 'undercover' });
   let order = mgr.games.get('group:1').state.order;
@@ -127,10 +128,11 @@ test('谁是卧底：第 2 轮起排头不说话也会被超时跳过（轮次�
   assert.equal(st2.round, 2);
   assert.equal(st2.phase, 'speak');
   assert.ok(st2.phaseStartedAt > 0, '第 2 轮的计时起点必须在轮次切换时就设置');
-  // 排头一直不说话 → 150 秒后 tick 跳过他
+  // 没人描述 → 150 秒后直接进投票（真人群不按点名说话，不该出现"XX 没接上"）
   setClock(st2.phaseStartedAt + 200 * 1000);
   await mgr.tick();
-  assert.match(sent.at(-1).msgs[0], /没接上，先跳过/);
+  assert.equal(mgr.games.get('group:1').state.phase, 'vote');
+  assert.match(sent.at(-1).msgs[0], /时间到|开始投票/);
 });
 
 test('谁是卧底：投票阶段一票都没有 → 超时直接进下一轮，不空转', async () => {
