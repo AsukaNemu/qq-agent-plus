@@ -19,19 +19,20 @@ const { GroupGameManager } = await import('../src/features/group-game.js');
 const { ChatStore } = await import('../src/core/store.js');
 const { updateConfig } = await import('../src/core/config.js');
 
-function makeWorld({ rng = () => 0.42, limit = 6 } = {}) {
+function makeWorld({ rng = () => 0.42, limit = 6, players = 4, privateDm = false } = {}) {
   // 每个"世界"从零开始：games.json 是共享文件，不清会跨用例污染（上一局的局与每日计数都会带过来）
   fs.rmSync(path.join(dataDir, 'games.json'), { force: true });
-  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, dailyLimitPerChat: limit, maxDurationMin: 60 } });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: privateDm, dailyLimitPerChat: limit, maxDurationMin: 60 } });
   const store = new ChatStore(0, { dataDir, filename: `games-${Math.random().toString(36).slice(2)}.sqlite` });
-  // 四个活跃成员（activeMembers 取的是 self=0 的最近发言者）
-  for (let i = 1; i <= 4; i += 1) {
+  // 活跃成员（activeMembers 取的是 self=0 的最近发言者）
+  for (let i = 1; i <= players; i += 1) {
     store.appendIncoming('group:1', {
       mid: 100 + i, ts: Date.now() - i * 1000, senderId: `u${i}`, senderName: `群友${i}`, text: '在'
     }, { recordOnly: true });
   }
   const sent = [];
-  const sender = { sendTextBatch: async (chatKey, msgs) => { sent.push({ chatKey, msgs: [...msgs] }); return { message_id: sent.length }; } };
+  // 记录 options：私聊豁免（gameScoped）这类标记只能从这里断言
+  const sender = { sendTextBatch: async (chatKey, msgs, options = {}) => { sent.push({ chatKey, msgs: [...msgs], options }); return { message_id: sent.length }; } };
   let clock = Date.now();
   const mgr = new GroupGameManager({ store, sender, log: () => {}, now: () => clock, rng });
   return { store, sent, mgr, setClock: (v) => { clock = v; }, getClock: () => clock };
@@ -177,4 +178,59 @@ test('重启恢复：进行中的局写盘后能在新实例里继续', async ()
   const revived = new GroupGameManager({ store, sender, log: () => {}, now: () => Date.now(), rng: () => 0.1 });
   assert.equal(revived.games.has('group:1'), true, '新实例恢复该局');
   assert.equal(revived.summaryFor('group:1').includes('数字炸弹'), true);
+});
+
+test('狼人杀的私聊行动：入口接管（标记已读、发回执），非参与者不接管', async () => {
+  const { store, sent, mgr } = makeWorld({ players: 6 });
+  const r = await mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const state = mgr.games.get('group:1').state;
+  const seer = state.roles.find((x) => x.role === 'seer');
+  const villager = state.roles.find((x) => x.role === 'villager');
+  const outsider = 'u99';
+  sent.length = 0;
+
+  // 预言家私聊查人 → 引擎接管：回执 + 查验结果，且这条私聊被标记已读（不再唤醒模型）
+  const stored = store.appendIncoming(`private:${seer.userId}`, {
+    mid: 'pm-1', ts: Date.now(), senderId: seer.userId, senderName: seer.name, text: '查 1', reply: null, media: []
+  });
+  const took = await mgr.consumePrivateAction(`private:${seer.userId}`, stored);
+  assert.equal(took, true, '属于进行中的局 → 引擎接管');
+  assert.equal(store.findByMid(`private:${seer.userId}`, 'pm-1').state, 'acked', '接管后要标记已读');
+  assert.match(sent.at(-1).msgs[0], /查验结果/);
+  assert.equal(sent.at(-1).chatKey, `private:${seer.userId}`);
+
+  // 解析不了的私聊不接管（交回普通链路，玩家发了不至于没人理）
+  const junk = store.appendIncoming(`private:${villager.userId}`, {
+    mid: 'pm-2', ts: Date.now(), senderId: villager.userId, senderName: villager.name, text: '在吗晚上好', reply: null, media: []
+  });
+  const took2 = await mgr.consumePrivateAction(`private:${villager.userId}`, junk);
+  assert.equal(took2, true, '平民夜里也会拿到一句"你没行动"的回执（属于游戏私聊）');
+
+  // 不在局里的人：不接管
+  const other = store.appendIncoming(`private:${outsider}`, {
+    mid: 'pm-3', ts: Date.now(), senderId: outsider, senderName: '路人', text: '查 1', reply: null, media: []
+  });
+  assert.equal(await mgr.consumePrivateAction(`private:${outsider}`, other), false);
+
+  // 水位：同一条不会被 tick 再喂一遍
+  const before = store.recent(`private:${seer.userId}`, { limit: 5 }).length;
+  await mgr.tick();
+  assert.equal(sent.filter((x) => x.chatKey === `private:${seer.userId}` && /查验结果/.test(x.msgs[0])).length, 1, '查验结果只发一次');
+  assert.ok(before >= 1);
+  assert.equal(store.findByMid(`private:${seer.userId}`, 'pm-1').state, 'acked');
+});
+
+test('私聊豁免开关：关着不带标记、开着对在册玩家带 gameScoped（deny 语义在 access 层）', async () => {
+  const off = makeWorld({ players: 6, privateDm: false });
+  await off.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  const offPriv = off.sent.find((x) => x.chatKey.startsWith('private:'));
+  assert.ok(offPriv, '开局要发身份私聊');
+  assert.notEqual(offPriv.options?.gameScoped, true, '开关关着时不得带豁免标记');
+
+  const on = makeWorld({ players: 6, privateDm: true });
+  await on.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  const onPrivs = on.sent.filter((x) => x.chatKey.startsWith('private:'));
+  assert.ok(onPrivs.length >= 6, '6 人各一条身份私聊');
+  assert.ok(onPrivs.every((x) => x.options?.gameScoped === true), '开关开着且收件人在册 → 每条私聊都带豁免标记');
 });

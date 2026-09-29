@@ -776,12 +776,12 @@ export function buildToolDefs() {
     },
     {
       name: 'group_game',
-      description: '主持群游戏：action=start 开局（game 传 number-bomb 数字炸弹 / undercover 谁是卧底）、stop 结束、status 查看。开局后群友用普通发言参与，轮次、计票与判定都由系统负责，你只负责氛围与解说；**绝不要提到谁的词或谁的身份**。',
+      description: '主持群游戏：action=start 开局（game 传 number-bomb 数字炸弹 / undercover 谁是卧底 / werewolf 狼人杀 6~9 人）、stop 结束、status 查看。开局后群友用普通发言参与，轮次、计票与判定都由系统负责，你只负责氛围与解说；**绝不要提到谁的词或谁的身份**。',
       parameters: {
         type: 'object',
         properties: {
           action: { type: 'string', enum: ['start', 'stop', 'status'], description: 'start=开局；stop=结束；status=看当前局' },
-          game: { type: 'string', description: 'start 用：number-bomb（数字炸弹）/ undercover（谁是卧底）' },
+          game: { type: 'string', description: 'start 用：number-bomb（数字炸弹）/ undercover（谁是卧底）/ werewolf（狼人杀，6~9 人，夜里走私聊）' },
           players: { type: 'array', items: { type: 'string' }, description: 'start 可选：指定参与者，传 QQ 号或**群名片**都行（系统只认最近发过言的群友，名片要一字不差）。想锁定"就这几个人玩"时必须传，否则最近发过言的所有人都会进局' }
         },
         required: ['action']

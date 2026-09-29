@@ -7,9 +7,10 @@ import { DATA_DIR, getConfig } from '../core/config.js';
 import { sanitizeUserText, ZONE_OFFSET_MS } from '../core/util.js';
 import * as numberBomb from './games/number-bomb.js';
 import * as undercover from './games/undercover.js';
+import * as werewolf from './games/werewolf.js';
 
 const FILE = path.join(DATA_DIR, 'games.json');
-const PLUGINS = new Map([[numberBomb.meta.id, numberBomb], [undercover.meta.id, undercover]]);
+const PLUGINS = new Map([[numberBomb.meta.id, numberBomb], [undercover.meta.id, undercover], [werewolf.meta.id, werewolf]]);
 
 const dayIndex = (ts) => Math.floor((Number(ts) + ZONE_OFFSET_MS) / 86400000);
 
@@ -33,6 +34,9 @@ export class GroupGameManager {
       enabled: g.enabled === true,
       chats: Array.isArray(g.chats) ? g.chats.map((x) => String(x || '').trim()).filter(Boolean) : [],
       allowPrivateInvite: g.allowPrivateInvite === true,
+      // 游戏期间私聊豁免（默认关）：开启后，引擎发给**本局在册玩家**的私聊不再要求对方
+      // 在 allow.private 白名单里（报名=同意接收）；deny 仍然优先。模型自己的发送永远受白名单。
+      allowGamePrivateDm: g.allowGamePrivateDm === true,
       maxDurationMin: Math.min(180, Math.max(5, Number(g.maxDurationMin) || 60)),
       dailyLimitPerChat: Math.min(50, Math.max(1, Number(g.dailyLimitPerChat) || 6))
     };
@@ -91,7 +95,16 @@ export class GroupGameManager {
   summaryFor(chatKey, { includeBrief = true } = {}) {
     const cfg = this.#cfg();
     // 关掉开关或把群移出白名单后，不许再把"进行中的局"注入提示词（否则它会一直挂到重启）
-    if (!cfg.enabled || !cfg.chats.includes(chatKey)) return '';
+    if (!cfg.enabled) return '';
+    if (!cfg.chats.includes(chatKey)) {
+      // 私聊不是局的主会话：只给一段**角色无关**的提示，让模型别把玩家的私聊行动当闲聊乱接
+      // （行动本身由引擎在入口接管、不进模型；这条是给"没解析出来、落到模型手里"的消息兜底）
+      const asPlayer = this.#playerGameOfPrivate(chatKey);
+      if (!asPlayer) return '';
+      return `【进行中的游戏】${asPlayer.plugin.meta.name}正在进行，这位群友是参与者。`
+        + '\n私聊里你若收到行动类消息（如"刀 3"/"守 2"/"查 1"），不要复述、不要解读、不要评论任何人的身份；'
+        + '引擎已处理的行动你不会看到；没看懂的消息请让对方按引擎提示的格式重发一遍。';
+    }
     const g = this.games.get(chatKey);
     if (!g) return '';
     const plugin = PLUGINS.get(g.gameId);
@@ -99,6 +112,91 @@ export class GroupGameManager {
     const lines = [`【进行中的游戏】${plugin.meta.name}：`, plugin.summaryForModel(g.state)];
     if (includeBrief) lines.push(`主持要求：${plugin.hostBrief(g.state)}`);
     return lines.join('\n');
+  }
+
+  /** private:uid 属于哪个进行中的局（玩家视角）；不是参与者就返回 null。 */
+  #playerGameOfPrivate(chatKey) {
+    // 不限定 \d+：生产里 uid 是 QQ 号，但测试世界用 u1/u2 这类 id（同一套逻辑）
+    const m = /^private:([^:\s]+)$/.exec(String(chatKey || ''));
+    if (!m) return null;
+    for (const [groupKey, g] of this.games.entries()) {
+      const plugin = PLUGINS.get(g.gameId);
+      if (!plugin?.meta?.needsPrivate) continue;
+      const hit = (g.state?.roles || []).some((r) => String(r.userId) === m[1]);
+      if (hit) return { groupKey, game: g, plugin };
+    }
+    return null;
+  }
+
+  /**
+   * 私聊行动入口（由 ingest 在收到私聊消息时调用）：属于进行中的局就由引擎接管，
+   * 返回 true 表示"已消费，不要再唤醒模型"。解析不了（无回执）时返回 false，
+   * 让消息照常落到模型手里兜底（玩家不至于发了没人理）。
+   */
+  async consumePrivateAction(chatKey, message) {
+    const cfg = this.#cfg();
+    if (!cfg.enabled) return false;
+    const found = this.#playerGameOfPrivate(chatKey);
+    if (!found) return false;
+    const { game: g, plugin } = found;
+    if (typeof plugin.onPrivateMessage !== 'function') return false;
+    const uid = String(message?.senderId || '').split(':').pop();
+    const out = plugin.onPrivateMessage(g.state, {
+      userId: uid,
+      text: String(message?.text || ''),
+      ts: Number(message?.ts) || this.now()
+    }, { now: this.now(), deadline: g.deadlineAt });
+    if (!out?.effects?.length) return false;      // 没解析出来 → 交回普通链路
+    g.state = out.state;
+    g.privateSeen = g.privateSeen && typeof g.privateSeen === 'object' ? g.privateSeen : {};
+    g.privateSeen[uid] = Math.max(Number(g.privateSeen[uid] || 0), Number(message?.id) || 0);
+    this.#save();
+    await this.#applyEffects(found.groupKey, out.effects);
+    // 就地标记已读：这条私聊不再唤醒模型（省调用 + 零泄密面）
+    try { this.store.markRead(chatKey, [Number(message?.id)]); } catch { /* 标记失败不影响本局 */ }
+    if (out.state?.phase === 'ended') this.#finishIfEnded(found.groupKey);
+    return true;
+  }
+
+  /** tick 的兜底扫描：补处理"错过入口"（重启补课、引擎当时没在跑）的私聊行动。 */
+  async #collectPrivateActions(groupKey) {
+    const g = this.games.get(groupKey);
+    if (!g) return;
+    const plugin = PLUGINS.get(g.gameId);
+    if (typeof plugin?.onPrivateMessage !== 'function') return;
+    const players = (g.state?.roles || []).map((r) => String(r.userId));
+    if (!players.length) return;
+    g.privateSeen = g.privateSeen && typeof g.privateSeen === 'object' ? g.privateSeen : {};
+    let state = g.state;
+    const effects = [];
+    for (const uid of players) {
+      const key = `private:${uid}`;
+      // 不看 readOnly：行动消息可能是 pending（入口没接管到的情况），水位保证不重放
+      const rows = this.store.recent(key, { limit: 10, afterId: Number(g.privateSeen[uid] || 0) });
+      for (const m of rows) {
+        g.privateSeen[uid] = Math.max(Number(g.privateSeen[uid] || 0), Number(m.id) || 0);
+        if (m.self) continue;
+        const out = plugin.onPrivateMessage(state, {
+          userId: String(m.senderId || ''), text: String(m.text || ''), ts: Number(m.ts) || this.now()
+        }, { now: this.now(), deadline: g.deadlineAt });
+        state = out.state;
+        effects.push(...(out.effects || []));
+        if (out.effects?.length) { try { this.store.markRead(key, [Number(m.id)]); } catch { /* 忽略 */ } }
+      }
+    }
+    g.state = state;
+    this.#save();
+    if (effects.length) await this.#applyEffects(groupKey, effects);
+    this.#finishIfEnded(groupKey);
+  }
+
+  /** 局已结束（插件把 phase 标成 ended）→ 清状态并落盘。 */
+  #finishIfEnded(groupKey) {
+    const cur = this.games.get(groupKey);
+    if (cur && cur.state?.phase === 'ended') {
+      this.games.delete(groupKey);
+      this.#save();
+    }
   }
 
   /** 开局。players 缺省用最近活跃成员；返回 { ok, text }（text 是可直接发给群里的说明）。 */
@@ -156,22 +254,30 @@ export class GroupGameManager {
     this.daily.set(chatKey, { dayKey: today, count: used + 1 });
     this.#save();
 
-    const applied = await this.#applyEffects(chatKey, [
-      ...(plugin.meta.id === 'undercover'
-        ? [{ type: 'public', text: `🕵️ 谁是卧底开局（第 ${used + 1} 局 / 今日）：${roster.length} 人 —— `
-            + roster.map((p, i) => `${i + 1}=${sanitizeUserText(String(p.name || p.userId))}`).join('、')
-            + '。词已私聊给大家（没收到就悄悄说一声），别直接说出来；投票发「投 3」或「投 @他」。' }]
-        : [{ type: 'public', text: `💣 数字炸弹开局：1~100 里藏了一个数，谁踩中谁输。直接发你猜的数字就行。` }]),
-      ...(state.roles
-        ? state.roles.map((r) => ({ type: 'private', userId: r.userId, text: `【谁是卧底】你的词是「${r.word}」。用一句话描述它（别说得太直白），轮到你时发出来。` }))
-        : [])
-    ]);
+    const applied = await this.#applyEffects(chatKey, typeof plugin.openingEffects === 'function'
+      ? plugin.openingEffects(state)
+      : [
+        ...(plugin.meta.id === 'undercover'
+          ? [{ type: 'public', text: `🕵️ 谁是卧底开局（第 ${used + 1} 局 / 今日）：${roster.length} 人 —— `
+              + roster.map((p, i) => `${i + 1}=${sanitizeUserText(String(p.name || p.userId))}`).join('、')
+              + '。词已私聊给大家（没收到就悄悄说一声），别直接说出来；投票发「投 3」或「投 @他」。' }]
+          : [{ type: 'public', text: `💣 数字炸弹开局：1~100 里藏了一个数，谁踩中谁输。直接发你猜的数字就行。` }]),
+        ...(state.roles
+          ? state.roles.map((r) => ({ type: 'private', userId: r.userId, text: `【谁是卧底】你的词是「${r.word}」。用一句话描述它（别说得太直白），轮到你时发出来。` }))
+          : [])
+      ]);
     // 成功/失败分开报给模型：之前只有失败计数，模型会把"部分成功"说成"全都没收到"
     // （2026-09-29 实测：管理员明明收到了词，模型却说"你们应该一条都没收到"）
-    const privateOk = plugin.meta.needsPrivate ? roster.length - (applied?.privateFailed || 0) : 0;
+    const people = applied?.privatePeople || 0;
+    const failed = applied?.privateFailed || 0;
     const text = `已开局：${plugin.meta.name}（${roster.length} 人）`
-      + (plugin.meta.needsPrivate ? `，词已私聊发给 ${privateOk} 人` : '')
-      + (applied?.privateFailed ? `；有 ${applied.privateFailed} 人没发出去（私聊被拒/不在私聊白名单），别再整体重发，谁说没收到就单独补发给谁` : '');
+      + (plugin.meta.needsPrivate ? `，私聊已送达 ${people} 人` : '')
+      + (failed
+        ? `；有 ${failed} 人没发出去 —— 对方不在私聊白名单（或被管理员屏蔽）。`
+          + '两个办法：① 把想玩的人加进「聊天白名单 → 私聊」（推荐顺手加好友，最稳）；'
+          + '② 或在群游戏设置里打开「游戏期间私聊豁免（只对局内玩家）」。'
+          + '先别重发，谁说没收到就单独补发给谁'
+        : '');
     return { ok: true, text };
   }
 
@@ -248,11 +354,15 @@ export class GroupGameManager {
         await this.handleNewMessages(chatKey);
         const cur = this.games.get(chatKey);
         if (!cur) continue;
-        const plugin = PLUGINS.get(cur.gameId);
-        const out = plugin.onTick(cur.state, { now: this.now(), deadline: cur.deadlineAt });
-        cur.state = out.state;
+        // 私聊行动通道的兜底扫描（入口已接管过的不重复：按每人水位增量取）
+        await this.#collectPrivateActions(chatKey);
+        const cur2 = this.games.get(chatKey);
+        if (!cur2) continue;
+        const plugin = PLUGINS.get(cur2.gameId);
+        const out = plugin.onTick(cur2.state, { now: this.now(), deadline: cur2.deadlineAt });
+        cur2.state = out.state;
         if (out.effects?.length) await this.#applyEffects(chatKey, out.effects);
-        if (cur.state.phase === 'ended') {
+        if (cur2.state.phase === 'ended') {
           this.games.delete(chatKey);
           this.#save();
         }
@@ -265,18 +375,27 @@ export class GroupGameManager {
   async #applyEffects(chatKey, effects) {
     const cfg = this.#cfg();
     let privateFailed = 0;
+    let privateOk = 0;
+    const privateUsers = new Set();
     for (const effect of effects) {
       try {
         if (!effect) continue;
         if (effect.type === 'public' && effect.text) {
           await this.sender.sendTextBatch(chatKey, [String(effect.text).slice(0, 500)], {});
         } else if (effect.type === 'private' && effect.text) {
+          const uid = String(effect.userId || '');
           if (!cfg.allowPrivateInvite) {
             privateFailed += 1;
             this.log('[group-game] 跳过私聊消息（未开启「允许私聊发身份」）');
             continue;
           }
-          await this.sender.sendTextBatch(`private:${String(effect.userId)}`, [String(effect.text).slice(0, 500)], {});
+          // 游戏期间豁免（开关开启时）：只对**本局在册玩家**放宽私聊白名单；不在册一律不发，
+          // 免得一次提示注入就把词/身份发给任意 QQ（把关放在这里，而不是只靠插件自觉）
+          const roster = new Set((this.games.get(chatKey)?.state?.roles || []).map((r) => String(r.userId)));
+          const gameScoped = cfg.allowGamePrivateDm && roster.has(uid);
+          await this.sender.sendTextBatch(`private:${uid}`, [String(effect.text).slice(0, 500)], gameScoped ? { gameScoped: true } : {});
+          privateOk += 1;
+          privateUsers.add(uid);
         } else if (effect.type === 'wake' && this.wake) {
           this.wake(chatKey, Number(effect.delayMs) || 60000, String(effect.note || ''), { kind: 'game' });
         } else if (effect.type === 'end') {
@@ -289,6 +408,6 @@ export class GroupGameManager {
         this.log('[group-game] 效果发送失败:', error?.message ?? error);
       }
     }
-    return { privateFailed };
+    return { privateFailed, privateOk, privatePeople: privateUsers.size };
   }
 }

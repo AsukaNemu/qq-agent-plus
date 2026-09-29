@@ -13,8 +13,8 @@ fs.writeFileSync(path.join(tmp, 'config.json'), JSON.stringify({
   api: { baseUrl: 'https://example.com/v1', apiKey: 'k', model: 'm' },
   groupGame: {
     enabled: true, chats: [CHAT], allowPrivateInvite: true,
-    games: ['number-bomb', 'undercover'], maxPlayers: 10, dailyLimitPerChat: 6,
-    roundSeconds: 0, revealWords: true
+    games: ['number-bomb', 'undercover', 'werewolf'], maxPlayers: 10, dailyLimitPerChat: 6,
+    allowGamePrivateDm: true, roundSeconds: 0, revealWords: true
   }
 }));
 
@@ -24,8 +24,8 @@ const { GroupGameManager } = await import('../../src/features/group-game.js');
 const store = new ChatStore(0, { dataDir: tmp });
 const out = [];
 const sender = {
-  async sendTextBatch(chatKey, msgs) {
-    for (const m of msgs) out.push({ chatKey, text: String(m) });
+  async sendTextBatch(chatKey, msgs, options = {}) {
+    for (const m of msgs) out.push({ chatKey, text: String(m), gameScoped: options.gameScoped === true });
     return { sent: msgs.map((_, i) => ({ messageId: `m${out.length + i}` })) };
   }
 };
@@ -37,7 +37,7 @@ const say = (uid, name, text) => store.appendIncoming(CHAT, {
   senderId: String(uid), senderName: name, text, reply: null, media: [], mentionsSelf: false, eventKind: 'message'
 }, { recordOnly: true });   // 真实链路里这些消息已被编排器确认（acked），tick 只认 acked 的行
 const drain = () => { const rows = out.splice(0); return rows; };
-const label = (r) => (r.chatKey === CHAT ? '群里' : `私聊→${r.chatKey.split(':')[1]}`);
+const label = (r) => (r.chatKey === CHAT ? '群里' : `私聊→${r.chatKey.split(':')[1]}${r.gameScoped ? '[豁免]' : ''}`);
 
 function show(title, rows) {
   console.log(`\n── ${title} ──`);
@@ -111,6 +111,72 @@ for (let i = 0; i < 12 && mgr.games.has(CHAT); i += 1) {
   show(`第 ${i + 1} 步`, drain());
 }
 console.log('  局面：', JSON.stringify(mgr.games.get(CHAT) || '已结束'));
+
+// ── 狼人杀（6 人：夜里私聊行动、白天讨论投票）──────────────────────────────
+console.log('\n=== 狼人杀（6 人：私聊行动 → 回执/查验 → 天亮 → 白天投票整条链路）===');
+for (const [uid, name, t] of [[1001, '阿猫', '有人玩狼人杀吗'], [1002, '阿狗', '我来'], [1003, '小北', '+1'], [1004, '老四', '带上我'], [1005, '小五', '算我'], [1006, '小六', '我也来']]) {
+  store.appendIncoming(CHAT, { mid: `w${uid}`, ts: (clock += 1000), senderId: String(uid), senderName: name, text: t, reply: null, media: [] }, { recordOnly: true });
+}
+const rw = await mgr.start({ chatKey: CHAT, gameId: 'werewolf' });
+console.log('  start 返回：', JSON.stringify(rw));
+show('开局（群公告 + 6 条身份私聊 + 夜行动提示）', drain());
+
+const wState = () => mgr.games.get(CHAT).state;
+const roleOf = (role) => wState().roles.filter((r) => r.role === role && r.alive);
+const numOf = (uid) => wState().roles.findIndex((r) => r.userId === String(uid)) + 1;
+// 私聊行动：走与线上一致的入口（ingest 会调的 consumePrivateAction）
+const pmAction = async (uid, text) => {
+  const stored = store.appendIncoming(`private:${uid}`, { mid: `pm-${uid}-${clock}`, ts: (clock += 1000), senderId: String(uid), senderName: '玩家', text, reply: null, media: [] });
+  const took = await mgr.consumePrivateAction(`private:${uid}`, stored);
+  show(`${uid} 私聊「${text}」${took ? '' : '（未接管 → 会落到模型兜底）'}`, drain());
+};
+const gsay = async (uid, name, text) => {
+  store.appendIncoming(CHAT, { mid: `g-${uid}-${clock}`, ts: (clock += 1000), senderId: String(uid), senderName: name, text, reply: null, media: [] }, { recordOnly: true });
+  await mgr.tick();
+  show(`${name}: ${text}`, drain());
+};
+
+// 第 1 夜：狼刀预言家、守卫守预言家（挡刀）、预言家查一只狼
+{
+  const seer = roleOf('seer')[0];
+  const guard = roleOf('guard')[0];
+  const [w1, w2] = roleOf('wolf');
+  await pmAction(w1.userId, `刀 ${numOf(seer.userId)}`);
+  await pmAction(w2.userId, `刀 ${numOf(seer.userId)}`);
+  await pmAction(guard.userId, `守 ${numOf(seer.userId)}`);
+  await pmAction(seer.userId, `查 ${numOf(w1.userId)}`);
+}
+// 第 1 天：全员发言 → 投狼 1 出局
+for (const r of wState().roles.filter((x) => x.alive)) await gsay(r.userId, r.name, '我先说说我的看法');
+{
+  const [w1] = roleOf('wolf');
+  for (const r of wState().roles.filter((x) => x.alive)) {
+    const target = r.userId === w1.userId ? (roleOf('seer')[0] || roleOf('villager')[0]) : w1;
+    if (target) await gsay(r.userId, r.name, `投 ${numOf(target.userId)}`);
+  }
+}
+// 第 2 夜：狼刀守卫（守卫守自己）、预言家再查一次
+{
+  const aliveW = roleOf('wolf');
+  const guard = roleOf('guard')[0];
+  const seer = roleOf('seer')[0];
+  if (aliveW[0]) await pmAction(aliveW[0].userId, `刀 ${numOf((guard || seer).userId)}`);
+  if (guard) await pmAction(guard.userId, `守 ${numOf(guard.userId)}`);
+  if (seer) await pmAction(seer.userId, `查 ${numOf(aliveW[0].userId)}`);
+}
+// 第 2 天：发言 → 投掉最后一只狼 → 好人获胜
+if (mgr.games.has(CHAT)) {
+  for (const r of wState().roles.filter((x) => x.alive)) await gsay(r.userId, r.name, '我觉得再想想');
+  const aliveW = roleOf('wolf');
+  if (aliveW[0]) {
+    for (const r of wState().roles.filter((x) => x.alive && x.userId !== aliveW[0].userId)) {
+      await gsay(r.userId, r.name, `投 ${numOf(aliveW[0].userId)}`);
+    }
+    const other = wState().roles.find((x) => x.alive && x.userId !== aliveW[0].userId);
+    if (other) await gsay(aliveW[0].userId, aliveW[0].name, `投 ${numOf(other.userId)}`);
+  }
+}
+console.log('  狼人杀局面：', mgr.games.has(CHAT) ? '仍在进行' : '已结束（上面应有胜负结算）');
 
 console.log('\n=== 全部输出结束 ===');
 mgr.stopLoop?.();

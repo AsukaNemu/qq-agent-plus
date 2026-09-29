@@ -299,14 +299,24 @@
     "enabled": true,
     "chats": ["group:123456"],
     "allowPrivateInvite": true,
+    "allowGamePrivateDm": false,
     "dailyLimitPerChat": 6,
-    "maxDurationMin": 60
+    "maxDurationMin": 60,
+    "games": ["number-bomb", "undercover", "werewolf"]
   }
 }
 ```
 
 - `maxDurationMin` 是单局时长上限，**与游戏自身的上限取较小值**（数字炸弹 20 分钟、谁是卧底 45 分钟）；
   设得比它俩大不会延长。到点引擎自动结算。
+- **三种游戏**：`number-bomb`（数字炸弹，全公开）、`undercover`（谁是卧底，开局私聊发词）、
+  `werewolf`（狼人杀，6~9 人：**整局都靠私聊**——夜里私聊提交刀/守/查，白天在群里讨论投票）。
+- **私聊怎么发得出去（两条路，任选其一）**：
+  ① 把想玩的人加进 `allow.private`（推荐顺手加好友，最稳）；
+  ② 打开 `allowGamePrivateDm`（默认关）——**游戏期间私聊豁免**：引擎发给"本局在册玩家"的私聊
+  不再要求对方在白名单里（报名=同意接收），只在局内、失败不重试、内容全部是引擎文本；
+  模型自己发的消息（send_message / send_voice）**永远**受 `allow.private` 约束，`deny.private` 始终优先。
+  谁是卧底只有发词一条私聊；狼人杀人均 3~6 条，没 ① 或 ② 时只有白名单里的人收得到（开局会把失败人数报给模型）。
 - 开局名单缺省=最近发过言的群友（上限 `maxPlayers`）。模型可以用 `group_game` 的 `players` 参数
   锁定名单，传 QQ 号或**群名片**都行（名片要一字不差，且必须最近发过言——这是防提示注入把词发给任意 QQ 的硬门）。
 

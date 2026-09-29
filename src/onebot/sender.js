@@ -173,7 +173,8 @@ export class SendQueue {
 
   async #deliver(chatKey, options, payload, send) {
     await this.#assertNotMuted(chatKey);
-    assertCanSend(chatKey, options.signal);
+    // gameScoped：只由群游戏管理器对"本局在册玩家"设置（access.assertCanSend 里放宽 allow.private）
+    assertCanSend(chatKey, options.signal, { gameScoped: options.gameScoped === true });
     const id = this.store.beginSend(chatKey, options.runId, payload);
     try {
       let data = null;
@@ -252,7 +253,7 @@ export class SendQueue {
       const isLast = i === parts.length - 1;
       const gap = this.#gap(text, isLast);
       promises.push(chain(async () => {
-        assertCanSend(chatKey, options.signal);
+        assertCanSend(chatKey, options.signal, { gameScoped: options.gameScoped === true });
         if (options.runId && this.store.hasUncertainEffects(options.runId)) throw new Error('Previous send delivery is uncertain');
         this.#checkRate(chatKey);
         if (gap > 0) await sleep(gap);

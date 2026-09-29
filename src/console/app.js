@@ -939,6 +939,11 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         || await handleSlangPilotAdminCommand(kind, id, text)
       )
     ) return;
+    // 群游戏的私聊行动（狼人杀这类"夜里私聊提交"的游戏）：属于进行中的局就由引擎在入口
+    // 接管（发回执/发查验结果），并就地标记已读 —— 不再唤醒模型（省调用 + 零泄密面）。
+    // 解析不了的消息返回 false，照常走下面的普通链路落到模型手里兜底。
+    if (!isSelf && kind === 'private' && groupGame?.consumePrivateAction
+      && await groupGame.consumePrivateAction(chatKey, stored)) return;
     if (!isSelf) orchestrator.onIncoming(chatKey);
   }
 

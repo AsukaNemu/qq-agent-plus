@@ -619,6 +619,20 @@ try {
   });
   // 「关掉时的样子」显式摆出来：出厂配置不等于"关"（人物印象现在默认就是开的），
   // 拿出厂配置当对照组的话，断言会跟着默认值飘。
+  // 狼人杀与游戏私聊豁免开关：实验页必须有这两个控件，且勾选态跟着配置
+  const wolfOnHtml = ctx.renderExperimentalSettingsSection({ ...cfg, groupGame: { ...(cfg.groupGame || {}), enabled: true, allowPrivateInvite: true, allowGamePrivateDm: true, games: ['number-bomb', 'undercover', 'werewolf'] } });
+  const wolfOffHtml = ctx.renderExperimentalSettingsSection({ ...cfg, groupGame: { ...(cfg.groupGame || {}), enabled: true, allowPrivateInvite: true, allowGamePrivateDm: false, games: ['number-bomb'] } });
+  {
+    const okWolf = /id="cfg-game-werewolf"[^>]*checked/.test(wolfOnHtml)
+      && !/id="cfg-game-werewolf"[^>]*checked/.test(wolfOffHtml)
+      && /id="cfg-game-privatedm"[^>]*checked/.test(wolfOnHtml)
+      && !/id="cfg-game-privatedm"[^>]*checked/.test(wolfOffHtml)
+      && /游戏期间私聊豁免/.test(wolfOnHtml)
+      && /聊天白名单/.test(wolfOnHtml);
+    okWolf ? pass++ : fail++;
+    console.log('  ' + (okWolf ? 'OK   ' : 'FAIL ') + '群游戏：狼人杀勾选与「游戏期间私聊豁免」开关随配置（含白名单/加好友提示）');
+  }
+
   const experimentalOffHtml = ctx.renderExperimentalSettingsSection({
     ...cfg,
     identityPilot: { ...cfg.identityPilot, enabled: false, graduated: false },

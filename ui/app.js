@@ -7083,8 +7083,17 @@ function renderExperimentalSettingsSection(c) {
         <label for="cfg-game-bomb">允许「数字炸弹」</label></div>
       <div class="checkbox-row"><input type="checkbox" id="cfg-game-undercover" ${(Array.isArray(c.groupGame?.games) ? c.groupGame.games : ['number-bomb', 'undercover']).includes('undercover') ? 'checked' : ''} />
         <label for="cfg-game-undercover">允许「谁是卧底」</label></div>
+      <div class="checkbox-row"><input type="checkbox" id="cfg-game-werewolf" ${(Array.isArray(c.groupGame?.games) ? c.groupGame.games : []).includes('werewolf') ? 'checked' : ''} />
+        <label for="cfg-game-werewolf">允许「狼人杀」（6~9 人：夜里私聊提交行动，白天讨论投票；整局都在私聊，见下面的豁免开关）</label></div>
       <div class="checkbox-row"><input type="checkbox" id="cfg-game-reveal" ${c.groupGame?.revealWords !== false ? 'checked' : ''} />
-        <label for="cfg-game-reveal">谁是卧底结算时公开双方词（关掉只公布卧底是谁）</label></div>
+        <label for="cfg-game-reveal">谁是卧底/狼人杀结算时公开词与身份（关掉只公布胜方）</label></div>
+      <div class="checkbox-row"><input type="checkbox" id="cfg-game-privatedm" ${c.groupGame?.allowGamePrivateDm === true ? 'checked' : ''} />
+        <label for="cfg-game-privatedm">游戏期间私聊豁免（只对局内玩家；默认关）</label></div>
+      <div class="hint">私聊发送的两条路，任选其一即可让游戏跑起来：
+        <b>① 白名单/加好友（推荐，最稳）</b>——把想玩的人加进「聊天白名单 → 私聊」，顺手加个好友更好；
+        <b>② 打开上面的「游戏期间私聊豁免」</b>——只在本局进行中、只发给报名参加的那几个人、只发引擎文本，
+        模型自己发消息仍受白名单限制（管理员屏蔽的人永远发不进）。谁是卧底只有发词一条私聊；狼人杀整局都要私聊，
+        没有 ① 或 ② 就只有白名单里的人能收到。</div>
       <div class="hint" id="experiment-launch-result"></div>
     </section>`;
 }
@@ -12095,11 +12104,17 @@ async function saveConfig({ quiet = false } = {}) {
         ...(c.groupGame || {}),
         enabled: chk('#cfg-game-enabled', c.groupGame?.enabled === true),
         allowPrivateInvite: chk('#cfg-game-private', c.groupGame?.allowPrivateInvite === true),
+        // 游戏期间私聊豁免：只影响引擎发给"本局在册玩家"的私聊；模型发送永远受白名单
+        allowGamePrivateDm: chk('#cfg-game-privatedm', c.groupGame?.allowGamePrivateDm === true),
         dailyLimitPerChat: clampInt(val('#cfg-game-daily', c.groupGame?.dailyLimitPerChat ?? 6), 1, 50, 6),
         maxPlayers: clampInt(val('#cfg-game-maxplayers', c.groupGame?.maxPlayers ?? 10), 2, 30, 10),
         roundSeconds: clampInt(val('#cfg-game-round', c.groupGame?.roundSeconds ?? 0), 0, 600, 0),
         revealWords: chk('#cfg-game-reveal', c.groupGame?.revealWords !== false),
-        games: ['number-bomb', 'undercover'].filter((g) => chk(g === 'number-bomb' ? '#cfg-game-bomb' : '#cfg-game-undercover', true)),
+        games: [
+          ['number-bomb', '#cfg-game-bomb'],
+          ['undercover', '#cfg-game-undercover'],
+          ['werewolf', '#cfg-game-werewolf']
+        ].filter(([, sel]) => chk(sel, sel === '#cfg-game-werewolf' ? false : true)).map(([id]) => id),
         ...(pickedGroups('cfg-game-chats-box') ? { chats: pickedGroups('cfg-game-chats-box') } : {})
       };
   }

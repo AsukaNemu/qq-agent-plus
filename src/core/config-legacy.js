@@ -306,6 +306,10 @@ export const DEFAULT_CONFIG = {
     enabled: false,
     chats: [],
     allowPrivateInvite: false,
+    // 游戏期间私聊豁免（默认关）：开启后引擎发给**本局在册玩家**的私聊不再要求对方在
+    // 私聊白名单里（报名=同意接收；deny 仍优先），用于狼人杀这类全程私聊行动的游戏。
+    // 关着也能玩——把想玩的人加进 allow.private（推荐顺手加好友）即可。
+    allowGamePrivateDm: false,
     maxDurationMin: 60,
     dailyLimitPerChat: 6
   },
