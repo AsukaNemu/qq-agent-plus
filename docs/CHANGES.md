@@ -48,7 +48,55 @@
 | 省 Token 模式 | `src/core/token-saver.js`（新增）、`src/core/config-legacy.js`、`src/llm/prompt.js`、`src/core/orchestrator.js`、`src/memory/memory-global.js`、`src/features/daily-moments.js`、`src/features/qzone-interactions.js`、`ui/app.js`、`src/console/app.js` | 「设置 -> 省 Token」三档，只给上下文档位条数、单次运行轮数与预算、交接/印象注入字符数、表情清单条数**夹上限**，不改写用户设置；关掉即恢复原样 | 本仓库新增 |
 | 关闭上游调试探针 | `src/*.js`、`ui/*.js` | 上游作者留在源码里的调试上报（指向其开发机私网地址）全部关掉 | `apply-disable-upstream-debug.sh` |
 
-## 0. 思考控制与表情匹配（v0.7.4 起）
+## 0. 群游戏（数字炸弹 / 谁是卧底 / 狼人杀含女巫）、语音回复多供应商、定时提醒与群日报（v0.7.5 起）
+
+- **群游戏：数字炸弹 / 谁是卧底 / 狼人杀**：`src/features/group-game.js`（新增管理器）、
+  `src/features/games/{number-bomb,undercover,werewolf}.js`（新增三个插件）、`src/console/app.js`、
+  `ui/app.js`、`src/core/config-legacy.js`、`src/llm/prompt.js`、`src/tools/tools-core.js`、
+  `src/onebot/sender.js`、`src/core/access.js`、`src/core/store.js`。
+  失败模式：群游戏既要"隐藏信息 + 轮次 + 超时"，又不能把玩家的牌面（身份、词、查验结果）露给主持模型 ——
+  真人群里还有一串模拟不出来的情况：没参加的人插话、有人只潜水不发言、有人半路退出、有人 AFK 不交行动、
+  白天谁也不想先开口。现行做法：**真相与话术分离**（身份/词/查验结果只走私聊，模型只看公开摘要）；
+  需要私聊的游戏**先挂报名**（默认 45 秒，想玩的回「我玩」，到点人不够就散），不再把只是在群里插句话的
+  围观者拉进局；白天三个出口谁先到算谁（固定讨论时长、超过半数存活玩家说「投吧」、全员发过言）；
+  夜里 90 秒行动窗口，到点按已收到的结算（不点名、不催人）。
+  **出局者的话一律不计入判定**（入场就返回 + 计票只认活人投票）并在出局那一刻私聊本人说明；
+  有人反复私聊刷行动时按"每人每夜 4 条回执"夹住，超出静默。
+  **游戏期间私聊豁免**：引擎发给本局在册玩家的私聊不受 `allow.private` 白名单限制（`deny` 仍优先、
+  只在局内、失败不重试、内容全部是引擎文本），否则"整局都靠私聊"的狼人杀只有全员加白名单才玩得起来。
+  **引擎私聊不进模型上下文**：发送侧落库时即打 `eventKind='game-secret'`，提示词历史、翻页工具、
+  消息详情等所有出口统一过滤 —— 模型在私聊里不是上帝视角。
+  **狼人杀**：6~9 人（6 人局 = 2 狼 / 1 预言家 / 1 女巫 / 2 民，7 人起加守卫，9 人 3 狼）；女巫两瓶药
+  （解药救当晚被刀的人、毒药独立致命可一晚双死）各一次、一晚最多一瓶、不能自救、**同守同救必死**；
+  狼刀定下之后才私聊询问女巫（提示里写明被刀的是谁），此后狼改刀会被拒。控制台实验页可选可开的游戏、
+  报名与讨论时长、每局人数上限、结算是否公开身份等。
+- **语音回复：四家适配（含豆包语音合成 2.0）**：`src/llm/tts-presets.js`、`src/llm/tts-doubao.js`（新增）、
+  `src/llm/tts-http.js`（新增）、`src/console/app.js`、`ui/app.js`。
+  失败模式：原先只支持 OpenAI 兼容一家；火山 v1 的鉴权（`Bearer;<token>`）与豆包 2.0 的 v3 流式
+  （`X-Api-Key` / `X-Api-Resource-Id`、NDJSON 分片里 base64）形态完全不同，写死一种形态在别家必然失败。
+  现行做法：OpenAI 兼容 / 火山 v1 / 豆包 2.0 / MiniMax 四家适配，控制台按服务商预设填地址、Key、模型与
+  音色（豆包内置官方 2.0 音色清单 102 条，按控制台分类分组），支持试听；语音/图片类发送的超时 15s→60s
+  （实测一条 7 秒语音协议端要 16.4s，原 15s 会把已发出的语音记成"结果未知"）。
+- **定时提醒**：`src/features/reminders.js`、`src/console/app.js`、`ui/app.js`。
+  失败模式：提醒原来只在内存里、重启就丢；多条同时到点会叠着派发；派发前不预检会把提醒标成已发生却没真提醒。
+  现行做法：落盘持久化、同会话多条合并、派发前预检（模型忙/会话在跑就排队），控制台新增"定时提醒"页
+  （开关、待触发与最近完成列表、单条取消），`reminders.enabled` 同时门控 `remind` 工具与到期派发。
+- **群日报**：`src/features/group-digest.js`、`src/console/app.js`。定时把最近 24 小时的群聊汇总发到指定群，
+  发送时间的格式做了校验与兜底（配置写错时间不再静默不跑）。
+- **对抗性审查修复（3 轮）**：`src/features/group-game.js`、`src/features/games/*`、`src/tools/tools-core.js`、
+  `src/core/store.js`。修掉的问题包括：引擎私聊的 `game-secret` 标记原先只打在 ingest 回显侧，而存储按
+  (chat_key, mid) 幂等、命中重复不回填 → 标记恒不生效（身份与查验结果会进模型上下文）；
+  出局者反复发「不玩了」绕过配额（实测 20 条→20 条回执）；投票阶段「投自己」每次都回一条群消息；
+  数字炸弹越界提示可无限刷；`tick` 推进的阶段不落盘导致任何重启都会重复"天亮了"、重发夜行动提示
+  （改为发送成功后落盘 + tmp/rename 原子写）；退出的守卫仍然挡刀（`pending.guard` 存的是目标，作废时
+  却拿提交者 uid 去比）；同一个人在两个群各一局时一条私聊被两局各执行一次；狼在锁刀前减员导致刀口永不
+  锁定、女巫整夜收不到询问；名单没去重（模型把同一个人写两遍，他会拿 2~6 张身份）。
+  配置侧补上 `maxPlayers`/`roundSeconds` 的默认值、`roundSeconds` 对狼人杀补 30 秒下限、
+  `recruitSeconds` 显式写 `null`/空串按缺省 45 秒处理、名单报错区分"对不上"与"被人数上限截断"。
+  测试侧新增 20 条用例（含数字炸弹边界、回执按夜重置、单一归属、原子写与损坏文件现状等），
+  "tick 重入锁"那条原先是假绿、改成"报名溢出 + 慢发送"并做了突变验证；整局驱动从零断言加到 6 条。
+
+## 1. 思考控制与表情匹配（v0.7.4 起）
 
 - **思考控制（按渠道翻译档位、每家独立、可按任务分设）**：`src/core/provider-presets.js`（新增）、
   `src/llm/llm.js`、`src/core/providers.js`、`src/console/app.js`、`ui/app.js`、`src/core/config-legacy.js`。
@@ -77,7 +125,7 @@
   `access_token` / `api_key` 这类带下划线前缀的参数名补进规则（旧规则只认 `?token=` / `?key=`，会漏掉本项目
   OneBot 实际写在查询串上的 `access_token`）。
 
-## 1. 引用、记忆与人设（v0.7.3 起）
+## 2. 引用、记忆与人设（v0.7.3 起）
 
 - **引用块带被引用那条的消息 id**：`src/core/util.js`（`formatQuoteRef` / `quotePrefixFor` / `textWithQuote`）、
   `src/onebot/onebot.js`、`src/llm/prompt.js`、`src/tools/tools-core.js`、`src/console/app.js`。
@@ -114,7 +162,7 @@
   收藏即落盘（`sticker-assets/`），清单标出来源与发送形态（〔QQ收藏表情〕/〔本地图库·发出去是图片〕），
   发送前探活、失效不发并给出可照做的提示；QQ 收藏夹上限 500（非会员）因此本地库保留。
 
-## 2. 语音转写与视频（v0.7.2 起）
+## 3. 语音转写与视频（v0.7.2 起）
 
 - **多供应商语音转写**：`src/llm/asr-openai.js`、`asr-local.js`（本机 whisper.cpp）、`src/llm/seed-asr.js`（火山 Seed-ASR）、
   `asr-dashscope.js`（阿里云百炼）、`asr-baidu.js`、`asr-tencent.js`（TC3 签名）、`asr-iflytek.js`（签名 WSS 分帧）+
@@ -132,14 +180,14 @@
   `src/tools/tools-core.js`（`get_message_images` 按 kind 分流）。失败模式：只采音轨时模型会回"视频只能听声音"
   （用户实测反馈），画面根本没进过模型的眼睛。
 
-## 3. 对话行为
+## 4. 对话行为
 
 - **分条发言（多气泡）**：`src/llm/prompt.js`。失败形态有两种：一是"把想说的全塞进一条长消息"，二是"用空格把两句连成一条"。补丁注释记录，v1 之前实测 90% 的情况只发一条；v2 在尾部加了"别把一轮压成一句点评"，并明确"一轮常见 2-3 条短句、单条多数 ≤30 字、别一口气刷 4 条以上"。配套的 `humanRhythm` / 主体性文本属于上游自带内容，未通过脚本改动。
 - **提示词调优**：`src/llm/prompt.js`、`src/llm/qzone-interaction-prompt.js`。把"被 @ 或直接提问时优先判断是否需要回应"改成"被 @、点名或直接提问时默认要回一句（可以短、可以敷衍、可以怼回去），只有明显与你无关、对方 @ 别人、或纯刷屏误 @ 时才不回"（v0.6.3 起把其中的"可以怼回去"进一步软化为"也可以就回一句不痛不痒的"）；同时统一了"图库可以自己攒"的用法说明。
 - **聊天关思考**：`src/llm/llm.js`、`src/core/orchestrator.js`。聊天主调用传 `purpose:'chat'`，不携带 thinking 字段；判断/写作类调用不传，走 `default:'on'`。配置 `api.thinking = {chat:'off', default:'on'}`；脚本幂等，写配置前才停服务。
 - **看图先读情绪**：`src/llm/prompt.js`、`src/tools/tools-core.js`。模型看表情包/图片时容易去"描述画面"；改成先定性情绪再回话，v2 进一步收紧并给出正反例。顺手修了一个缺失：看库内表情时只给了 `desc`，没给模型自己写的 `localNote`。
 
-## 4. 发送链路健壮性
+## 5. 发送链路健壮性
 
 - **消息 id 归一化**：`src/tools/tools-core.js`、`src/core/store.js`。模型常把提示词里的 `#123` 连 `#` 一起传回来，而 OneBot 只认纯数字 id。关键教训：`tools-core.js` 用到的 `normalizeMid` 必须在同一个文件里定义（`store.js` 里那份是模块私有、没有 export），早先只替换调用点没插 helper，结果每次 `send_message` / `send_sticker` / `send_face` 都抛 `normalizeMid is not defined`，机器人一个字都发不出去。所以脚本把"插 helper"和"替换调用点"绑在一起，并且在最后自检两者必须同时存在。
 - **发送网络级重试**：`src/onebot/sender.js`。协议端重启或连接被掐时会抛 `fetch failed`，原来直接丢消息（用户视角是"它没回我"）；网络层错误重试一次即可救回，限频/参数类错误不重试（重试也没用）。回归用例见 `test/local/test-sender-retry.mjs`。
@@ -147,7 +195,7 @@
 - **启动/重连补课**：`src/console/app.js`。服务重启或协议端断线期间，消息事件会丢——消息根本没进库，也就永远没人回。做法：连上 OneBot（含重连）后从协议端拉一次最近历史，把库里没有的消息按 mid 去重补进来；≤30 分钟的按新消息处理（会触发回应），更早的只补进记录、不吵人。
 - **自检与静态扫描**：`src/ops.js scan`（原为 `ops/check-undefined-calls.sh` + `ops/scan-undefined-calls.py`，现已并入项目代码）。上面那次"整夜发不出一个字"的事故表现像"静默/掉线"，很难查；于是加了一个只记日志、永远 `exit 0`、不阻断启动的自检，挂在服务启动链上，另配 `src/ops.js audit` 的补丁标记检查做部署验收。
 
-## 5. 贴纸（表情包）系统
+## 6. 贴纸（表情包）系统
 
 - **自动收藏**：`src/onebot/sticker-manager.js`、`src/onebot/stickers.js`、`src/console/app.js`、`src/core/config-legacy.js`。让模型看一眼别人发的图，自己判断值不值得收（值得就存并写备注）；入口改成异步判断，不阻塞消息处理。条目保留 `srcKey` 作为去重键。
 - **收藏判断健壮性**：`src/onebot/sticker-manager.js`。两个失败模式：模型有时把决定写成 `<tool_call>` 文本或裸 JSON（判断逻辑只认结构化 `tool_calls` → 决定丢失）；`max_tokens=200` 会被"思考"吃掉（实测思考 80-595 token），截断后一个字段都收不到 → 提到 600。另外内容过滤是概率性的（实测同图 20/20 通过、偶发被挡），把尝试次数 2 提到 3，并把"被服务商内容过滤"和"模型没提交"在日志里分开。
@@ -155,7 +203,7 @@
 - **查找与备注**：`src/onebot/stickers.js`、`src/tools/tools-core.js`、`src/onebot/sticker-manager.js`。线上连续出现 5 次"找不到表情 NNN"，编号其实来自来信里的 `[表情NNN]` 标签，模型却拿去当表情库 id 查。于是：来信把系统表情标成 `[QQ表情N 名字]`；找不到时把有效 id 回给模型；`findSticker` 增加"唯一命中"的模糊兜底，提示改为直接用备注名选图；备注上限 16 → 24 字（真图实测里 16 字会把一句话硬切）。
 - **标签与收录规则**：`src/console/app.js`、`src/llm/prompt.js`、`src/tools/tools-core.js`、`src/onebot/stickers.js`、`src/onebot/sticker-manager.js`。表情包消息显示 `[表情包]`（普通图仍是 `[图片]`）；收藏规则收紧到"只认真正的表情包"，生活照/随手拍/自拍不收；相关文案统一叫"表情包"。
 
-## 6. 主动发言与空间互动
+## 7. 主动发言与空间互动
 
 - **开话题节奏**：`src/core/orchestrator.js`。间隔定为 2.5-3.5 小时；"没有安静的群"这种空转不算消耗本轮（45 分钟后再看）。概率、冷场阈值属于部署方偏好，脚本不强制。
 - **间隔守卫**：`src/core/orchestrator.js`。tick 第一次在启动后 15 秒触发，所以每重启一次就会多一次开话题判定，与"几小时才概率开一次"的设定不符。改为把"上次判定时间"落盘，重启后不足一个间隔直接跳过（补丁标记 `minGapMs`、`writeProactiveLastAttempt`）。
@@ -165,7 +213,7 @@
 - **抓取容错与通知阈值**：`src/features/qzone-interactions.js`、`ui/app.js`。好友动态这条外呼在腾讯侧被限流时会回 `{code:-10001, message:"network busy"}`（协议端原样透传），而它此前是硬失败：一次限流就让整轮——包括评论检查和已积压的未读——全部不跑，还会立刻顶一条"错误"级异常通知。现在抓取失败先等 45 秒重试一次（中止信号可打断等待）；仍失败只记 `run.feedError`，本轮继续跑评论检查与积压，运行记录标为「好友动态未取到」并在控制台显示原因；失败计数与退避照旧（2→4→8→16→30 分钟），连续第 3 次才发异常通知；失败轮不算建立动态基线，免得把上线前的旧动态当成新内容。用例：`test/qzone-interactions.test.mjs`、`test/local/test-qzone-backoff.mjs`、`test/local/test-qzone-intervals.mjs`。
 - **每日说说容错**：`src/features/daily-moments.js`。空间列表读不到时跳过查重，不阻断发布。
 
-## 7. 运维与控制台
+## 8. 运维与控制台
 
 - **控制台端口探测**：`src/console/integrations.js`。上游把 SnowLuma / noVNC 地址写死为旧端口 15099 / 16081，而 Linux 全栈部署实际使用 5099 / 6081，导致"服务与访问控制"页误报"不可达"。改为按实际部署端口探测，并修正改 SnowLuma 密码时的地址兜底端口。
 - **控制台自动登录**：`ui/app.js`（地址栏带 `?token=` 时先自动登录，成功后清掉 URL 里的明文令牌再重载，避免留在浏览历史）、`src/console/app.js`（登录 cookie 加 `Max-Age`，避免关掉浏览器就要重新输令牌）。
