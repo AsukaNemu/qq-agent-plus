@@ -15,7 +15,8 @@ export function create({ rng } = {}) {
   const secret = 1 + Math.floor(rand() * 100);
   // low/high 是"已排除的边界"：对外文案是 low+1 ~ high-1。初始设 0/101，
   // 与 secret ∈ [1,100] 一致（原来 1/100 会让"炸弹就是 1 或 100"时文案说错，2026-09-28 审查 P3）
-  return { phase: 'guess', low: 0, high: 101, secret, guesses: 0, phaseStartedAt: 0 };
+  // nudged：越界提示发过给谁（每人每局只回一次，防"猜 0"刷屏；2026-09-29 对抗性验证 P1）
+  return { phase: 'guess', low: 0, high: 101, secret, guesses: 0, phaseStartedAt: 0, nudged: [] };
 }
 
 export function onMessage(state, msg) {
@@ -34,6 +35,12 @@ export function onMessage(state, msg) {
     };
   }
   if (n <= s.low || n >= s.high) {
+    // 同一个人反复发越界数字只提醒一次：群发送配额被这类提示吃光后，
+    // 引擎自己的播报（命中/收窄）反而发不出去（2026-09-29 对抗性验证 P1）
+    const nudged = Array.isArray(s.nudged) ? s.nudged : [];
+    const uid = String(msg.userId || '');
+    if (uid && nudged.includes(uid)) return { state: s, effects: [] };
+    if (uid) s.nudged = [...nudged, uid];
     return { state: s, effects: [{ type: 'public', text: `炸弹在 ${s.low + 1}~${s.high - 1} 之间，${n} 不在这段里` }] };
   }
   if (n < s.secret) s.low = n;

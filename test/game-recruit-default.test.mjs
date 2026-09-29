@@ -33,6 +33,10 @@ test('配置里没写 recruitSeconds 时按默认 45 挂报名（不是直接发
   const r = await mgr.start({ chatKey: 'group:1', gameId: 'undercover' });
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(mgr.games.get('group:1').state.phase, 'recruiting', '缺省应挂报名');
+  // "缺省 = 45 秒"这个数量本身也要钉住：只有 phase 是 recruiting 的话，默认值改成 5 秒也照样绿
+  const until = Number(mgr.games.get('group:1').state.recruitUntil || 0);
+  const left = until - Date.now();
+  assert.ok(left > 40 * 1000 && left <= 46 * 1000, `缺省报名窗口应约 45 秒，实际剩 ${Math.round(left / 1000)} 秒`);
   assert.equal(sent.filter((x) => x.chatKey.startsWith('private:')).length, 0, '报名阶段不发私聊');
   store.close();
 });

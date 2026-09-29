@@ -51,6 +51,8 @@ export class GroupGameManager {
       // 开局报名时长（秒）：needsPrivate 的游戏先挂报名，够 minPlayers 才发牌；0 = 不报名，
       // 直接按"最近发过言的群友"发牌（旧行为）。**键缺失时按产品默认 45**（与文档/UI 一致），
       // 只有显式写 0 才是关闭（2026-09-29 审查：文档说默认开、代码缺省却是关）
+      // 键缺失由 DEFAULT_CONFIG 兜（45）；显式写 null/'' 也按缺省处理，
+      // 免得手改配置的实例出现"控制台显示 45、实际直接发牌"（只有显式 0 才是关闭报名）
       recruitSeconds: g.recruitSeconds === undefined || g.recruitSeconds === null || g.recruitSeconds === ''
         ? 45
         : Math.min(300, Math.max(0, Number(g.recruitSeconds) || 0)),
@@ -76,11 +78,22 @@ export class GroupGameManager {
   #save() {
     try {
       fs.mkdirSync(path.dirname(FILE), { recursive: true });
-      fs.writeFileSync(FILE, JSON.stringify({
+      const body = JSON.stringify({
         games: Object.fromEntries(this.games),
         daily: Object.fromEntries(this.daily)
-      }, null, 2));
-      fs.chmodSync(FILE, 0o600);
+      }, null, 2);
+      // 原子写：先写 .tmp 再 rename。tick 现在每 20 秒就可能写一次，中途被杀/断电留下
+      // 半截 JSON 的话，#load 的 catch 会当成"首次运行"静默丢掉所有进行中的局（2026-09-29 审查）
+      const tmp = `${FILE}.tmp`;
+      fs.writeFileSync(tmp, body);
+      fs.chmodSync(tmp, 0o600);
+      try {
+        fs.renameSync(tmp, FILE);
+      } catch {
+        // Windows 上目标文件被占用时 rename 会 EPERM/EBUSY：退回直接写（丢掉原子性但不丢状态）
+        fs.writeFileSync(FILE, body);
+        try { fs.unlinkSync(tmp); } catch { /* 残留也无害 */ }
+      }
     } catch (error) {
       this.log('[group-game] 存盘失败（不影响本局）:', error?.message ?? error);
     }
@@ -140,19 +153,64 @@ export class GroupGameManager {
     return lines.join('\n');
   }
 
-  /** private:uid 属于哪个进行中的局（玩家视角）；不是参与者就返回 null。 */
-  #playerGameOfPrivate(chatKey) {
+  /**
+   * 把"这条私聊已处理过"记进所有相关局的水位（归属局 + 其它在跑的局）。
+   * 只推归属局的话，归属一换（owner 局结束/被 stop）旧局会从自己的旧水位把消息再吃一遍
+   * （2026-09-29 审查 P1：实测「刀 2」在 owner 局结束后又被另一局执行了一次）。
+   */
+  #notePrivateSeen(id, uid) {
+    const maxId = Number(id) || 0;
+    const who = String(uid);
+    for (const g of this.games.values()) {
+      if (!(g.state?.roles || []).some((r) => String(r.userId) === who)) continue;
+      g.privateSeen = g.privateSeen && typeof g.privateSeen === 'object' ? g.privateSeen : {};
+      g.privateSeen[who] = Math.max(Number(g.privateSeen[who] || 0), maxId);
+    }
+  }
+
+  /**
+   * 这条私聊归哪一局：**最近开局、还没结束、且名单里有这个人**的那一局——单一归属。
+   *
+   * 只认这一个候选，它不认领就交给模型兜底，**绝不转给更早的局执行**：
+   * 试过"逐局递补"会把 B 局白天的闲聊拿去当 A 局的夜间行动执行（还会把消息标已读、
+   * 模型再也看不到），也会把玩家交给刚结束那局的刀/查喂给别的局（2026-09-29 第三轮审查 P1）。
+   *
+   * 若那最近一局已经结束（终局播报还在发的那几秒仍留在 games 里），返回空——
+   * 那时他的私聊按普通聊天处理，同样不转给别的局。
+   */
+  #privateCandidates(chatKey) {
     // 不限定 \d+：生产里 uid 是 QQ 号，但测试世界用 u1/u2 这类 id（同一套逻辑）
     const m = /^private:([^:\s]+)$/.exec(String(chatKey || ''));
-    if (!m) return null;
-    // 同一人同时在两局里时（跨群），优先"能处理私聊行动且最近开局"的那一局
-    const hits = [...this.games.entries()]
+    if (!m) return [];
+    const who = m[1];
+    const owner = [...this.games.entries()]
       .map(([groupKey, g]) => ({ groupKey, game: g, plugin: PLUGINS.get(g.gameId) }))
       .filter((x) => x.plugin?.meta?.needsPrivate
         && typeof x.plugin.onPrivateMessage === 'function'
-        && (x.game.state?.roles || []).some((r) => String(r.userId) === m[1]))
-      .sort((a, b) => Number(b.game.startedAt || 0) - Number(a.game.startedAt || 0));
-    return hits[0] || null;
+        && (x.game.state?.roles || []).some((r) => String(r.userId) === who))
+      .sort((a, b) => Number(b.game.startedAt || 0) - Number(a.game.startedAt || 0))[0];
+    if (!owner) return [];
+    if (owner.game.state?.phase === 'ended') return [];   // 他的最近一局刚结束 → 按普通私聊交给模型
+    return [owner];
+  }
+
+  /** private:uid 属于哪个进行中的局（玩家视角，用于提示词摘要）；不是参与者就返回 null。 */
+  #playerGameOfPrivate(chatKey) {
+    return this.#privateCandidates(chatKey)[0] || null;
+  }
+
+  /** 把一条私聊喂给归属局；它不认领（白天/看不懂）就返回 null，由调用方交回模型。 */
+  #feedPrivate(chatKey, uid, text, ts) {
+    for (const cand of this.#privateCandidates(chatKey)) {
+      const out = cand.plugin.onPrivateMessage(cand.game.state, {
+        userId: uid, text, ts
+      }, { now: this.now(), deadline: cand.game.deadlineAt });
+      const claimed = Boolean(out?.effects?.length) || out?.consume === true;
+      if (!claimed) continue;
+      cand.game.state = out.state;
+      return { ...cand, out };
+    }
+    return null;
   }
 
   /**
@@ -163,27 +221,23 @@ export class GroupGameManager {
   async consumePrivateAction(chatKey, message) {
     const cfg = this.#cfg();
     if (!cfg.enabled) return false;
-    const found = this.#playerGameOfPrivate(chatKey);
-    if (!found) return false;
-    const { game: g, plugin } = found;
-    if (typeof plugin.onPrivateMessage !== 'function') return false;
     const uid = String(message?.senderId || '').split(':').pop();
-    const out = plugin.onPrivateMessage(g.state, {
-      userId: uid,
-      text: String(message?.text || ''),
-      ts: Number(message?.ts) || this.now()
-    }, { now: this.now(), deadline: g.deadlineAt });
-    // 插件可以用 consume:true 表示"我认领了这条但不必回执"（例如同一目标的重复提交、
-    // 或回执已经超过每人每夜上限）——静默消耗，既不回消息也不唤醒模型
-    if (!out?.effects?.length && out?.consume !== true) return false;   // 没解析出来 → 交回普通链路
-    g.state = out.state;
-    g.privateSeen = g.privateSeen && typeof g.privateSeen === 'object' ? g.privateSeen : {};
-    g.privateSeen[uid] = Math.max(Number(g.privateSeen[uid] || 0), Number(message?.id) || 0);
+    // 按"最近开局优先"逐个候选局试到有人认领；都没认领（非参与者/白天/已出局…）→ 交回普通链路。
+    // 插件可以用 consume:true 表示"我认领了这条但不必回执"（重复提交、回执超配额）——静默消耗。
+    const hit = this.#feedPrivate(chatKey, uid, String(message?.text || ''), Number(message?.ts) || this.now());
+    if (!hit) {
+      // 没被认领 = 这条是聊天（白天闲聊/看不懂），交给模型；但水位要推——否则兜底扫描
+      // 在阶段变成"可行动"之后会把这条旧消息当行动补执行（2026-09-29 第三轮审查 P1）
+      this.#notePrivateSeen(message?.id, uid);
+      return false;
+    }
+    // 所有相关局（含别局）的水位一起推：owner 局结束后旧局不会把这条再吃一遍
+    this.#notePrivateSeen(message?.id, uid);
     this.#save();
-    await this.#applyEffects(found.groupKey, out.effects || []);
+    await this.#applyEffects(hit.groupKey, hit.out.effects || []);
     // 就地标记已读：这条私聊不再唤醒模型（省调用 + 零泄密面）
     try { this.store.markRead(chatKey, [Number(message?.id)]); } catch { /* 标记失败不影响本局 */ }
-    if (out.state?.phase === 'ended') this.#finishIfEnded(found.groupKey);
+    if (hit.out.state?.phase === 'ended') this.#finishIfEnded(hit.groupKey);
     return true;
   }
 
@@ -196,27 +250,32 @@ export class GroupGameManager {
     const players = (g.state?.roles || []).map((r) => String(r.userId));
     if (!players.length) return;
     g.privateSeen = g.privateSeen && typeof g.privateSeen === 'object' ? g.privateSeen : {};
-    let state = g.state;
-    const effects = [];
+    let dirty = false;
+    // 扫描"所有含这些玩家的局"的候选：兜底不只补这一局，也补"归属在别处"的那些消息
     for (const uid of players) {
+      // 这一局在扫描过程中结束了就不再喂后续消息（同一批里"狼全退"之后，后面那条
+      // 「不玩了」还会再走一次结算，群里出现第二条身份表不同的终局播报；2026-09-29 对抗性验证 P2）
+      if (this.games.get(groupKey)?.state?.phase === 'ended') break;
       const key = `private:${uid}`;
+      // 水位取"该玩家在哪个局里的最大值"（#notePrivateSeen 会同时推所有局）
+      const after = Math.max(...[...this.games.values()].map((x) => Number(x.privateSeen?.[uid] || 0)), 0);
       // 不看 readOnly：行动消息可能是 pending（入口没接管到的情况），水位保证不重放
-      const rows = this.store.recent(key, { limit: 200, afterId: Number(g.privateSeen[uid] || 0) });
+      const rows = this.store.recent(key, { limit: 200, afterId: after });
       for (const m of rows) {
-        g.privateSeen[uid] = Math.max(Number(g.privateSeen[uid] || 0), Number(m.id) || 0);
+        if (this.games.get(groupKey)?.state?.phase === 'ended') break;
+        this.#notePrivateSeen(m.id, uid);
         if (m.self) continue;
-        const out = plugin.onPrivateMessage(state, {
-          userId: String(m.senderId || ''), text: String(m.text || ''), ts: Number(m.ts) || this.now()
-        }, { now: this.now(), deadline: g.deadlineAt });
-        state = out.state;
-        effects.push(...(out.effects || []));
-        if (out.effects?.length || out.consume === true) { try { this.store.markRead(key, [Number(m.id)]); } catch { /* 忽略 */ } }
+        const hit = this.#feedPrivate(key, uid, String(m.text || ''), Number(m.ts) || this.now());
+        if (!hit) continue;   // 没有局认领（非行动消息/已出局…）→ 交给模型
+        dirty = true;
+        try { this.store.markRead(key, [Number(m.id)]); } catch { /* 忽略 */ }
+        if (hit.out.effects?.length) {
+          if (hit.out.effects.length) await this.#applyEffects(hit.groupKey, hit.out.effects);
+        }
+        if (hit.out.state?.phase === 'ended') this.#finishIfEnded(hit.groupKey);
       }
     }
-    g.state = state;
-    this.#save();
-    if (effects.length) await this.#applyEffects(groupKey, effects);
-    this.#finishIfEnded(groupKey);
+    if (dirty) this.#save();
   }
 
   /**
@@ -331,18 +390,30 @@ export class GroupGameManager {
       // 容错：工具层传的是 {userId, name}，直接调用（脚本/测试）时也可能只传一个字符串
       const uid = String((typeof p === 'string' ? p : p?.userId) ?? '').trim();
       const name = String((typeof p === 'string' ? p : (p?.name ?? p?.userId)) ?? '').trim();
-      if (/^\d+$/.test(uid) && activeIds.has(uid)) return { userId: uid, name: name || uid };
+      // 精确 userId 优先（QQ 号是纯数字，但不强制：脚本/非 QQ 适配器也可能用字符串 id）
+      if (uid && activeIds.has(uid)) return { userId: uid, name: name || uid };
       const hit = idByName.get(name);
       return hit ? { userId: hit, name: name || hit } : null;
     };
     // 人数上限：控制台设的与插件自身上限取较小值（以前 UI 那个输入框是死配置）
     const playerCap = Math.min(plugin.meta.maxPlayers, cfg.maxPlayers || plugin.meta.maxPlayers);
-    const roster = (requested
-      ? requested.map(resolvePlayer).filter(Boolean)
-      : active)
-      .slice(0, playerCap);
+    const picked = requested ? requested.map(resolvePlayer).filter(Boolean) : active;
+    // 同一个人可能被模型写两遍（QQ 号 + 名片，或重复名片）→ 按 userId 去重，
+    // 否则他会拿到多张身份、胜负面全乱（2026-09-29 审查 P1）
+    const roster = [...new Map(picked.map((p) => [p.userId, p])).values()].slice(0, playerCap);
     if (roster.length < plugin.meta.minPlayers) {
-      return { ok: false, error: `${plugin.meta.name}至少要 ${plugin.meta.minPlayers} 个最近发过言的群友（现在只有 ${roster.length} 个）` };
+      // 报错要分清"名单对不上"和"群里活跃的人本来就不够"——否则模型给了 7 个人、
+      // 却看到"最近发过言的群友只有 0 个"，会以为群里没人（2026-09-29 审查）
+      return {
+        ok: false,
+        error: requested
+          ? `${plugin.meta.name}至少要 ${plugin.meta.minPlayers} 个玩家：你给的名单里只有 ${roster.length} 个能用`
+            + (requested.length > roster.length && roster.length === playerCap
+              ? `——是被「每局人数上限 ${playerCap}」截断了，去控制台调大它`
+              : '（名单要传 QQ 号，或与最近活跃成员一字不差的群友名；对不上的会被丢掉）')
+          : `${plugin.meta.name}至少要 ${plugin.meta.minPlayers} 个最近发过言的群友（现在只有 ${roster.length} 个`
+            + `${active.length > roster.length ? `——每局人数上限 ${playerCap} 把名单截断了，去控制台把「每局人数上限」调大` : ''}）`
+      };
     }
     // 报名制（设计稿 §3.1）：需要私聊的游戏默认先挂报名，够人数才发牌 ——
     // 名单取"最近发言者"会把只是插句话的围观者直接拉进局、还给他发身份私聊（2026-09-29 模拟发现）。
@@ -352,7 +423,6 @@ export class GroupGameManager {
       const state = {
         phase: 'recruiting',
         joiners: [],
-        candidates: active.slice(0, Math.min(plugin.meta.maxPlayers, cfg.maxPlayers || plugin.meta.maxPlayers)),
         recruitUntil: now + cfg.recruitSeconds * 1000,
         minPlayers: plugin.meta.minPlayers,
         maxPlayers: Math.min(plugin.meta.maxPlayers, cfg.maxPlayers || plugin.meta.maxPlayers),
@@ -495,6 +565,18 @@ export class GroupGameManager {
   }
 
   async tick() {
+    // 重入锁：tick 内部会 await 发送（协议端慢时单次能超过 20 秒的定时间隔），
+    // 两个 tick 交错进同一局会重复发"来晚了一步"、甚至双份发牌（2026-09-29 审查 P2）
+    if (this.#ticking) return;
+    this.#ticking = true;
+    try {
+      await this.#tickOnce();
+    } finally {
+      this.#ticking = false;
+    }
+  }
+
+  async #tickOnce() {
     const cfg = this.#cfg();
     if (!cfg.enabled) {
       if (this.games.size) {
@@ -531,6 +613,10 @@ export class GroupGameManager {
         const out = plugin.onTick(cur2.state, { now: this.now(), deadline: cur2.deadlineAt });
         cur2.state = out.state;
         if (out.effects?.length) await this.#applyEffects(chatKey, out.effects);
+        // 落盘放在发送之后：这条路以前只在 phase==='ended' 时存，重启会把最后一个阶段迁移吞掉
+        // （重复"天亮了"、重复夜行动提示）。放发送后是刻意的——崩在中间只会让重启重播一次（自愈），
+        // 反过来"先存后发"则会让"天亮了"这类播报永久丢失（2026-09-29 审查 P1）
+        this.#save();
         if (cur2.state.phase === 'ended') {
           this.games.delete(chatKey);
           this.#save();
@@ -543,6 +629,7 @@ export class GroupGameManager {
 
   /** 引擎发出的游戏私聊要登记 message id：ingest 落库时据此打 eventKind='game-secret'，
    *  提示词构建时再过滤掉（模型在私聊里不该看到身份/查验结果/行动回执）。 */
+  #ticking = false;
   #secretMids = new Map();
   isSecretSelfMessage(chatKey, messageId) {
     const mid = String(messageId ?? '').trim();

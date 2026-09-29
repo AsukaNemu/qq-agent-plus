@@ -45,7 +45,8 @@ const { GroupGameManager } = await import('../../src/features/group-game.js');
 
 const log = [];        // 完整回放（含每条消息的路由标记）
 const problems = [];   // 不变量违例
-const ackCount = new Map();   // 每个玩家收到的"行动回执"条数（按局内夜计）
+const ackCount = new Map();   // 每个玩家收到的"行动回执"条数（按"局 + 夜"计，跨局不复用）
+let gameSeq = 0;              // 局序号：每开一局 +1（夜号会在不同局里重复）
 const out = [];
 let clock = Date.parse('2026-09-29T20:00:00+08:00');
 const stamp = () => new Date(clock).toLocaleTimeString('zh-CN', { hour12: false });
@@ -65,7 +66,8 @@ function makeManager(store) {
           const g = mgr.games.get(CHAT);
           const roles = (g?.state?.roles || []);
           const roster = new Set(roles.map((r) => String(r.userId)));
-          if (roster.size && !roster.has(uid)) problems.push(`私聊发给了非在册者 ${uid}：${String(m).slice(0, 40)}`);
+          if (g && !roster.size) problems.push(`局还在但名单取不到，私聊在册检查被跳过：${String(m).slice(0, 40)}`);
+          else if (roster.size && !roster.has(uid)) problems.push(`私聊发给了非在册者 ${uid}：${String(m).slice(0, 40)}`);
           // 查验结果只能发给预言家本人
           if (/查验结果/.test(m)) {
             const who = roles.find((r) => String(r.userId) === uid);
@@ -76,9 +78,10 @@ function makeManager(store) {
           // 行动回执配额：每人每夜最多 4 条（含"没看懂/你没行动"），🔮 与身份提示不计
           // 回执配额识别所有"引擎在夜里回给玩家"的文案（含女巫/预言家的拒绝与提醒：
           // 这些分支以前绕过了配额，2026-09-29 审查 P1）
-          if (/^(✔|【狼人杀】(没看懂|夜里你没有行动|不能连着两晚|你已经出局|简化规则|你的解药|你的毒药|没看懂毒谁|不能毒自己|今晚已经查过))/.test(String(m))) {
+          if (/^(✔|【狼人杀】(没看懂|夜里你没有行动|不能连着两晚|你已经出局|简化规则|你的解药|你的毒药|没看懂毒谁|不能毒自己|今晚已经查过|狼刀还没定|回「救」「不救」|刀口已经定下|你本来就不在局里))/.test(String(m))) {
+            // 文案清单要和实现里的所有"夜里回给玩家"的路径对齐，否则这些分支绕过配额刷屏不会被发现
             const night = Number(g?.state?.night || 0);
-            const key = `${uid}@${night}`;
+            const key = `${gameSeq}@${uid}@${night}`;
             ackCount.set(key, (ackCount.get(key) || 0) + 1);
             if (ackCount.get(key) > 4) problems.push(`回执超上限：${uid} 第 ${night} 夜第 ${ackCount.get(key)} 条`);
           }
@@ -236,6 +239,7 @@ console.log('  局面：', mgr.games.has(CHAT) ? '仍在进行' : '已结束');
 
 // ── 3. 狼人杀：重点场景 ────────────────────────────────────────────────
 console.log('\n=== 场景 3：狼人杀（夜行动噪声 + 夜里闲聊 + 乱序讨论 + 中途重启 + 退出）===');
+gameSeq += 1;   // 新的一局：夜号会在不同局里重复，配额统计要按局分开
 for (const p of PLAYERS) groupSay(p.uid, p.name, '来局狼人杀');
 await groupStep();
 await mgr.start({ chatKey: CHAT, gameId: 'werewolf' });
@@ -387,10 +391,12 @@ for (let i = 0; i < 14 && mgr.games.has(CHAT); i += 1) {
   }
 }
 console.log('  局面：', mgr.games.has(CHAT) ? '仍在进行' : '已结束');
+if (mgr.games.has(CHAT)) problems.push('场景 3 的狼人杀没跑完（用例本身要检查：可能是卡局）');
 
 // ── 3b. 出局者还能说话（真人群里死人一定会继续说）：引擎必须完全不认 ──────
 console.log('\n=== 场景 3b：出局者在白天继续发言/投票/"投吧"（引擎一律不认）===');
 {
+  gameSeq += 1;
   for (const p of PLAYERS) groupSay(p.uid, p.name, '再来一局狼人杀');
   await groupStep();
   const r = await mgr.start({ chatKey: CHAT, gameId: 'werewolf' });
@@ -443,6 +449,7 @@ console.log('\n=== 场景 4：revealWords=false（结算也不公开身份与词
   fs2.writeFileSync(cfgPath, JSON.stringify(cfgNow));
   const { updateConfig } = await import('../../src/core/config.js');
   updateConfig({ groupGame: cfgNow.groupGame });
+  gameSeq += 1;   // 新的一局：夜号会在不同局里重复，配额统计要按局分开
   for (const p of PLAYERS) groupSay(p.uid, p.name, '再来一局狼人杀');
   await groupStep();
   const r = await mgr.start({ chatKey: CHAT, gameId: 'werewolf' });
@@ -455,6 +462,9 @@ console.log('\n=== 场景 4：revealWords=false（结算也不公开身份与词
   // 注意：show() 里 out.splice(0) 会把缓冲清空 —— 结算文本必须在 show 之前取
   const settle = out.filter((x) => x.chatKey === CHAT).map((x) => x.text).join('\n');
   if (!settle.trim()) problems.push('场景 4 没拿到任何结算文本（检查用例本身，别放过）');
+  if (!/(结束：|好人获胜|狼人获胜|卧底获胜|平民获胜|报名取消)/.test(settle)) {
+    problems.push('场景 4 没拿到"结算"文本（可能局根本没结束，泄露检查会静默通过）：' + settle.slice(0, 60));
+  }
   if (/身份：|预言家|守卫|女巫|平民/.test(settle)) problems.push(`revealWords=false 但结算泄露身份：${settle.slice(0, 80)}`);
   show('狼全部退出 → 结算');
 }

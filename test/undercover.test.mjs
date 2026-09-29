@@ -16,8 +16,7 @@ const advanceToVote = (s) => {
 };
 
 test('描述阶段提前投的票，在超时进投票时要保留（审查 P1：以前会被清空）', () => {
-  let s = newGame();
-  s = advanceToVote(s);
+  let s = advanceToVote(newGame());
   // 还没进投票阶段？order 里的人说完就进 vote 了——这里要测的是"发言阶段就投了票"的路径，
   // 所以重新造一局：先说一句带票的话，再等超时
   let s2 = newGame();
@@ -114,16 +113,20 @@ test('出局者还能说话？卧底同样一律不认；出局会私聊通知�
   let s = uc.create({ players, rng: () => 0, now: 1000 });
   // 全员描述 + 全员投 1 号
   for (const r of s.roles) s = uc.onMessage(s, { userId: r.userId, text: '我这东西是白的' }, { now: 1001 }).state;
+  // 关键：要投出一个**平民**（卧底 roles[0] 还在），局才会继续到下一轮 ——
+  // 以前投的是卧底、局当场结束，后面的断言全落在 phase==='ended' 上，恒真（2026-09-29 审查）
+  const deadVillager = s.roles[1];
   let out = null;
   for (const r of s.roles) {
-    // 1 号自己不能投自己（会被拒），他改投 2 号 —— 否则票数永远收不齐、进不了结算
-    const vote = r.userId === s.roles[0].userId ? '投 2' : '投 1';
+    const vote = r.userId === deadVillager.userId ? `投 ${numOf(s, s.roles[0].userId)}` : `投 ${numOf(s, deadVillager.userId)}`;
     out = uc.onMessage(s, { userId: r.userId, text: vote }, { now: 1002 });
     s = out.state;
   }
   const victim = out.effects.find((e) => e.type === 'private' && /你出局了/.test(e.text));
   assert.ok(victim, '出局要私聊通知本人');
-  const dead = s.eliminated[0];
+  assert.equal(s.phase, 'speak', '投出平民后局要继续到下一轮：' + s.phase);
+  const dead = deadVillager.userId;
+  assert.equal(s.eliminated.includes(dead), true);
   const before = JSON.stringify({ spoken: s.spoken, votes: s.votes, ready: s.readyVote, phase: s.phase, eliminated: s.eliminated });
   for (const text of ['我出局了也要描述：我这杯是甜的', '投 2', '投吧']) {
     const r = uc.onMessage(s, { userId: dead, text }, { now: 1003 });
@@ -143,4 +146,95 @@ test('幽灵票：投给"已退出者"的票不算数，也不会把这一轮投
   s = q.state;
   assert.equal(q.effects.some((e) => /移出本局/.test(e.text)), true);
   assert.equal(Object.keys(s.votes).length, 0, '投给退出者的票要作废');
+});
+
+test('坏人赢的结算分支：剩 2 人且卧底在场 → 卧底获胜；轮次用尽 → 卧底获胜', () => {
+  // ① 5 人局：投出两个平民 → 剩 2 人且卧底在 → 卧底获胜
+  const players = Array.from({ length: 5 }, (_, i) => ({ userId: `u${i + 1}`, name: `玩家${i + 1}` }));
+  let s = uc.create({ players, rng: () => 0, now: 1000 });
+  const spy = s.roles.find((r) => r.spy);
+  const good = s.roles.filter((r) => !r.spy);
+  let line = '';
+  for (const victim of good.slice(0, 3)) {   // 5 人里投出 3 个好人 → 剩 2 人且卧底在（<=2 才判卧底胜）
+    s = uc.onTick(s, { now: (s.phaseStartedAt || 0) + 999 * 1000 });   // 到点进投票
+    s = s.state;
+    let out = null;
+    const aliveNow = s.roles.filter((x) => !s.eliminated.includes(x.userId));
+    for (const r of aliveNow) {
+      // 被投的人不能投自己（会被拒、票收不齐）→ 他改投第一个好人
+      const target = r.userId === victim.userId
+        ? aliveNow.find((x) => x.userId !== victim.userId)
+        : victim;
+      out = uc.onMessage(s, { userId: r.userId, text: `投 ${numOf(s, target.userId)}` }, { now: 1001 });
+      s = out.state;
+    }
+    line = (out?.effects || []).map((e) => e.text ?? e.result ?? '').join(' | ');
+    if (s.phase === 'ended') break;
+  }
+  assert.equal(s.phase, 'ended', '剩 2 人且卧底在，要结束：' + s.phase);
+  assert.match(line, /卧底获胜/, '要判卧底获胜：' + line);
+  assert.equal(line.includes(spy.name), true, '默认要公布卧底是谁');
+
+  // ② 轮次用尽：4 人局每轮 2:2 平票 → 到 maxRounds 之后判卧底获胜
+  const p4 = Array.from({ length: 4 }, (_, i) => ({ userId: `v${i + 1}`, name: `玩家${i + 1}` }));
+  let t = uc.create({ players: p4, rng: () => 0, now: 1000 });
+  let endLine = '';
+  for (let round = 0; round < 6 && t.phase !== 'ended'; round += 1) {
+    t = uc.onTick(t, { now: (t.phaseStartedAt || 0) + 999 * 1000 }).state;   // 描述到点 → 投票
+    const aliveIds = t.roles.filter((r) => !t.eliminated.includes(r.userId)).map((r) => r.userId);
+    // 2:2 平票（u1+u2 投 u3，u3+u4 投 u1）
+    for (const [voter, target] of [[aliveIds[0], aliveIds[2]], [aliveIds[1], aliveIds[2]], [aliveIds[2], aliveIds[0]], [aliveIds[3], aliveIds[0]]]) {
+      if (!aliveIds.includes(voter) || !aliveIds.includes(target)) continue;
+      const r = uc.onMessage(t, { userId: voter, text: `投 ${numOf(t, target)}` }, { now: 1002 });
+      t = r.state;
+      if (t.phase === 'ended') { endLine = r.effects.map((e) => e.text ?? e.result ?? '').join(' | '); break; }
+    }
+  }
+  assert.equal(t.phase, 'ended', '平票拖到轮次上限也要结束：' + t.phase);
+  assert.match(endLine, /轮次用尽，卧底.*获胜/, '要报轮次用尽：' + endLine);
+});
+
+test('对抗性回归 F2：投票阶段反复「投 自己」只有一次公开提醒', () => {
+  let s = advanceToVote(newGame());
+  const me = s.order[0];
+  let pubs = 0;
+  for (let i = 0; i < 12; i += 1) {
+    const out = uc.onMessage(s, { userId: me, text: `投 ${numOf(s, me)}` }, { now: 100 });
+    pubs += out.effects.filter((e) => e.type === 'public').length;
+    s = out.state;
+  }
+  assert.equal(pubs, 1, '同一轮只提醒一次：' + pubs);
+  assert.equal(s.votes[me], undefined, '投自己始终不入票');
+});
+
+test('描述阶段的早票：全员说完切到投票时不能把票丢掉（speak 分支，不是 onTick 那条）', () => {
+  let s = newGame();
+  const me = s.order[0];
+  const target = s.order[2];
+  s = uc.onMessage(s, { userId: me, text: `我描述一下，投 ${numOf(s, target)}` }, { now: 1001 }).state;   // 边说边投
+  assert.equal(s.votes[me], target, '描述阶段的票要记下');
+  // 其余人依次描述，最后一位说完 → 进投票（spoken 满了）
+  for (const uid of s.order.slice(1)) {
+    s = uc.onMessage(s, { userId: uid, text: '我这东西是白的' }, { now: 1002 }).state;
+  }
+  assert.equal(s.phase, 'vote', '全员说完要进投票');
+  assert.equal(s.votes[me], target, '切阶段时早票必须保留（以前会被清空）');
+});
+
+test('给模型的摘要与主持口径：不含身份/词，且叮嘱了出局者的话怎么处理', () => {
+  const s = newGame();
+  const sum = uc.summaryForModel(s);
+  assert.match(sum, /谁是卧底第 1 轮/, sum);
+  assert.match(sum, /存活/, sum);
+  // 注意：游戏名本身就叫「谁是卧底」，不能拿"卧底"当泄密判据（与狼人杀里的 /狼人(?!杀)/ 同款）
+  // 游戏名里就有"卧底"，先把它摘掉再查；并且**不能用真实词值**（这才是核心不变量）
+  const cleaned = sum.replace(/谁是卧底/g, '');
+  assert.equal(/卧底|身份|词是|词：|平民/.test(cleaned), false, '摘要不得提到身份与词：' + sum);
+  for (const r of s.roles) assert.equal(sum.includes(r.word), false, '摘要里不能出现任何人的词：' + sum);
+  const brief = uc.hostBrief(s);
+  assert.match(brief, /别替人描述|不要提到任何人的词/, brief);
+  assert.match(brief, /出局的人/, '主持口径要说出局者的话按围观处理：' + brief);
+  const voteBrief = uc.hostBrief({ ...s, phase: 'vote' });
+  assert.match(voteBrief, /绝不泄漏词或身份/, voteBrief);
+  assert.match(voteBrief, /已出局的人|没参加的人/, voteBrief);
 });

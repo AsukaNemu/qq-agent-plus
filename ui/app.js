@@ -7086,7 +7086,7 @@ function renderExperimentalSettingsSection(c) {
       <div class="hint">需要私聊的游戏（谁是卧底/狼人杀）默认先**报名**：想玩的在群里发一句「我玩」或「报名」，
         够人数才发牌、发牌才发私聊——不会把只是在群里插话的围观者拉进局（把报名时长设 0 就回到"按最近发言者直接发牌"）。</div>
       <div class="hint">白天讨论到点会自动进投票；中途**超过半数**存活玩家说一句「投吧 / 直接投」也会立刻开投
-        （说「投 3」这种带目标的算投票，不算想开投）。</div>
+        （说「投 3」这种带目标的算投票，不算想开投）。讨论时长与单回合超时**小于 30 秒按 30 秒生效**（0 = 用插件默认）。</div>
       <div class="checkbox-row"><input type="checkbox" id="cfg-game-bomb" ${(Array.isArray(c.groupGame?.games) ? c.groupGame.games : ['number-bomb', 'undercover']).includes('number-bomb') ? 'checked' : ''} />
         <label for="cfg-game-bomb">允许「数字炸弹」</label></div>
       <div class="checkbox-row"><input type="checkbox" id="cfg-game-undercover" ${(Array.isArray(c.groupGame?.games) ? c.groupGame.games : ['number-bomb', 'undercover']).includes('undercover') ? 'checked' : ''} />

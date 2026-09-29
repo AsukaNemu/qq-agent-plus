@@ -191,9 +191,14 @@ function parseToolArguments(name, raw) {
   }
 }
 
+// 引擎发的游戏私聊（game-secret：身份/查验结果/行动回执）对模型一律不可见——
+// 不只是历史里要过滤，按 id 单查、列可见 id 这些出口同样要过这道闸（2026-09-29 审查 P1）
+const modelVisible = (m) => Boolean(m) && m.eventKind !== 'game-secret';
+
 // 找不到消息 id 时，把当前会话真实可见的 id 告诉模型，避免它继续瞎猜。
 function midHint(ctx) {
   const mids = ctx.store.recent(ctx.chatKey, { limit: 60 })
+    .filter(modelVisible)
     .map((m) => m.mid)
     .filter((v) => v !== null && v !== undefined && String(v) !== '');
   const uniq = [...new Set(mids.map(String))].slice(-8);
@@ -227,7 +232,7 @@ function messageTargetError(ctx, { replyToMessageId, atUserId }) {
     if (!/^-?[1-9]\d*$/.test(reply)) {
       return `replyToMessageId 必须是聊天记录中的消息 id。${midHint(ctx)}`;
     }
-    if (!ctx.store?.findByMid?.(ctx.chatKey, reply)) {
+    if (!modelVisible(ctx.store?.findByMid?.(ctx.chatKey, reply))) {
       return `当前会话找不到要引用的消息 ${reply}。${midHint(ctx)}`;
     }
   }
@@ -237,7 +242,7 @@ function messageTargetError(ctx, { replyToMessageId, atUserId }) {
       return `atUserId 必须是当前群成员的数字 QQ 号。${memberHint(ctx)}`;
     }
     if (!hasParticipant(ctx, at)) {
-      const looksLikeMessageId = Boolean(ctx.store?.findByMid?.(ctx.chatKey, at));
+      const looksLikeMessageId = modelVisible(ctx.store?.findByMid?.(ctx.chatKey, at));
       return `${at} 不是当前群中已出现的成员 QQ 号`
         + `${looksLikeMessageId ? '，它是消息 id；如需引用请改用 replyToMessageId' : ''}。${memberHint(ctx)}`;
     }
@@ -452,7 +457,7 @@ export function buildToolDefs() {
       async execute(ctx, args) {
         try {
           const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
-          if (!entry) return err(`在当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
+          if (!modelVisible(entry)) return err(`在当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
           const imageMedia = (entry.media || []).find((m) => m.kind === 'image' && m.url);
           if (!imageMedia) return err('该消息没有可收藏的图片');
           // 与"自动收藏"同一口径：先判一下这是不是真表情包 —— 只靠模型自己的判断，
@@ -566,7 +571,7 @@ export function buildToolDefs() {
               return err(`targetUserId 必须是正整数的 QQ 号（收到：${JSON.stringify(args.targetUserId)}）。${memberHint(ctx)}`);
             }
             if (ctx.kind === 'group' && !hasParticipant(ctx, targetText)) {
-              const looksLikeMessageId = Boolean(ctx.store?.findByMid?.(ctx.chatKey, targetText));
+              const looksLikeMessageId = modelVisible(ctx.store?.findByMid?.(ctx.chatKey, targetText));
               return err(`${targetText} 不是当前群中已出现的成员 QQ 号`
                 + `${looksLikeMessageId ? '，它是消息 id' : ''}。${memberHint(ctx)}`);
             }
@@ -625,7 +630,7 @@ export function buildToolDefs() {
       async execute(ctx, args) {
         try {
           const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
-          if (!entry) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
+          if (!modelVisible(entry)) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
           // 存档里已是展开文本（收消息时已展开/之前展开过）→ 直接给，不再请求 QQ
           if (String(entry.text || '').startsWith('[合并转发 共')) {
             return ok({ messageId: entry.mid, text: entry.text, note: '该转发已展开（读的是存档）' });
@@ -784,7 +789,7 @@ export function buildToolDefs() {
         properties: {
           action: { type: 'string', enum: ['start', 'stop', 'status'], description: 'start=开局；stop=结束；status=看当前局' },
           game: { type: 'string', description: 'start 用：number-bomb（数字炸弹）/ undercover（谁是卧底）/ werewolf（狼人杀，6~9 人，夜里走私聊）' },
-          players: { type: 'array', items: { type: 'string' }, description: 'start 可选：指定参与者，传 QQ 号或**群名片**都行（系统只认最近发过言的群友，名片要一字不差）。想锁定"就这几个人玩"时必须传，否则最近发过言的所有人都会进局' }
+          players: { type: 'array', items: { type: 'string' }, description: 'start 可选：指定参与者，传 QQ 号或**群名片**都行（只认最近活跃的群友，名片要一字不差）。想锁定"就这几个人玩"时传它（传了就不走报名，直接发牌）；不传的话，需要私聊的游戏（谁是卧底/狼人杀）会先挂一段报名（默认 45 秒，管理员可改）让大家回「我玩」，不需要私聊的数字炸弹才直接按最近活跃的人开局' }
         },
         required: ['action']
       },
@@ -848,7 +853,8 @@ export function buildToolDefs() {
       },
       async execute(ctx, args) {
         const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
-        if (!entry) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
+        // game-secret 的行当作"不存在"：不确认它的存在，也不回正文（2026-09-29 审查 P1）
+        if (!modelVisible(entry)) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
         return ok({
           messageId: entry.mid,
           time: new Date(entry.ts).toLocaleString('zh-CN', { hour12: false }),
@@ -871,7 +877,7 @@ export function buildToolDefs() {
       async execute(ctx, args) {
         try {
           const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
-          if (!entry) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
+          if (!modelVisible(entry)) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
           const viewables = await currentMessageImageUrls(ctx, entry);
           if (!viewables.length) return ok(`消息 ${args.messageId} 没有可查看的图片`);
           const dataUrls = [];
@@ -928,7 +934,7 @@ export function buildToolDefs() {
       async execute(ctx, args) {
         try {
           const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
-          if (!entry) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
+          if (!modelVisible(entry)) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
           const result = await transcribeMessageAudio(ctx, entry);
           if (!result.ok) return err(result.error);
           return ok({
@@ -965,7 +971,7 @@ export function buildToolDefs() {
         // 私聊同样要查：私聊的"出现过"就是聊天对端本人（send_poke 私聊也只认对端）。
         // 要记对话里提到的第三方，写进 finish 的交接里，别挂在一个没有出处的号码名下。
         if (!hasParticipant(ctx, userId)) {
-          const looksLikeMessageId = Boolean(ctx.store?.findByMid?.(ctx.chatKey, userId));
+          const looksLikeMessageId = modelVisible(ctx.store?.findByMid?.(ctx.chatKey, userId));
           return err(`${userId} 不是当前会话中出现过的成员 QQ 号`
             + `${looksLikeMessageId ? '，它是消息 id；如需引用请改用 replyToMessageId' : ''}。${memberHint(ctx)}`);
         }

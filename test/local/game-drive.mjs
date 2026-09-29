@@ -23,9 +23,14 @@ const { GroupGameManager } = await import('../../src/features/group-game.js');
 
 const store = new ChatStore(0, { dataDir: tmp });
 const out = [];
+const history = [];   // 全程留档：show() 会把 out 清空，收尾断言用这份
 const sender = {
   async sendTextBatch(chatKey, msgs, options = {}) {
-    for (const m of msgs) out.push({ chatKey, text: String(m), gameScoped: options.gameScoped === true });
+    for (const m of msgs) {
+      const rec = { chatKey, text: String(m), gameScoped: options.gameScoped === true };
+      out.push(rec);
+      history.push(rec);
+    }
     return { sent: msgs.map((_, i) => ({ messageId: `m${out.length + i}` })) };
   }
 };
@@ -35,7 +40,8 @@ const mgr = new GroupGameManager({ store, sender, log: () => {}, now: () => cloc
 const say = (uid, name, text) => store.appendIncoming(CHAT, {
   mid: `d${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, ts: (clock += 1000),
   senderId: String(uid), senderName: name, text, reply: null, media: [], mentionsSelf: false, eventKind: 'message'
-}, { recordOnly: true });   // 真实链路里这些消息已被编排器确认（acked），tick 只认 acked 的行
+}, { recordOnly: true });   // 真实链路里这些消息已被编排器确认（acked）；引擎扫描不再要求 acked，
+      // 但按 acked 造数据最贴近"已经处理过的一批"，不影响结论
 const drain = () => { const rows = out.splice(0); return rows; };
 const label = (r) => (r.chatKey === CHAT ? '群里' : `私聊→${r.chatKey.split(':')[1]}${r.gameScoped ? '[豁免]' : ''}`);
 
@@ -182,6 +188,23 @@ if (mgr.games.has(CHAT)) {
   }
 }
 console.log('  狼人杀局面：', mgr.games.has(CHAT) ? '仍在进行' : '已结束（上面应有胜负结算）');
+
+// ── 收尾断言：这个脚本在 run.mjs 里被当 PASS/FAIL 跑，不能只靠"没抛异常" ──
+const asserts = [];
+const groupTexts = (re) => history.filter((r) => r.chatKey === CHAT && re.test(r.text)).map((r) => r.text);
+const check = (cond, why) => asserts.push({ ok: Boolean(cond), why });
+check(groupTexts(/数字炸弹结束|踩中炸弹/).length > 0, '数字炸弹要有结算');
+check(groupTexts(/谁是卧底结束/).length > 0, '谁是卧底要有结算');
+check(groupTexts(/狼人杀结束：/).length > 0, '狼人杀要有胜负结算');
+check(/夜晚记录：/.test(groupTexts(/狼人杀结束：/).join('|')), '狼人杀的结算里要有夜晚记录（刀/守/查/救/毒）');
+check(groupTexts(/你是\*\*/).length === 0, '身份私聊绝不能发到群里');
+check(groupTexts(/天亮了|天黑请闭眼/).length >= 2, '狼人杀至少走了两个阶段（天亮/天黑）');
+const bad = asserts.filter((a) => !a.ok);
+for (const a of asserts) console.log(`  ${a.ok ? 'OK  ' : 'FAIL'} ${a.why}`);
+if (bad.length) {
+  console.error(`\n驱动断言失败 ${bad.length} 条`);
+  process.exitCode = 1;
+}
 
 console.log('\n=== 全部输出结束 ===');
 mgr.stopLoop?.();

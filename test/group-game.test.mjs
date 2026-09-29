@@ -118,7 +118,9 @@ test('超时推进：没人描述 → 到点直接进投票（不点名、不刷
   const g = mgr.games.get('group:1');
   if (g) setClock(g.deadlineAt + 1000);
   await mgr.tick();
-  if (sent.at(-1)) assert.match(sent.at(-1).msgs[0], /时间到了|结束/);
+  const lastMsg = sent.at(-1);
+  assert.ok(lastMsg, '收尾时要有一条群消息');
+  assert.match(lastMsg.msgs[0], /时间到了|结束/);
   assert.equal(mgr.games.has('group:1'), false);
 });
 
@@ -225,10 +227,15 @@ test('狼人杀的私聊行动：入口接管（标记已读、发回执），�
   assert.equal(await mgr.consumePrivateAction(`private:${outsider}`, other), false);
 
   // 水位：同一条不会被 tick 再喂一遍
-  const before = store.recent(`private:${seer.userId}`, { limit: 5 }).length;
+  const before = sent.filter((x) => x.chatKey === `private:${seer.userId}`).length;
   await mgr.tick();
-  assert.equal(sent.filter((x) => x.chatKey === `private:${seer.userId}` && /查验结果/.test(x.msgs[0])).length, 1, '查验结果只发一次');
-  assert.ok(before >= 1);
+  // 按"这个会话发出的私聊总数"断言，别按文案筛：重放同一条动作产出的是"今晚已经查过"，
+  // 按"查验结果"数的话水位回归也发现不了（2026-09-29 审查 P2）
+  assert.equal(
+    sent.filter((x) => x.chatKey === `private:${seer.userId}`).length,
+    before,
+    '同一条私聊不得被 tick 再喂一遍'
+  );
   assert.equal(store.findByMid(`private:${seer.userId}`, 'pm-1').state, 'acked');
 });
 
@@ -246,7 +253,9 @@ test('私聊豁免开关：关着不带标记、开着对在册玩家带 gameSco
   assert.ok(onPrivs.every((x) => x.options?.gameScoped === true), '开关开着且收件人在册 → 每条私聊都带豁免标记');
   // 引擎私聊必须在发送时就标明 game-secret（发送端才是首次写库者，见 test/game-secret-prompt.test.mjs）
   assert.ok(onPrivs.every((x) => x.options?.eventKind === 'game-secret'), '引擎私聊要带 game-secret 标记');
-  assert.ok(on.sent.filter((x) => x.chatKey === 'group:1').every((x) => x.options?.eventKind !== 'game-secret'), '群里公开消息不是 secret');
+  const groupMsgs = on.sent.filter((x) => x.chatKey === 'group:1');
+  assert.ok(groupMsgs.length > 0, '要有群消息才谈得上"不是 secret"');
+  assert.ok(groupMsgs.every((x) => x.options?.eventKind !== 'game-secret'), '群里公开消息不是 secret');
 });
 
 test('群里的"各种人"（老游戏）：非参与者投票不计；退出有退路；数字炸弹谁都能猜', async () => {
@@ -476,4 +485,358 @@ test('审查回归：白天讨论/投票消息是 pending 时也要计票', asyn
   await w.mgr.tick();
   const votes = w.mgr.games.get('group:1')?.state?.votes || {};
   assert.ok(Object.keys(votes).length >= 5, '待处理状态的票也要记下来：' + JSON.stringify(votes));
+});
+
+test('tick 重入锁：慢发送 + 报名溢出时，两次 tick 不会双份发牌/双份播报', async () => {
+  // 这条以前是假绿（只造了恰好 6 个报名者，第二个 tick 进去时早已发完牌）。
+  // 要触发双份发牌，得让报名阶段有 await 点：12 个活跃成员、上限 9 → 有人溢出（要发"来晚了一步"）
+  const w = makeWorld({ players: 12 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 30, games: ['werewolf'], maxPlayers: 9 } });
+  await w.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  for (let i = 1; i <= 10; i += 1) {   // 10 人报名 → 9 张牌 + 1 个"来晚了"
+    w.store.appendIncoming('group:1', { mid: 1000 + i, ts: Date.now(), senderId: `u${i}`, senderName: `群友${i}`, text: '我玩', reply: null, media: [] });
+  }
+  const inner = w.mgr.sender;
+  w.mgr.sender = { sendTextBatch: async (chatKey, msgs, options) => { await new Promise((r) => setTimeout(r, 30)); return inner.sendTextBatch(chatKey, msgs, options); } };
+  await Promise.all([w.mgr.tick(), w.mgr.tick()]);
+  assert.equal(w.sent.filter((x) => /狼人杀开局/.test(x.msgs[0])).length, 1, '开局公告只能一条');
+  assert.equal(
+    w.sent.filter((x) => x.chatKey.startsWith('private:') && /你是\*\*/.test(x.msgs[0])).length,
+    9,
+    '身份私聊只能发一轮（9 张牌）'
+  );
+  assert.equal(w.sent.filter((x) => /来晚/.test(x.msgs[0])).length, 1, '"来晚了一步"只发一次');
+});
+
+
+test('局内玩家白天私聊：引擎必须交回模型（不接管），不然玩家日常私聊会被吞掉', async () => {
+  const w = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 0, games: ['werewolf'] } });
+  const r = await w.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const st = w.mgr.games.get('group:1').state;
+  const uid = st.roles[0].userId;
+  // 夜里：非行动的话会被引擎接管（有回执）
+  const nightRow = w.store.appendIncoming(`private:${uid}`, { mid: 'p-night', ts: Date.now(), senderId: uid, senderName: '群友', text: '嗯嗯聊点别的', reply: null, media: [] });
+  assert.equal(await w.mgr.consumePrivateAction(`private:${uid}`, nightRow), true, '夜里闲聊也会被引擎回一句');
+  // 白天：私聊照常聊天（引擎不碰）
+  w.setClock(w.getClock() + 95 * 1000);
+  await w.mgr.tick();
+  assert.equal(w.mgr.games.get('group:1').state.phase, 'day', '过夜后进白天');
+  const dayRow = w.store.appendIncoming(`private:${uid}`, { mid: 'p-day', ts: Date.now(), senderId: uid, senderName: '群友', text: '今天天气不错', reply: null, media: [] });
+  assert.equal(await w.mgr.consumePrivateAction(`private:${uid}`, dayRow), false, '白天的私聊必须落回模型');
+});
+
+test('名单注入防护：模型给的名字/QQ 必须落在本群活跃成员里，编造的会被丢掉', async () => {
+  const w = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 0, games: ['werewolf'] } });
+  // ① 混入一个不存在的 QQ 与一个不存在的名片 → 只剩 5 个合法人 → 人数不足直接拒绝
+  // 模型给名单时用的是"QQ 号或群名片"（工具描述如此）——这里就按这个接口测
+  const bad = await w.mgr.start({
+    chatKey: 'group:1', gameId: 'werewolf',
+    players: ['群友1', '群友2', '群友3', '群友4', '群友5', '88888888', '查无此人']
+  });
+  assert.equal(bad.ok, false, '只剩 5 个能对上，不该开局：' + JSON.stringify(bad));
+  assert.match(bad.error, /名单里只有 5 个能用/, '报错要说清是名单对不上，别让模型以为群里没人：' + bad.error);
+  assert.match(bad.error, /对不上的会被丢掉|截断/, '要点出为什么对不上：' + bad.error);
+  // ② 够人时，编造的那些也不能混进名单
+  const okStart = await w.mgr.start({
+    chatKey: 'group:1', gameId: 'werewolf',
+    players: ['群友1', '群友2', '群友3', '群友4', '群友5', '群友6', '88888888', '查无此人']
+  });
+  assert.equal(okStart.ok, true, JSON.stringify(okStart));
+  const roster = w.mgr.games.get('group:1').state.roles.map((r) => r.userId);
+  assert.equal(roster.length, 6, '名单里只留 6 个真实成员：' + JSON.stringify(roster));
+  assert.equal(roster.includes('88888888'), false, '编造的 QQ 不得进名单');
+  assert.equal(w.sent.some((x) => x.chatKey === 'private:88888888'), false, '更不能给编造的号发私聊');
+});
+
+test('私聊发不出去时的统计与文案：失败人数要报给群里（且不重试、不降级到群聊）', async () => {
+  const w = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 0, games: ['werewolf'] } });
+  const inner = w.mgr.sender;
+  let blocked = '';
+  w.mgr.sender = {
+    async sendTextBatch(chatKey, msgs, options) {
+      if (chatKey.startsWith('private:') && !blocked) blocked = chatKey.split(':')[1];
+      if (chatKey === `private:${blocked}`) throw new Error('Send blocked: 白名单');
+      return inner.sendTextBatch(chatKey, msgs, options);
+    }
+  };
+  const r = await w.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.ok(blocked, '测试要真的挡住一个人');
+  assert.match(r.text, /没发出去|发不出去|没收到/, '要把失败人数说清楚：' + r.text);
+  assert.equal(
+    w.sent.some((x) => x.chatKey === 'group:1' && /你是\*\*/.test(x.msgs[0])),
+    false,
+    '身份绝不能降级发到群里'
+  );
+});
+
+test('对抗性回归 F3：tick 里推进的阶段要立刻落盘（重启不能回滚成"又天亮一次"）', async () => {
+  const w = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 0, games: ['werewolf'] } });
+  const r = await w.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  w.setClock(w.getClock() + 95 * 1000);
+  await w.mgr.tick();                                   // 夜里超时 → 天亮（内存里 phase=day）
+  assert.equal(w.mgr.games.get('group:1').state.phase, 'day');
+  const onDisk = JSON.parse(fs.readFileSync(path.join(dataDir, 'games.json'), 'utf8'));
+  assert.equal(onDisk.games['group:1'].state.phase, 'day', 'tick 推进后的阶段必须已落盘：' + onDisk.games['group:1'].state.phase);
+  // 模拟重启：新实例不该再喊一次"天亮了"
+  const inner = w.mgr.sender;
+  const sent2 = [];
+  const mgr2 = new GroupGameManager({
+    store: w.store,
+    sender: { async sendTextBatch(k, msgs, options) { sent2.push({ k, t: msgs[0] }); return inner.sendTextBatch(k, msgs, options); } },
+    log: () => {}, now: w.getClock, rng: () => 0
+  });
+  await mgr2.tick();
+  assert.equal(sent2.some((x) => /天亮了/.test(x.t)), false, '重启后不得重播"天亮了"：' + JSON.stringify(sent2.map((x) => x.t)));
+});
+
+test('对抗性回归 F5：同一批私聊里局已结束，后面的退出不再执行（只能有一条终局播报）', async () => {
+  const w = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 0, games: ['werewolf'] } });
+  const r = await w.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const st = w.mgr.games.get('group:1').state;
+  const wolves = st.roles.filter((x) => x.role === 'wolf');
+  const other = st.roles.find((x) => x.role !== 'wolf');
+  for (const uid of [wolves[0].userId, wolves[1].userId, other.userId]) {
+    w.store.appendIncoming(`private:${uid}`, { mid: `q-${uid}`, ts: Date.now(), senderId: uid, senderName: uid, text: '不玩了', reply: null, media: [] }, { recordOnly: true });
+  }
+  await w.mgr.tick();
+  const ends = w.sent.filter((x) => x.chatKey === 'group:1' && /狼人杀结束：/.test(x.msgs[0]));
+  assert.equal(ends.length, 1, '终局播报只能有一条（身份表打架就更糟）：' + ends.length);
+});
+
+test('对抗性回归 F6：一个人同时在两个群的两局里，一条私聊只被其中一局执行', async () => {
+  const w = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1', 'group:2'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 0, games: ['werewolf'] } });
+  for (let i = 1; i <= 6; i += 1) {
+    w.store.appendIncoming('group:2', { mid: 9000 + i, ts: Date.now() - i * 1000, senderId: `u${i}`, senderName: `群友${i}`, text: '在' }, { recordOnly: true });
+  }
+  const g1 = await w.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  const g2 = await w.mgr.start({ chatKey: 'group:2', gameId: 'werewolf' });
+  assert.equal(g1.ok, true, JSON.stringify(g1));
+  assert.equal(g2.ok, true, JSON.stringify(g2));
+  const uid = 'u1';
+  w.sent.length = 0;
+  w.store.appendIncoming(`private:${uid}`, { mid: 'cross-1', ts: Date.now(), senderId: uid, senderName: '群友1', text: '刀 2', reply: null, media: [] }, { recordOnly: true });
+  await w.mgr.tick();
+  const replies = w.sent.filter((x) => x.chatKey === `private:${uid}`);
+  assert.equal(replies.length, 1, '一条私聊只能回一条（以前两局各吃一遍）：' + JSON.stringify(replies.map((x) => x.msgs[0])));
+});
+
+test('对抗性回归：出局者夜里私聊走带配额的"你已经出局了"（不是静默丢给模型）', async () => {
+  const w = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 0, games: ['werewolf'] } });
+  await w.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  const g = w.mgr.games.get('group:1');
+  const dead = g.state.roles[0];
+  dead.alive = false;                       // 让他出局（第 1 夜）
+  w.sent.length = 0;
+  let claimed = 0;
+  for (let i = 0; i < 10; i += 1) {
+    const row = w.store.appendIncoming('private:' + dead.userId, { mid: `dead-${i}`, ts: Date.now(), senderId: dead.userId, senderName: dead.name, text: `在吗 ${i}`, reply: null, media: [] });
+    if (await w.mgr.consumePrivateAction(`private:${dead.userId}`, row)) claimed += 1;
+  }
+  assert.equal(claimed, 10, '这些消息都该被引擎接管（不落到模型）');
+  const replies = w.sent.filter((x) => x.chatKey === `private:${dead.userId}`);
+  assert.equal(replies.length, 4, '回执要夹在每人每夜 4 条：' + replies.length);
+  assert.match(replies[0].msgs[0], /已经出局/, replies[0].msgs[0]);
+});
+
+test('对抗性回归：数字炸弹的越界提示每人每局只回一次（不能靠反复猜 0 刷群消息）', async () => {
+  const bomb = await import('../src/features/games/number-bomb.js');
+  let s = bomb.create({ rng: () => 0.42 });        // 炸弹 = 43
+  let pubs = 0;
+  for (let i = 0; i < 12; i += 1) {
+    const out = bomb.onMessage(s, { userId: 'u1', name: '群友1', text: '猜 0' });
+    pubs += out.effects.filter((e) => e.type === 'public').length;
+    s = out.state;
+  }
+  assert.equal(pubs, 1, '同一个人反复越界只提醒一次：' + pubs);
+  // 别人第一次越界照样有提醒（不是全局静音）
+  const other = bomb.onMessage(s, { userId: 'u2', name: '群友2', text: '猜 0' });
+  assert.equal(other.effects.filter((e) => e.type === 'public').length, 1, '换个人要提醒');
+  // 正常收窄/命中不受影响
+  const good = bomb.onMessage(other.state, { userId: 'u3', name: '群友3', text: '猜 43' });
+  assert.equal(good.state.phase, 'ended', '踩中照常结束');
+});
+
+test('原子写：games.json 落盘不留 .tmp、内容可解析；文件损坏时按"没进行中的局"处理', async () => {
+  const w = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 0, games: ['werewolf'] } });
+  await w.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  w.setClock(w.getClock() + 95 * 1000);
+  await w.mgr.tick();                        // 推进一次，确保落盘被调用
+  const file = path.join(dataDir, 'games.json');
+  assert.equal(fs.existsSync(`${file}.tmp`), false, '不能留下 .tmp');
+  const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.ok(parsed.games['group:1'], '盘上要有进行中的局');
+  assert.equal(parsed.games['group:1'].state.phase, 'day', '推进后的阶段要落盘');
+  // 半截 JSON（模拟极端情况）：新实例按"首次运行"处理（现状如此，钉住以免无声改变）
+  fs.writeFileSync(file, '{"games":{"group:1":{"gameId":"werewolf"');
+  const { GroupGameManager: M } = await import('../src/features/group-game.js');
+  const mgr2 = new M({ store: w.store, sender: { async sendTextBatch() { return { sent: [] }; } }, log: () => {}, now: w.getClock, rng: () => 0 });
+  assert.equal(mgr2.games.size, 0, '损坏文件 → 丢掉进行中的局（现状）');
+});
+
+test('对抗性回归：owner 局结束后，另一局不能把旧私聊补吃一遍（水位要跨局推进）', async () => {
+  const w = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1', 'group:2'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 0, games: ['werewolf'] } });
+  for (let i = 1; i <= 6; i += 1) {
+    w.store.appendIncoming('group:2', { mid: 7000 + i, ts: Date.now() - i * 1000, senderId: `u${i}`, senderName: `群友${i}`, text: '在' }, { recordOnly: true });
+  }
+  const g1 = await w.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  const g2 = await w.mgr.start({ chatKey: 'group:2', gameId: 'werewolf' });
+  assert.equal(g1.ok && g2.ok, true, JSON.stringify([g1, g2]));
+  w.sent.length = 0;
+  w.store.appendIncoming('private:u1', { mid: 'old-1', ts: Date.now(), senderId: 'u1', senderName: '群友1', text: '刀 2', reply: null, media: [] }, { recordOnly: true });
+  await w.mgr.tick();
+  assert.equal(w.sent.filter((x) => x.chatKey === 'private:u1').length, 1, '只有归属局回执');
+  // 归属局（后开的 group:2）结束 → 旧局不能把这条老消息再吃一遍
+  await w.mgr.stop('group:2', '对抗性回归用例');
+  w.sent.length = 0;
+  await w.mgr.tick();
+  assert.equal(
+    w.sent.filter((x) => x.chatKey === 'private:u1').length,
+    0,
+    '补吃旧私聊了：' + JSON.stringify(w.sent.filter((x) => x.chatKey === 'private:u1').map((x) => x.msgs[0]))
+  );
+});
+
+test('私聊侧的提示词摘要：归属局还在就有"进行中的游戏"，刚结束就空（不给模型上帝视角）', async () => {
+  const w = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 0, games: ['werewolf'] } });
+  await w.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  const uid = w.mgr.games.get('group:1').state.roles[0].userId;
+  const live = w.mgr.summaryFor(`private:${uid}`);
+  assert.match(live, /进行中的游戏/, live);
+  assert.equal(/你是\*\*|查验结果|狼人(?!杀)/.test(live), false, '摘要不能泄露身份：' + live);
+  w.mgr.games.get('group:1').state.phase = 'ended';
+  assert.equal(w.mgr.summaryFor(`private:${uid}`), '', '刚结束的局不再给私聊提示');
+});
+
+test('对抗性回归：已结束（终局播报还在发）的局不再接管私聊、也不再播"退出了本局"', async () => {
+  const w = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 0, games: ['werewolf'] } });
+  const r = await w.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  w.mgr.games.get('group:1').state.phase = 'ended';   // 模拟"已判胜、还没从 games 里删掉"的那几秒
+  const row = w.store.appendIncoming('private:u1', { mid: 'end-1', ts: Date.now(), senderId: 'u1', senderName: '群友1', text: '我不玩了', reply: null, media: [] });
+  assert.equal(await w.mgr.consumePrivateAction('private:u1', row), false, '已结束的局不该接管');
+  w.sent.length = 0;
+  await w.mgr.tick();
+  assert.equal(w.sent.filter((x) => /退出了本局/.test(x.msgs[0])).length, 0, '不该再出现退出播报');
+  assert.equal(w.sent.filter((x) => /结束：/.test(x.msgs[0])).length, 0, '也不该再补一条终局播报');
+});
+
+test('对抗性回归：私聊只归"最近开局、未结束"的那一局——它不认领就交给模型，绝不转给别的局', async () => {
+  const build = async () => {
+    const w = makeWorld({ players: 6 });
+    updateConfig({ groupGame: { enabled: true, chats: ['group:1', 'group:2'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 0, games: ['werewolf'] } });
+    for (let i = 1; i <= 6; i += 1) {
+      w.store.appendIncoming('group:2', { mid: 6000 + i, ts: Date.now() - i * 1000, senderId: `u${i}`, senderName: `群友${i}`, text: '在' }, { recordOnly: true });
+    }
+    await w.mgr.start({ chatKey: 'group:2', gameId: 'werewolf' });      // 先开（较旧）
+    await w.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });      // 后开（归属）
+    // startedAt 可能撞在同一毫秒 → 显式拉开，保证"最近开局"是 group:1（不然排序会退化成插入顺序）
+    w.mgr.games.get('group:2').startedAt = Date.now() - 60_000;
+    w.mgr.games.get('group:1').startedAt = Date.now();
+    return w;
+  };
+  // ① 归属局在白天（白天私聊是聊天）→ 不执行，也**不转给**另一局
+  {
+    const w = await build();
+    w.mgr.games.get('group:1').state.phase = 'day';
+    w.sent.length = 0;
+    const row = w.store.appendIncoming('private:u1', { mid: 'own-1', ts: Date.now(), senderId: 'u1', senderName: '群友1', text: '刀 2', reply: null, media: [] });
+    assert.equal(await w.mgr.consumePrivateAction('private:u1', row), false, '归属局不认领 → 交给模型');
+    assert.deepEqual(w.mgr.games.get('group:2').state.pending.wolves, {}, '绝不能转给更早的局执行');
+    assert.equal(w.sent.length, 0, '也不该有任何回执');
+  }
+  // ② 归属局刚结束（终局播报还在发）→ 同样不转给另一局
+  {
+    const w = await build();
+    w.mgr.games.get('group:1').state.phase = 'ended';
+    w.sent.length = 0;
+    const row = w.store.appendIncoming('private:u1', { mid: 'own-2', ts: Date.now(), senderId: 'u1', senderName: '群友1', text: '查 3', reply: null, media: [] });
+    assert.equal(await w.mgr.consumePrivateAction('private:u1', row), false, '刚结束的归属局 → 按普通私聊');
+    assert.deepEqual(w.mgr.games.get('group:2').state.pending.wolves, {}, '不能把给刚结束那局的行动喂给别的局');
+    assert.deepEqual(w.mgr.games.get('group:2').state.pending.seer, '', '同上（查也不例外）');
+  }
+  // ③ 归属局里这个人已退出 → 由它回一句"你本来就不在局里"（不让别的局执行，这是已知取舍）
+  {
+    const w = await build();
+    const mine = w.mgr.games.get('group:1').state.roles.find((r) => r.userId === 'u1');
+    mine.alive = false;
+    mine.quit = true;
+    w.sent.length = 0;
+    const row = w.store.appendIncoming('private:u1', { mid: 'own-3', ts: Date.now(), senderId: 'u1', senderName: '群友1', text: '刀 2', reply: null, media: [] });
+    assert.equal(await w.mgr.consumePrivateAction('private:u1', row), true, '归属局要接住并回执');
+    assert.equal(
+      w.sent.some((x) => x.chatKey === 'private:u1' && /已经出局|本来就不在局里/.test(x.msgs[0])),
+      true,
+      '要告诉他已经不在那一局了：' + JSON.stringify(w.sent.map((x) => x.msgs[0]))
+    );
+    assert.deepEqual(w.mgr.games.get('group:2').state.pending.wolves, {}, '他的行动不会转给另一局（一次只玩一局）');
+  }
+});
+
+test('对抗性回归：名单里的重复项要去重（不能一个人拿两张身份）', async () => {
+  const w = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 0, games: ['werewolf'] } });
+  // ① 同一个名字写 6 遍 → 去重后只剩 1 个 → 人数不够，拒绝
+  const bad = await w.mgr.start({ chatKey: 'group:1', gameId: 'werewolf', players: Array(6).fill('群友1') });
+  assert.equal(bad.ok, false, '一个人写 6 遍不该开出 6 人局：' + JSON.stringify(bad));
+  assert.match(bad.error, /名单里只有 1 个能用/, bad.error);
+  // ② 正常 6 人 + 重复项 → 去重后正好 6 人，且每人只拿一张牌 / 一条身份私聊
+  const ok = await w.mgr.start({
+    chatKey: 'group:1', gameId: 'werewolf',
+    players: ['群友1', '群友1', '群友2', '群友3', '群友4', '群友5', '群友6']
+  });
+  assert.equal(ok.ok, true, JSON.stringify(ok));
+  const roster = w.mgr.games.get('group:1').state.roles.map((r) => r.userId);
+  assert.equal(roster.length, 6, '去重后正好 6 个：' + JSON.stringify(roster));
+  assert.equal(new Set(roster).size, 6, '名单不能有重复的人');
+  const idDms = w.sent.filter((x) => x.chatKey.startsWith('private:') && /你是\*\*/.test(x.msgs[0]));
+  assert.equal(idDms.length, 6, '身份私聊按人去重（每人一张）：' + idDms.length);
+  assert.equal(new Set(idDms.map((x) => x.chatKey)).size, 6, '同一个人不能收到两条身份');
+});
+
+test('数字炸弹：边界与文案（炸弹=1 / 炸弹=100、区间提示、摘要两种状态）', async () => {
+  const bomb = await import('../src/features/games/number-bomb.js');
+  // 炸弹 = 1（rng 0）
+  let s = bomb.create({ rng: () => 0 });
+  assert.equal(s.secret, 1);
+  assert.equal(s.low, 0);
+  assert.equal(s.high, 101, '区间要从 0/101 起（否则"炸弹是 1 或 100"时文案会说错）');
+  // 还没收窄时猜 0 → 越界提示必须写清是 1~100
+  const zero = bomb.onMessage(s, { userId: 'u1', name: '群友1', text: '猜 0' });
+  assert.match(zero.effects[0].text, /1~100 之间/, zero.effects[0].text);
+  const hit1 = bomb.onMessage(s, { userId: 'u2', name: '群友2', text: '猜 1' });
+  assert.equal(hit1.state.phase, 'ended', '猜 1 要命中');
+  assert.match(hit1.effects[0].result, /踩中炸弹 1/, hit1.effects[0].result);
+  assert.match(bomb.summaryForModel(hit1.state), /已结束（群友2 踩中 1）/, bomb.summaryForModel(hit1.state));
+  // 炸弹 = 100（rng 0.999）
+  let t = bomb.create({ rng: () => 0.999 });
+  assert.equal(t.secret, 100);
+  assert.match(bomb.onMessage(t, { userId: 'u3', name: '群友3', text: '猜 100' }).effects[0].result, /踩中炸弹 100/);
+  // 收窄后的区间提示要跟着变
+  let u = bomb.create({ rng: () => 0.5 });
+  u = bomb.onMessage(u, { userId: 'u4', name: '群友4', text: '猜 20' }).state;   // 20 < secret → low=20
+  const narrowed = bomb.onMessage(u, { userId: 'u5', name: '群友5', text: '猜 99' });  // 99 > secret → high=99
+  assert.equal(narrowed.state.low, 20);
+  assert.equal(narrowed.state.high, 99);
+  assert.match(bomb.summaryForModel(narrowed.state), /21~98 之间/, bomb.summaryForModel(narrowed.state));
+  // 聊天里的数字不误收窄（直接断言区间没动）
+  let v = bomb.create({ rng: () => 0.5 });
+  const chat = bomb.onMessage(v, { userId: 'u6', name: '群友6', text: '我 12 点开会' });
+  assert.equal(chat.state.low, v.low);
+  assert.equal(chat.state.high, v.high);
+  assert.equal(chat.effects.length, 0);
 });

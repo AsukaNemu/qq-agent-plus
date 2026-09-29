@@ -186,7 +186,15 @@ export class ChatStore {
     const mid = m.mid == null ? null : String(m.mid);
     if (mid !== null) {
       const existing = this.db.prepare('SELECT * FROM messages WHERE chat_key=? AND mid=?').get(chatKey, mid);
-      if (existing) return { ...entry(existing), duplicate: true };
+      if (existing) {
+        // 首次落库与"后来才知道它是引擎私聊"可能竞速（发送端先写、回显后到，或反之）：
+        // 命中重复时把 game-secret 补上，避免这行永远留在模型可见的历史里（2026-09-29 审查）
+        if (m.eventKind === 'game-secret' && existing.event_kind !== 'game-secret') {
+          this.db.prepare("UPDATE messages SET event_kind='game-secret' WHERE chat_key=? AND mid=?").run(chatKey, mid);
+          return { ...entry({ ...existing, event_kind: 'game-secret' }), duplicate: true, marked: true };
+        }
+        return { ...entry(existing), duplicate: true };
+      }
     }
     this.db.prepare('INSERT OR IGNORE INTO chats(chat_key) VALUES (?)').run(chatKey);
     const id = this.db.prepare('SELECT next_id FROM chats WHERE chat_key=?').get(chatKey).next_id;

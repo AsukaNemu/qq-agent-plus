@@ -159,7 +159,7 @@ test('白天：按顺序发言 → 投票淘汰 → 狼全灭判好人胜；摘�
   assert.match(end.result, /狼人|平民/, '结算要公布全部身份');
 });
 
-test('自投不算票；平票不出人；票数过半才出局', () => {
+test('投票结算：自投不算票；平票本轮不出人；最高票不必过半也出局（相对多数）', () => {
   let s = newGame();
   const seer = by(s, 'seer')[0];
   s = pm(s, seer.userId, `查 ${idx(s, seer.userId)}`).state;
@@ -170,6 +170,31 @@ test('自投不算票；平票不出人；票数过半才出局', () => {
   const selfVote = wolf.onMessage(s, { userId: a, text: `投 ${idx(s, a)}`, ts: 2 }, { now: 2 });
   assert.match(selfVote.effects[0].text, /投自己/);
   assert.equal(Object.keys(selfVote.state.votes).length, 0, '自投不入票');
+
+  // 平票：2:2（另外两票各投一个不相干的人）→ 本轮不出人、直接进下一夜
+  let tie = wolf.onMessage(selfVote.state, { userId: a, text: `投 ${idx(s, s.order[2])}`, ts: 3 }, { now: 3 }).state;
+  tie = wolf.onMessage(tie, { userId: b, text: `投 ${idx(s, s.order[2])}`, ts: 4 }, { now: 4 }).state;
+  tie = wolf.onMessage(tie, { userId: s.order[2], text: `投 ${idx(s, a)}`, ts: 5 }, { now: 5 }).state;
+  tie = wolf.onMessage(tie, { userId: s.order[3], text: `投 ${idx(s, a)}`, ts: 6 }, { now: 6 }).state;
+  tie = wolf.onMessage(tie, { userId: s.order[4], text: `投 ${idx(s, s.order[5])}`, ts: 7 }, { now: 7 }).state;
+  const tieOut = wolf.onMessage(tie, { userId: s.order[5], text: `投 ${idx(s, s.order[4])}`, ts: 8 }, { now: 8 });
+  assert.match(tieOut.effects.map((e) => e.text).join('|'), /平票/, '2:2 要判平票：' + JSON.stringify(tieOut.effects));
+  assert.equal(tieOut.state.night, 2, '平票不进夜就不对了');
+  assert.equal(tieOut.state.roles.filter((r) => !r.alive).length, 0, '平票这一轮不得有人出局');
+
+  // 相对多数：最高票 2/6（不过半）也出局 —— 把真实语义钉住（标题以前写的是"过半才出局"）
+  let s2 = newGame();
+  const seer2 = by(s2, 'seer')[0];
+  s2 = pm(s2, seer2.userId, `查 ${idx(s2, seer2.userId)}`).state;
+  s2 = wolf.onTick(s2, { now: s2.phaseStartedAt + 95 * 1000, rng: () => 0 }).state;   // 白天
+  const o = s2.order;
+  const plan = [[o[0], o[2]], [o[1], o[2]], [o[2], o[0]], [o[3], o[1]], [o[4], o[3]], [o[5], o[4]]];  // o[2] 得 2 票，其余各 1
+  let out2 = null;
+  for (const [voter, target] of plan) {
+    out2 = wolf.onMessage(out2 ? out2.state : s2, { userId: voter, text: `投 ${idx(s2, target)}`, ts: 9 }, { now: 9 });
+  }
+  assert.match(out2.effects.map((e) => e.text).join('|'), /投票结果/, '要结算：' + JSON.stringify(out2.effects));
+  assert.equal(out2.state.roles.find((r) => r.userId === o[2]).alive, false, '最高票（2/6，不过半）也要出局');
 });
 
 test('夜数上限：到顶那一夜结束时判平局并公布身份（计时起点非 0，超时才会生效）', () => {
@@ -267,7 +292,9 @@ test('白天不按点名：乱序发言也算数、边说边投直接记票（�
   const first = alive[0];
   out = wolf.onMessage(out.state, { userId: first.userId, text: `投 ${idx(out.state, last.userId)}`, ts: 3 }, { now: 3 });
   assert.equal(out.state.phase, 'vote');
-  assert.equal(out.state.votes[first.userId], last.userId, '边说边投的票要保留');
+  // 注：这里其实已经进了投票阶段（上面全员发过言），走的是普通投票分支——
+  // "day 阶段的早票保留"由 test/group-game.test.mjs 那条（>=5 票）与游戏驱动覆盖
+  assert.equal(out.state.votes[first.userId], last.userId, '改票要覆盖旧票');
 });
 
 test('白天固定讨论时长：到点进投票（不刷"没接上"），时长可按配置改', () => {
@@ -404,7 +431,7 @@ test('女巫①：同守同救必死（守卫守 X + 女巫救 X + 狼刀 X → 
   assert.match(heal.effects.at(-1).text, /用解药救/);
   const out = pm(heal.state, seer.userId, `查 ${idx(s, w1.userId)}`);   // 收齐 → 结算
   assert.equal(out.state.roles.find((r) => r.userId === seer.userId).alive, false, '同守同救必死');
-  assert.match(out.effects.map((e) => e.text).join('|'), /预言家|小北|玩家3|倒牌/);
+  assert.match(out.effects.map((e) => e.text).join('|'), new RegExp(`玩家${idx(s, seer.userId)} 昨晚倒牌|${seer.name} 昨晚倒牌`), '天亮要报出被刀的是谁');
   assert.equal(out.state.potions.heal, false, '解药已消耗');
 });
 
@@ -444,7 +471,8 @@ test('女巫③：不能自救；药水用完会明确说', () => {
   assert.match(refused.effects[0].text, /不能救自己/);
   assert.equal(refused.state.pending.witch, null, '拒绝后不算已行动');
   // 不救 → 她死
-  const out = wolf.onTick(pm(refused.state, witch.userId, '不救').state, { now: 0 + 95 * 1000 + 1000, rng: () => 0 });
+  const notSaved = pm(refused.state, witch.userId, '不救').state;
+  const out = wolf.onTick(notSaved, { now: notSaved.phaseStartedAt + 95 * 1000, rng: () => 0 });
   assert.equal(out.state.roles.find((r) => r.userId === witch.userId).alive, false, '没救就死了');
 
   // ② 药水用完：手动把两瓶标成用完 → 提示与回执都要说清
@@ -608,6 +636,11 @@ test('出局者还能说话？引擎一律不认：不计发言、不计票、�
   assert.match(notice[0].text, /你出局了/);
   assert.match(notice[0].text, /不再计入本局/, '要说清之后的发言与投票不算：' + notice[0].text);
 
+  // 关键：投票出局后阶段是 night，而夜里群消息本来就不参与判定——必须过掉这一夜到白天，
+  // 下面这些断言才真的在测"出局者"这道闸（否则把实现里的 !alive 判断删掉也照样绿；2026-09-29 审查）
+  s = wolf.onTick(s, { now: s.phaseStartedAt + 95 * 1000, rng: () => 0 }).state;
+  assert.equal(s.phase, 'day', '过夜后要进白天');
+
   // 出局者在群里继续说话/投票/"投吧" → 状态一个字节都不该变
   const snap = (x) => JSON.stringify({ spoken: x.spoken, votes: x.votes, ready: x.readyVote, phase: x.phase });
   const before = snap(s);
@@ -694,4 +727,251 @@ test('审查回归：roundSeconds 对狼人杀生效（以前是只写着不生�
   // 默认 90 秒：31 秒时不该结算
   const def = wolf.onTick(slow, { now: slow.phaseStartedAt + 31 * 1000, rng: () => 0 });
   assert.equal(def.state.phase, 'night', '默认窗口是 90 秒');
+});
+
+test('坏人赢的结算分支：狼数 ≥ 好人数 → 狼人获胜（reveal=false 时不列身份）', () => {
+  // 6 人局：2 狼 + 4 好人。让两个好人先后退出 → 2 狼 vs 2 好人 → 狼胜
+  const open = { ...newGame(6), phase: 'day' };
+  const good = open.roles.filter((r) => r.role !== 'wolf');
+  const q1 = wolf.onMessage(open, { userId: good[0].userId, text: '我不玩了' }, { now: 100 });
+  assert.notEqual(q1.state.phase, 'ended', '还剩 3 个好人不该结束');
+  const q2 = wolf.onMessage(q1.state, { userId: good[1].userId, text: '我不玩了' }, { now: 101 });
+  assert.equal(q2.state.phase, 'ended', '狼数 ≥ 好人数要立刻结束');
+  const line = q2.effects.map((e) => e.text ?? e.result ?? '').join(' | ');
+  assert.match(line, /狼人获胜/, '要判狼人获胜：' + line);
+
+  // 关掉「结算公开身份」：只报胜方
+  const secret = { ...newGame(6), reveal: false, phase: 'day' };   // newGame 只收 size，reveal 要单独覆盖
+  const good2 = secret.roles.filter((r) => r.role !== 'wolf');
+  let x = wolf.onMessage(secret, { userId: good2[0].userId, text: '我不玩了' }, { now: 100 }).state;
+  const end = wolf.onMessage(x, { userId: good2[1].userId, text: '我不玩了' }, { now: 101 });
+  const line2 = end.effects.map((e) => e.text ?? e.result ?? '').join(' | ');
+  assert.match(line2, /狼人获胜/, '要报胜方：' + line2);
+  assert.equal(/身份：|夜晚记录/.test(line2), false, 'reveal=false 不得列身份与夜晚记录：' + line2);
+});
+
+test('对抗性回归 F1：退过一次之后反复发「不玩了」也要吃配额（不能无限刷私聊）', () => {
+  let s = newGame(7);
+  const victim = by(s, 'villager')[0];
+  s = pm(s, victim.userId, '不玩了').state;             // 真退出一次（有回执）
+  let replies = 0;
+  for (let i = 0; i < 20; i += 1) {
+    const out = pm(s, victim.userId, i % 2 ? '不玩了' : '退出');
+    replies += out.effects.filter((e) => e.type === 'private').length;
+    s = out.state;
+  }
+  assert.equal(replies, 4, '退出类文案也要被"每人每夜 4 条"夹住：' + replies);
+});
+
+test('对抗性回归 F2：投票阶段反复「投 自己」只有一次公开提醒（不能刷群消息）', () => {
+  let s = newGame(6);
+  const seer = by(s, 'seer')[0];
+  s = pm(s, seer.userId, `查 ${idx(s, seer.userId)}`).state;
+  s = wolf.onTick(s, { now: s.phaseStartedAt + 95 * 1000, rng: () => 0 }).state;   // 天亮 → 白天
+  for (const r of s.roles.filter((x) => x.alive)) s = wolf.onMessage(s, { userId: r.userId, text: '说两句' }, { now: 2000 }).state;
+  const me = s.roles[0];
+  let pubs = 0;
+  for (let i = 0; i < 12; i += 1) {
+    const out = wolf.onMessage(s, { userId: me.userId, text: `投 ${idx(s, me.userId)}` }, { now: 3000 });
+    pubs += out.effects.filter((e) => e.type === 'public').length;
+    s = out.state;
+  }
+  assert.equal(pubs, 1, '同一个阶段只提醒一次：' + pubs);
+});
+
+test('对抗性回归 F4：守卫交了「守别人」之后退出，他的保护必须作废（死人不该挡刀）', () => {
+  let s = newGame(7);
+  const [w1, w2] = by(s, 'wolf');
+  const guard = by(s, 'guard')[0];
+  const seer = by(s, 'seer')[0];
+  const witch = by(s, 'witch')[0];
+  const victim = by(s, 'villager')[0];
+  s = pm(s, guard.userId, `守 ${idx(s, victim.userId)}`).state;
+  s = pm(s, guard.userId, '不玩了').state;
+  assert.equal(s.pending.guard, '', '退出即作废（pending.guard 存的是目标，不能拿 uid 直接比）');
+  s = pm(s, w1.userId, `刀 ${idx(s, victim.userId)}`).state;
+  s = pm(s, w2.userId, `刀 ${idx(s, victim.userId)}`).state;
+  s = pm(s, witch.userId, '不救').state;
+  const out = pm(s, seer.userId, `查 ${idx(s, w1.userId)}`);
+  assert.equal(out.state.roles.find((r) => r.userId === victim.userId).alive, false, '退出的守卫不得挡刀');
+  assert.match(out.effects.map((e) => e.text ?? '').join('|'), /倒牌/);
+});
+
+test('对抗性回归 F7：一狼交刀后另一狼退出 → 刀口要锁定并去问女巫（不能吞掉她的回合）', () => {
+  let s = newGame(7);
+  const [w1, w2] = by(s, 'wolf');
+  const witch = by(s, 'witch')[0];
+  const victim = by(s, 'villager')[0];
+  s = pm(s, w1.userId, `刀 ${idx(s, victim.userId)}`).state;
+  const quit = pm(s, w2.userId, '不玩了');
+  s = quit.state;
+  assert.ok(s.pending.killTarget, '狼减员后要把刀口定下来：' + JSON.stringify(s.pending));
+  const asked = quit.effects.filter((e) => e.type === 'private' && e.userId === witch.userId);
+  assert.equal(asked.length, 1, '要立刻问女巫：' + JSON.stringify(quit.effects.map((e) => e.text)));
+  assert.match(asked[0].text, /被刀的是/, asked[0].text);
+});
+
+test('对抗性回归 F2b：「投自己」的提醒记录在天亮/入夜时会重置（不是一局只提醒一次）', () => {
+  // 直接验两个重置点，比开着整局去"跨天"更稳
+  let s = newGame(6);
+  s = { ...s, selfVoteWarned: ['u1'] };
+  const seer = by(s, 'seer')[0];
+  s = pm(s, seer.userId, `查 ${idx(s, seer.userId)}`).state;
+  const dawn = wolf.onTick(s, { now: s.phaseStartedAt + 95 * 1000, rng: () => 0 }).state;      // 夜里到点 → 天亮
+  assert.equal(dawn.phase, 'day');
+  assert.deepEqual(dawn.selfVoteWarned, [], '天亮要清掉提醒记录');
+  // 先塞回脏值再进夜：不然"入夜清掉"这句是恒真的（天亮那次已经清过了）
+  const night = wolf.onTick(
+    { ...dawn, phase: 'vote', selfVoteWarned: ['u1'] },
+    { now: (dawn.phaseStartedAt || 0) + 95 * 1000, rng: () => 0 }
+  ).state;
+  assert.equal(night.phase, 'night', '投票窗口到点进下一夜');
+  assert.deepEqual(night.selfVoteWarned, [], '入夜也要清掉');
+});
+
+test('女巫兜底/拒绝文案逐条钉住（狼刀未定/没看懂毒谁/不能毒自己/只剩毒药/通用提示）', () => {
+  let s = newGame(7);
+  const [w1, w2] = by(s, 'wolf');
+  const witch = by(s, 'witch')[0];
+  const va = by(s, 'villager')[0];
+  // ① 狼刀还没定就交行动 → 让她等（不算已行动）
+  const early = pm(s, witch.userId, '救');
+  assert.match(early.effects[0].text, /狼刀还没定/, early.effects[0].text);
+  assert.equal(early.state.pending.witch, null, '没锁刀前不算她行动过');
+  s = pm(s, w1.userId, `刀 ${idx(s, va.userId)}`).state;
+  s = pm(s, w2.userId, `刀 ${idx(s, va.userId)}`).state;             // 锁刀 → 问她
+  // ② 看不懂的目标
+  assert.match(pm(s, witch.userId, '毒 99').effects[0].text, /没看懂毒谁/);
+  // ③ 毒自己
+  assert.match(pm(s, witch.userId, `毒 ${idx(s, witch.userId)}`).effects[0].text, /不能毒自己/);
+  // ④ 通用兜底（说了句别的）
+  assert.match(pm(s, witch.userId, '嗯嗯').effects[0].text, /回「救」「不救」或用「毒 3」/);
+  // ⑤ 只剩毒药时，解药用完的文案不该再劝她去救
+  let t = wolf.create({ players: PLAYERS.concat([{ userId: 'u7', name: '玩家7' }]), rng: () => 0, now: 1000 });
+  t = { ...t, potions: { heal: false, poison: true } };
+  const [t1, t2] = by(t, 'wolf');
+  const tv = by(t, 'villager')[0];
+  t = pm(t, t1.userId, `刀 ${idx(t, tv.userId)}`).state;
+  t = pm(t, t2.userId, `刀 ${idx(t, tv.userId)}`).state;
+  assert.match(pm(t, by(t, 'witch')[0].userId, '救').effects[0].text, /你的解药已经用过了。可以回「不救」，或者用毒药/, '只剩毒药时要给出可用选项');
+});
+
+test('结算里的夜晚记录：格式与内容都要对（守/刀/救/毒/查（狼|好人））', () => {
+  let s = newGame(7);
+  const [w1, w2] = by(s, 'wolf');
+  const seer = by(s, 'seer')[0];
+  const guard = by(s, 'guard')[0];
+  const witch = by(s, 'witch')[0];
+  const [va, vb] = by(s, 'villager');
+  s = pm(s, w1.userId, `刀 ${idx(s, va.userId)}`).state;
+  s = pm(s, w2.userId, `刀 ${idx(s, va.userId)}`).state;
+  s = pm(s, guard.userId, `守 ${idx(s, vb.userId)}`).state;
+  s = pm(s, witch.userId, `毒 ${idx(s, vb.userId)}`).state;
+  s = pm(s, seer.userId, `查 ${idx(s, w1.userId)}`).state;     // 收齐 → 结算（va 被刀、vb 被毒）
+  // 两只狼退赛 → 结算文本里带夜晚记录
+  let end = null;
+  for (const w of [w1, w2]) {
+    if (!s.roles.find((r) => r.userId === w.userId).alive) continue;
+    const q = pm(s, w.userId, '不玩了');
+    end = q.effects.map((e) => e.text ?? e.result ?? '').join(' | ');
+    s = q.state;
+  }
+  assert.match(end, /夜晚记录：第 1 夜：/, end);
+  assert.match(end, new RegExp(`守${idx(s, vb.userId)}`), '守卫目标要记上：' + end);
+  assert.match(end, new RegExp(`刀${idx(s, va.userId)}`), '刀口要记上：' + end);
+  assert.match(end, new RegExp(`毒${idx(s, vb.userId)}`), '毒药要记上：' + end);
+  assert.match(end, new RegExp(`查${idx(s, w1.userId)}（狼）`), '查验结果要带（狼/好人）标注：' + end);
+  assert.equal(/救\d/.test(end), false, '这一夜没用解药，就不该有救：' + end);
+});
+
+test('退出即时结算：退出的正好是唯一没交行动的人，其余齐了要立刻结算', () => {
+  let s = newGame(7);
+  const [w1, w2] = by(s, 'wolf');
+  const seer = by(s, 'seer')[0];
+  const guard = by(s, 'guard')[0];
+  const witch = by(s, 'witch')[0];
+  const va = by(s, 'villager')[0];
+  s = pm(s, w1.userId, `刀 ${idx(s, va.userId)}`).state;
+  s = pm(s, w2.userId, `刀 ${idx(s, va.userId)}`).state;     // 锁刀 → 问女巫
+  s = pm(s, guard.userId, `守 ${idx(s, guard.userId)}`).state;
+  s = pm(s, witch.userId, '不救').state;
+  assert.equal(s.phase, 'night', '还差预言家，夜没结束');
+  const quit = pm(s, seer.userId, '我不玩了');                // 唯一没交的人退了 → 立刻结算
+  const line = quit.effects.map((e) => e.text ?? e.result ?? '').join(' | ');
+  assert.match(line, /天亮了/, '退出后要立刻结算这一夜：' + line);
+  assert.equal(quit.state.roles.find((r) => r.userId === va.userId).alive, false, '被刀的人照常出局');
+});
+
+test('插件级：局已结束（终局播报还在发）时，私聊一律不受理（两个插件都早退）', async () => {
+  const uc = await import('../src/features/games/undercover.js');
+  let s = newGame(6);
+  const ended = { ...s, phase: 'ended' };
+  const before = JSON.stringify(ended);
+  for (const text of ['不玩了', '刀 2', '救', '投 3', '']) {
+    const out = wolf.onPrivateMessage(ended, { userId: ended.roles[0].userId, text, ts: 1 }, { now: 1 });
+    assert.equal(out.effects.length, 0, `结束后不该有任何效果：${text}`);
+    assert.equal(JSON.stringify(out.state), before, '结束后状态一个字节都不该变');
+  }
+  const ucEnded = { ...uc.create({ players: Array.from({ length: 4 }, (_, i) => ({ userId: `u${i + 1}`, name: `玩家${i + 1}` })), rng: () => 0, now: 1000 }), phase: 'ended' };
+  const ucBefore = JSON.stringify(ucEnded);
+  const ucOut = uc.onPrivateMessage(ucEnded, { userId: 'u1', text: '不玩了', ts: 1 }, { now: 1 });
+  assert.equal(ucOut.effects.length, 0, '卧底结束后也不受理');
+  assert.equal(JSON.stringify(ucOut.state), ucBefore);
+});
+
+test('回执配额按"夜"重置：第 1 夜用满 4 条，第 2 夜照样能收到回执', () => {
+  let s = newGame(6);
+  const [w1, w2] = by(s, 'wolf');
+  const witch = by(s, 'witch')[0];
+  const seer = by(s, 'seer')[0];
+  // 第 1 夜：一个平民把回执刷满
+  const plain = by(s, 'villager')[0];
+  let used = 0;
+  for (let i = 0; i < 6; i += 1) {
+    const out = pm(s, plain.userId, `在吗${i}`);
+    used += out.effects.filter((e) => e.type === 'private').length;
+    s = out.state;
+  }
+  assert.equal(used, 4, '第 1 夜最多 4 条：' + used);
+  // 把这一夜推过去
+  s = pm(s, w1.userId, `刀 ${idx(s, seer.userId)}`).state;
+  s = pm(s, w2.userId, `刀 ${idx(s, seer.userId)}`).state;
+  s = pm(s, witch.userId, '救').state;
+  s = pm(s, seer.userId, `查 ${idx(s, w1.userId)}`).state;   // 收齐 → 天亮
+  assert.equal(s.phase, 'day');
+  // 再过一天到第 2 夜
+  s = wolf.onTick(s, { now: s.phaseStartedAt + 121 * 1000, rng: () => 0 }).state;   // 讨论到点 → 投票
+  s = wolf.onTick(s, { now: s.phaseStartedAt + 91 * 1000, rng: () => 0 }).state;    // 投票到点 → 第 2 夜
+  assert.equal(s.night, 2, '进第 2 夜');
+  const again = pm(s, plain.userId, '在吗？我又来了');
+  assert.equal(again.effects.filter((e) => e.type === 'private').length, 1, '新的一夜配额要重置');
+});
+
+test('夜晚记录的正向格式：救 N 与「（好人）」标注都要在', () => {
+  let s = newGame(7);
+  const [w1, w2] = by(s, 'wolf');
+  const seer = by(s, 'seer')[0];
+  const guard = by(s, 'guard')[0];
+  const witch = by(s, 'witch')[0];
+  const good = by(s, 'villager')[0];
+  // 狼刀好人、女巫救他（不带守卫，避免同守同救）、预言家查一个好人
+  s = pm(s, w1.userId, `刀 ${idx(s, good.userId)}`).state;
+  s = pm(s, w2.userId, `刀 ${idx(s, good.userId)}`).state;
+  s = pm(s, guard.userId, `守 ${idx(s, guard.userId)}`).state;
+  s = pm(s, witch.userId, '救').state;
+  s = pm(s, seer.userId, `查 ${idx(s, good.userId)}`).state;      // 查验一个好人
+  assert.equal(s.phase, 'day');
+  const log = s.nightLog.at(-1);
+  assert.equal(log.heal, idx(s, good.userId), '夜晚记录要记下救了谁');
+  assert.equal(log.seerSawWolf, false, '查好人 → seerSawWolf 为 false');
+  assert.deepEqual(log.dead, [], '被救下来 → 没人出局');
+  // 结算文本里救与（好人）都要渲染出来
+  let end = null;
+  for (const w of [w1, w2]) {
+    const q = pm(s, w.userId, '不玩了');
+    end = q.effects.map((e) => e.text ?? e.result ?? '').join(' | ');
+    s = q.state;
+  }
+  assert.match(end, new RegExp(`救${idx(s, good.userId)}`), '要渲染"救 N"：' + end);
+  assert.match(end, new RegExp(`查${idx(s, good.userId)}（好人）`), '要渲染"（好人）"：' + end);
 });

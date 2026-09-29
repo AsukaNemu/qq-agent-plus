@@ -60,7 +60,7 @@ export function create({ players, rng, now = 0, reveal = true, discussSeconds = 
     reveal: reveal !== false,   // 结算是否公开身份与夜晚记录（控制台那个勾）
     discussSeconds: Math.min(600, Math.max(30, Number(discussSeconds) || DAY_DISCUSS_SECONDS)),
     // 夜行动/投票窗口（控制台「单回合超时」）：0 = 用插件默认 90 秒。以前这配置对狼人杀完全不生效
-    roundSeconds: Number(roundSeconds) > 0 ? Math.min(600, Number(roundSeconds)) : 0,
+    roundSeconds: Number(roundSeconds) > 0 ? Math.min(600, Math.max(30, Number(roundSeconds))) : 0,
     readyVote: [],              // 白天说过"投吧/直接投"的人（过半就立刻开投）
     night: 1,
     roles,
@@ -231,8 +231,10 @@ function quitPlayer(state, me, now = 0, rng = Math.random) {
   // 退出即作废：本夜已交的行动、本白天已投的票、以及"发过言/想开投"的记录都不再算数
   // （2026-09-29 审查 P1/P2：退出的狼仍参与多数刀、退出的票仍能把人投出）
   delete s.pending.wolves[me.userId];
-  if (s.pending.guard === me.userId) s.pending.guard = '';
-  if (s.pending.seer === me.userId) s.pending.seer = '';
+  // pending.guard / pending.seer 里存的是**目标**，不是提交者 —— 原来拿 me.userId 去比，
+  // 只有"守自己/查自己"才命中：退出的守卫照样挡刀（死人的行动改了谁活谁死；2026-09-29 对抗性验证 P1）
+  if (target.role === 'guard') s.pending.guard = '';
+  if (target.role === 'seer') s.pending.seer = '';
   // 女巫退出：她本夜已交的药作废（否则"人不在了药还生效、还照扣"——与"药水随人作废"相反）
   if (target.role === 'witch') s.pending.witch = null;
   delete s.votes[me.userId];
@@ -246,6 +248,16 @@ function quitPlayer(state, me, now = 0, rng = Math.random) {
     { type: 'private', userId: me.userId, text: '【狼人杀】好，把你移出本局了，接下来你可以正常聊天或围观（不会给你发行动提示）。' },
     { type: 'public', text: `👋 ${target.name} 退出了本局（不计胜负、身份不公布），剩下 ${aliveList(s).length} 人继续。` }
   ];
+  // 狼队在锁刀前减员：活着的狼要是有刀都交了，就地把刀口定下来并问女巫。
+  // 不补这一步的话 killTarget 永远是空的 → 她的回合被静默吞掉（不问她、也不能用药；
+  // 2026-09-29 对抗性验证 P2）
+  if (s.phase === 'night' && !s.pending.killTarget) {
+    const wolvesLeft = aliveOf(s, 'wolf');
+    if (wolvesLeft.length && wolvesLeft.every((w) => s.pending.wolves[w.userId])) {
+      s.pending.killTarget = wolfTargetOf(s, rng);
+      effects.push(...witchPrompt(s));
+    }
+  }
   const win = checkWin(s);
   if (win) return { state: { ...s, phase: 'ended' }, effects: [...effects, winEffect(s, win)] };
   // 退出的正好是当前该行动的人：别的行动都齐了就立刻结算
@@ -318,6 +330,7 @@ function resolveNight(state, rng = Math.random, now = 0) {
   for (const v of deadRoles) if (!v.quit) effects.push(deathNotice(v));
   s.pending = { guard: '', wolves: {}, seer: '', witch: null, killTarget: '' };
   s.ackCount = {};
+  s.selfVoteWarned = [];
   // readyVote 是"今天想开投的人"，跨天必须清：不清的话第 2 天随便有人说句话就立刻开投，
   // 讨论时长被整段跳过（2026-09-29 审查 P1）
   s.readyVote = [];
@@ -404,7 +417,7 @@ function tally(state, now = 0) {
 }
 
 function toNight(state, effects, now = 0) {
-  const s = { ...state, phase: 'night', night: (state.night || 1) + 1, cursor: 0, votes: {}, phaseStartedAt: now || 0 };
+  const s = { ...state, phase: 'night', night: (state.night || 1) + 1, cursor: 0, votes: {}, selfVoteWarned: [], phaseStartedAt: now || 0 };
   if (s.night > (state.maxNights || MAX_NIGHTS)) {
     const tail = s.reveal === false ? '' : `身份：${s.roles.map((r, i) => `${i + 1}=${r.name}（${ROLE_NAME[r.role]}）`).join('，')}`;
     return { state: { ...s, phase: 'ended' }, effects: [...effects, { type: 'end', result: `夜晚数用尽，本局平局。${tail}` }] };
@@ -456,7 +469,14 @@ export function onMessage(state, msg, { now = 0, rng = Math.random } = {}) {
     if (!voteMatch) return { state: s, effects: [] };
     const picked = parseTarget(s, voteMatch[1]);
     if (!picked) return { state: s, effects: [] };
-    if (picked.userId === uid) return { state: s, effects: [{ type: 'public', text: `${me.name} 想投自己？那不算，换一个。` }] };
+    if (picked.userId === uid) {
+      // 同一阶段每人只提醒一次：否则反复「投 自己」能把群消息刷爆（群配额被它吃光后，
+      // 引擎自己的"天亮了/投票结果"反而发不出去，群里看着像卡住；2026-09-29 对抗性验证 P1）
+      s.selfVoteWarned = Array.isArray(s.selfVoteWarned) ? s.selfVoteWarned : [];
+      if (s.selfVoteWarned.includes(uid)) return { state: s, effects: [] };
+      s.selfVoteWarned.push(uid);
+      return { state: s, effects: [{ type: 'public', text: `${me.name} 想投自己？那不算，换一个。` }] };
+    }
     s.votes[uid] = picked.userId;
     const aliveIds = aliveList(s).map((r) => r.userId);
     if (aliveIds.every((x) => s.votes[x])) return tally(s, now);
@@ -481,15 +501,23 @@ export function onPrivateMessage(state, msg, { now = 0, rng = Math.random } = {}
   const uid = String(msg.userId);
   const me = s.roles.find((r) => r.userId === uid);
   if (!me) return { state: s, effects: [] };
-  // 退出/观战：任何阶段都受理（名单是"最近发过言的人"，有人并不想玩）
-  if (QUIT_RE.test(String(msg.text || ''))) return quitPlayer(s, me, now, rng);
+  // 局已结束（终局播报还在发的那几秒里进来的私聊）：不再受理任何行动，
+  // 否则会在"狼人杀结束"之后再播一次"👋 X 退出了本局"、甚至多发一条终局播报（2026-09-29 审查 P2）
+  if (s.phase === 'ended') return { state: s, effects: [] };
+  // 退出/观战：任何阶段都受理（名单是"最近发过言的人"，有人并不想玩）。
+  // 但只有**还在局里**的人才走退出路径：否则已出局的人反复发「不玩了」，
+  // 每条都能拿一条私聊回执，把"每人每夜最多 4 条"整条绕开（2026-09-29 对抗性验证 P1）
+  const wantsQuit = QUIT_RE.test(String(msg.text || '').trim());
+  if (wantsQuit && me.alive) return quitPlayer(s, me, now, rng);
   if (s.phase !== 'night') return { state: s, effects: [] };   // 白天私聊照常聊天
   if (!me.alive) {
     // 出局的玩家夜里私聊：明确告诉他没行动，别去猜活人的事（同样受配额，防刷屏）
     const seen = Number(s.ackCount?.[uid] || 0);
     s.ackCount = { ...(s.ackCount || {}), [uid]: seen + 1 };
     if (seen >= MAX_ACKS_PER_NIGHT) return { state: s, effects: [], consume: true };
-    return { state: s, effects: [{ type: 'private', userId: uid, text: '【狼人杀】你已经出局了，夜里没有行动，安心等到局末看身份吧。' }] };
+    return { state: s, effects: [{ type: 'private', userId: uid, text: wantsQuit
+      ? '【狼人杀】你本来就不在局里（或已经出局），不用退出——安心等到局末看身份吧。'
+      : '【狼人杀】你已经出局了，夜里没有行动，安心等到局末看身份吧。' }] };
   }
   // 回执配额（每人每夜最多几条）：满了就静默消耗——行动照收，不再逐条回消息，
   // 免得有人反复私聊把对方私聊刷爆、或触发协议端限频

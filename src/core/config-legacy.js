@@ -318,6 +318,10 @@ export const DEFAULT_CONFIG = {
     // 白天讨论时长（秒；0 = 用插件默认 120）与结算是否公开词/身份
     discussSeconds: 0,
     revealWords: true,
+    // 这两项一直在 UI/文档里当默认值用（10 / 0=插件默认），但配置对象里没有，
+    // 于是"没保存过实验页"的实例实际用的是插件上限（2026-09-29 审查 P2）
+    maxPlayers: 10,
+    roundSeconds: 0,
     maxDurationMin: 60,
     dailyLimitPerChat: 6
   },

@@ -132,7 +132,7 @@ function nextRound(state, effects, now = 0) {
   return {
     // phaseStartedAt 必须在轮次切换时就起算：置 0 的话 onTick 里 `Number(0) || now` 恒等于
     // now，超时永远不生效，整局会卡到全局时长上限（2026-09-29 审查 P1，第 2 轮起必现）
-    state: { ...state, phase: 'speak', round, order, cursor: 0, spoken: [], readyVote: [], votes: {}, phaseStartedAt: now || 0 },
+    state: { ...state, phase: 'speak', round, order, cursor: 0, spoken: [], readyVote: [], votes: {}, selfVoteWarned: [], phaseStartedAt: now || 0 },
     effects: [...effects, { type: 'public', text: `第 ${round} 轮开始：想描述的就说（不用等点名，每人一句），也可以直接发「投 3」带票；`
       + `${Number(state.discussSeconds) || DAY_DISCUSS_SECONDS} 秒后自动进投票，过半人说「投吧」也会立刻进。` }]
   };
@@ -235,7 +235,13 @@ export function onMessage(state, msg, { now = 0 } = {}) {
     const voteMatch = /投\s*@?([^\s，。！？!?,.]{1,12})/.exec(String(msg.text || ''));
     const target = voteMatch ? parseVoteTarget(s, { text: `投 ${voteMatch[1]}` }) : null;
     if (!target) return { state: s, effects: [] };
-    if (target.userId === uid) return { state: s, effects: [{ type: 'public', text: `${me.name} 想投自己？那不算，换一个。` }] };
+    if (target.userId === uid) {
+      // 同一轮每人只提醒一次（反复「投 自己」会把群消息刷爆、吃光群发送配额；2026-09-29 对抗性验证 P1）
+      s.selfVoteWarned = Array.isArray(s.selfVoteWarned) ? s.selfVoteWarned : [];
+      if (s.selfVoteWarned.includes(uid)) return { state: s, effects: [] };
+      s.selfVoteWarned.push(uid);
+      return { state: s, effects: [{ type: 'public', text: `${me.name} 想投自己？那不算，换一个。` }] };
+    }
     s.votes[uid] = target.userId;
     if (Object.keys(s.votes).length >= alive(s).length) return tally(s, now);
     return { state: s, effects: [] };

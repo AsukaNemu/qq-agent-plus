@@ -18,6 +18,7 @@ fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify({
 const { ChatStore } = await import('../src/core/store.js');
 const { buildPastState } = await import('../src/llm/prompt.js');
 const { SendQueue } = await import('../src/onebot/sender.js');
+const { buildToolDefs, executeTool } = await import('../src/tools/tools-core.js');
 
 test('game-secret 标记的私聊不进提示词历史；普通消息照常进', () => {
   const store = new ChatStore(0, { dataDir, filename: 'secret.sqlite' });
@@ -59,5 +60,45 @@ test('端到端：真实发送次序下，引擎私聊落库就是 game-secret�
   // 翻页工具的口径同源：这里只验 store 能给出标记，工具侧的过滤在 tools 用例里
   const rows = store.recent('private:1', { limit: 10, readOnly: true });
   assert.equal(rows.filter((m) => m.eventKind === 'game-secret').length, 2, '两条引擎私聊都要带上标记');
+  store.close();
+});
+
+test('工具出口也要过闸：按 id 单查/列可见 id 都看不到 game-secret', async () => {
+  const store = new ChatStore(0, { dataDir, filename: 'secret-tools.sqlite' });
+  store.appendIncoming('private:1', { mid: 'u9', ts: Date.now() - 5000, senderId: '1', senderName: '阿猫', text: '在吗', reply: null, media: [] }, { recordOnly: true });
+  store.appendSelf('private:1', { mid: 's9', ts: Date.now() - 4000, text: '【狼人杀】你是**狼人**。队友：2 号', eventKind: 'game-secret' });
+  store.appendSelf('private:1', { mid: 's10', ts: Date.now(), text: '我也在，刚忙完' });
+
+  const defs = buildToolDefs();
+  const ctx = { store, chatKey: 'private:1', session: {} };
+  const recent = await executeTool(defs, ctx, 'get_recent_messages', JSON.stringify({ limit: 10 }));
+  assert.equal(/你是\*\*狼人\*\*/.test(recent.content), false, '翻页工具不得看到引擎私聊：' + recent.content);
+
+  // 报错提示里列的"最近可见 id"也不能把 secret 的 id 吐出来
+  const miss = await executeTool(defs, ctx, 'get_message_detail', JSON.stringify({ messageId: '不存在的id' }));
+  assert.equal(/s9/.test(miss.content), false, 'midHint 不得包含 game-secret 的 id：' + miss.content);
+
+  // 直接用 id 查：必须当它不存在
+  const detail = await executeTool(defs, ctx, 'get_message_detail', JSON.stringify({ messageId: 's9' }));
+  assert.equal(detail.isError, true, '按 id 单查也要挡住：' + detail.content);
+  assert.match(detail.content, /找不到消息/, detail.content);
+  assert.equal(/你是\*\*狼人\*\*/.test(detail.content), false, '更不能回正文');
+
+  // 普通消息照常能查到（别把闸门做成一律拒绝）
+  const normal = await executeTool(defs, ctx, 'get_message_detail', JSON.stringify({ messageId: 's10' }));
+  assert.equal(normal.isError, undefined);
+  assert.match(normal.content, /我也在，刚忙完/);
+  store.close();
+});
+
+test('重复落库补标：先按普通消息写库、后才知道是引擎私聊时，标记要补上', () => {
+  const store = new ChatStore(0, { dataDir, filename: 'secret-backfill.sqlite' });
+  store.appendSelf('private:2', { mid: 'b1', ts: Date.now(), text: '【狼人杀】你的查验结果：3 号是狼人' });
+  assert.equal(store.findByMid('private:2', 'b1').eventKind, 'message', '第一次是普通消息');
+  const again = store.appendSelf('private:2', { mid: 'b1', ts: Date.now(), text: '【狼人杀】你的查验结果：3 号是狼人', eventKind: 'game-secret' });
+  assert.equal(again.duplicate, true, '应命中重复');
+  assert.equal(store.findByMid('private:2', 'b1').eventKind, 'game-secret', '命中重复也要把标记补上');
+  const state = buildPastState(store, 'private:2');
+  assert.equal(/查验结果/.test(state.text), false, '补标之后不得再进提示词');
   store.close();
 });
