@@ -32,6 +32,7 @@ QQ_AGENT_DATA_DIR=$T node test/local/test-sender-retry.mjs
 | `test-qzone-reply-fallback.mjs` | 动态互动的"回复"半边：自己的动态列表被限流（retcode=100）时不整轮抛错，改走"已关注动态 + Cookie 详情"兜底 | 是（写 config.json） | < 2 秒 |
 | `test-thinking-toolchoice.mjs` | 思考模式下强制 `tool_choice` 会 400：要自动降级成"允许模型自选"而不是整次失败 | 是（写 config.json） | < 2 秒 |
 | `test-card-segments.mjs` | 分享卡片（json / xml 段）解析成可读文本，并标注"自己的动态" | 否 | < 1 秒 |
+| `game-drive.mjs` | 群游戏整局驱动：数字炸弹的区间收窄 / 越界提醒 / 命中结算，"谁是卧底"的私聊发词、轮次发言、投票淘汰与胜负判定。用桩 sender 把"会发出去的话"逐条打出来，自己建临时 DATA_DIR、跑完删掉，不碰线上数据 | 否（脚本自管） | < 2 秒 |
 
 ## 可选用例依赖
 

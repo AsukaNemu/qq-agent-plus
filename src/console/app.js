@@ -19,7 +19,12 @@ import { SessionRegistry, personaLabelOfPrompt } from '../core/sessions.js';
 import { Orchestrator } from '../core/orchestrator.js';
 import { DailyMomentsManager } from '../features/daily-moments.js';
 import { QzoneInteractionManager } from '../features/qzone-interactions.js';
+import { GroupDigestManager } from '../features/group-digest.js';
+import { GroupGameManager } from '../features/group-game.js';
+import { ReminderStore } from '../core/reminders.js';
 import { listModels, chatCompletion, resolveApiKey, cachedTokensOfUsage } from '../llm/llm.js';
+import { synthesizeSpeech } from '../llm/tts.js';
+import { TTS_SERVICES, ttsServiceById, ttsServiceOfBaseUrl, ttsKeyServices, ttsServiceOf, ttsKeyFor } from '../llm/tts-presets.js';
 import { resolveOfficialPrice, listOfficialPrices, listModelAliases, isPeakHour, priceAt, resolveModelPrice, costModeOf, modelLabel, splitModelLabel, vendorOfConfig, UNKNOWN_VENDOR } from '../pricing/model-prices.js';
 import { initPriceFeed, refreshPriceFeed, priceFeedStatus } from '../pricing/price-feed.js';
 import { probeChannelPrices, capPrices } from '../pricing/price-probe.js';
@@ -434,6 +439,8 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
   });
   let identityPilot = null;
   let identityPilotError = '';
+  // 定时提醒：落盘持久化（重启不丢），到点由编排器走主动唤醒让模型说出来
+  const reminders = new ReminderStore();
   const orchestrator = new Orchestrator({
     store,
     memory,
@@ -441,6 +448,8 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     sender,
     sessions,
     onebot,
+    reminders,
+    getGames: () => groupGame,
     emit,
     getIdentityPilot: () => identityPilot,
     getIncidentPilot: () => incidentPilot
@@ -464,6 +473,19 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       orchestrator.setProactiveSuppressed('qzone-interactions', suppressed),
     emit,
     log: moduleLog('qzone-interactions')
+  });
+  // 群游戏：状态机主持（实验性、默认关、白名单制）；私聊发词受 allowPrivateInvite 门控
+  const groupGame = new GroupGameManager({
+    store,
+    sender,
+    log: moduleLog('group-game'),
+    wake: (chatKey, delayMs, note, opts) => orchestrator.scheduleInitiativeWake(chatKey, delayMs, note, opts)
+  });
+  // 群日报：每天定时把"昨天群里聊了啥"汇总发到配置的群（默认关、白名单制）
+  const groupDigest = new GroupDigestManager({
+    store,
+    sender,
+    log: moduleLog('group-digest')
   });
   function createIncidentPilot() {
     return new IncidentPilotManager({
@@ -1271,6 +1293,13 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       out.providerKeyPresence = has;
     }
 
+    // tts.keys 同款处理（2026-09-29 审查 P1）：SECRET_KEY_PATTERN 只匹配字段名，"按服务 id
+    // 存 Key" 的 keys 映射（{ siliconflow: 'sk-…', doubao: '…' }）会整包穿过去、明文下发。
+    // 前端的"哪几家存过"口径由 safeConfigWithAsrStatus 里的 ttsKeyServices 另行下发。
+    if (out.tts && typeof out.tts === 'object' && out.tts.keys && typeof out.tts.keys === 'object') {
+      out.tts.keys = {};
+    }
+
     // 提供商列表：删掉 key 字段（同样不能置空串，否则回传时覆盖真实 Key），补 hasKey
     if (Array.isArray(out.providers)) {
       for (const p of out.providers) {
@@ -1323,6 +1352,13 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
   function safeConfigWithAsrStatus(cfgNow) {
     const safe = sanitizeConfig(cfgNow);
     safe.asr = { ...(safe.asr || {}), ...asrStatusOf(cfgNow) };
+    // tts 的 Key 被 sanitize 删掉了，用派生标志告诉界面"哪几家已存"（按供应商显示掩码）
+    safe.tts = {
+      ...(safe.tts || {}),
+      keyServices: ttsKeyServices(cfgNow.tts),
+      hasApiKey: Boolean(cfgNow.tts?.apiKey || Object.keys(cfgNow.tts?.keys || {}).length),
+      currentService: ttsServiceOf(cfgNow.tts)?.id || ''
+    };
     return safe;
   }
 
@@ -2407,6 +2443,36 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         // 控制台保存总会带上显式的 provider（来自服务预设）：等于用户确认过这一家，
         // 清掉"升级默认值"的标记，让环境变量 Key 恢复生效（2026-09-26 审查 P2）
         if (patch?.asr && typeof patch.asr === 'object') delete patch.asr.providerDefaulted;
+        // tts 的 Key 与 asr 同款语义：留空/掩码占位 = 保持原值（掩码回写会把真 Key 冲掉）
+        if (patch?.tts && typeof patch.tts === 'object') {
+          // 服务端派生位（GET 时下发的布尔/归属口径）：不回写配置（2026-09-29 审查 P2，
+          // 之前 keyServices/currentService 会随保存被持久化进 config.json）
+          delete patch.tts.hasApiKey;
+          delete patch.tts.keyServices;
+          delete patch.tts.currentService;
+          // 前端只送"这一家新填的 Key"（apiKeyInput）与当前服务：合并进 keys 映射，
+          // 绝不接受整份 keys 覆盖（那会把别家的 Key 冲掉）。空/掩码 = 保持不变。
+          const keyInput = String(patch.tts.apiKeyInput ?? '').trim();
+          delete patch.tts.apiKeyInput;
+          delete patch.tts.keys;
+          // Key 归属 = UI 选中那家（service），地址反查只作兜底。之前只按地址认：
+          // 「自定义/自建」的地址不在预设表里 → 落到 provider 字符串 'openai'，
+          // 运行时又读不到 keys['openai']（2026-09-29 审查 P0）
+          const uiService = ttsServiceById(String(patch.tts.service || '').trim())?.id || '';
+          delete patch.tts.service;
+          const svc = ttsServiceOfBaseUrl(patch.tts.baseUrl || cfgNow.tts?.baseUrl || '');
+          const targetId = svc?.id || uiService || String(patch.tts.provider || cfgNow.tts?.provider || 'openai');
+          if (keyInput && keyInput !== '******') {
+            patch.tts.keys = { ...(cfgNow.tts?.keys || {}), [targetId]: keyInput };
+          }
+          // 老客户端/手写配置不带 provider：按地址反查预设，免得火山/MiniMax 的地址走了 openai 兼容实现
+          if (!patch.tts.provider && patch.tts.baseUrl) {
+            const svc = ttsServiceOfBaseUrl(patch.tts.baseUrl);
+            if (svc?.provider) patch.tts.provider = svc.provider;
+          }
+          const submittedKey = String(patch.tts.apiKey ?? '').trim();
+          if (!submittedKey || submittedKey === '******') delete patch.tts.apiKey;
+        }
         // 人设真的改了就打一个时间戳：提示词据此在接下来 24 小时里提醒模型
         // "历史里的旧口癖/自称不作数"（换卡后它会被自己的旧发言锚住，实测能锚一天以上）
         if (patch?.persona && typeof patch.persona === 'object') {
@@ -2455,6 +2521,9 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         }
         if (JSON.stringify(next.qzoneInteractions || {}) !== previousQzoneInteractions) {
           qzoneInteractions.reconfigure();
+        }
+        if (JSON.stringify(next.groupDigest || {}) !== JSON.stringify(cfgNow.groupDigest || {})) {
+          groupDigest.reconfigure();
         }
         if (JSON.stringify(next.incidentPilot || {}) !== previousIncidentPilot) {
           try {
@@ -2525,6 +2594,92 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
 
       if (pathname === '/api/qzone-interactions/status' && method === 'GET') {
         return json(res, 200, qzoneInteractions.status());
+      }
+
+      if (pathname === '/api/group-game/status' && method === 'GET') {
+        return json(res, 200, groupGame.status());
+      }
+
+      if (pathname === '/api/group-digest/status' && method === 'GET') {
+        return json(res, 200, groupDigest.status());
+      }
+
+      if (pathname === '/api/group-digest/run' && method === 'POST') {
+        try {
+          const result = await groupDigest.runOnce();
+          return json(res, 200, { ok: true, ...result });
+        } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) });
+        }
+      }
+
+      if (pathname === '/api/tts/key' && method === 'GET') {
+        // 显示当前这家的明文 Key（与模型 API 的「显示密钥」同一道守卫：本机控制台或带令牌）
+        if (!keyEndpointAllowed(req)) return json(res, 403, { ok: false, error: '只能在控制台里查看密钥' });
+        const cfgNow = getConfig();
+        const svcId = String(new URL(req.url, 'http://127.0.0.1').searchParams.get('service') || '');
+        const key = ttsKeyFor(cfgNow.tts, svcId);
+        return json(res, 200, { ok: true, apiKey: key });
+      }
+
+      if (pathname === '/api/tts/presets' && method === 'GET') {
+        return json(res, 200, { ok: true, services: TTS_SERVICES });
+      }
+
+      if (pathname === '/api/tts/models' && method === 'POST') {
+        try {
+          const body = await readBody(req);
+          const cfgNow = getConfig();
+          const provider = String(body.provider || cfgNow.tts?.provider || 'openai').trim().toLowerCase();
+          if (provider !== 'openai') {
+            // 火山（v1/v3）与 MiniMax 没有"列模型"的公开接口：模型名/音色按服务商文档内置。
+            // 这里如实说明该填什么，而不是回空列表让界面显示"共 0 个"（2026-09-28 用户实测反馈）。
+            const svc = ttsServiceOfBaseUrl(body.baseUrl || cfgNow.tts?.baseUrl || '')
+              || TTS_SERVICES.find((s) => s.provider === provider);
+            return json(res, 200, {
+              ok: true,
+              models: [],
+              ttsOnly: false,
+              unsupported: true,
+              total: 0,
+              note: svc?.note || '这一家没有可拉的模型列表：按服务商文档填模型名与音色。'
+            });
+          }
+          const baseUrl = String(body.baseUrl || cfgNow.tts?.baseUrl || '').trim();
+          const submitted = String(body.apiKey ?? '').trim();
+          const norm = (v) => String(v || '').trim().replace(/[/]+$/, '').toLowerCase();
+          const apiKey = (submitted && submitted !== '******')
+            ? submitted
+            : (norm(baseUrl) === norm(cfgNow.tts?.baseUrl) ? ttsKeyFor(cfgNow.tts) : '');
+          const all = await fetchModelsFrom(baseUrl, apiKey);
+          const isTtsModel = (id) => {
+            const name = String(id);
+            if (/whisper|sensevoice|asr|recognition|stt|transcri/i.test(name)) return false;   // ASR 不是 TTS
+            return /tts|text.?to.?speech|speech.?synth|cosyvoice|moss|voice/i.test(name);
+          };
+          const models = all.filter(isTtsModel).sort((a, b) => a.localeCompare(b));
+          return json(res, 200, {
+            ok: true,
+            models: models.length ? models : [...all].sort((a, b) => a.localeCompare(b)),
+            ttsOnly: models.length > 0,
+            total: all.length
+          });
+        } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) });
+        }
+      }
+
+      if (pathname === '/api/tts/test' && method === 'POST') {
+        try {
+          const body = await readBody(req);
+          const text = String(body.text ?? '').trim().slice(0, 120) || '你好呀，我是群里的小鲸鱼，这是一条试听。';
+          const cfgNow = getConfig();
+          if (cfgNow.tts?.enabled !== true) return json(res, 400, { ok: false, error: '语音回复未启用（勾上并保存后再试听）' });
+          const { buffer, format } = await synthesizeSpeech({ cfg: cfgNow.tts, text });
+          return json(res, 200, { ok: true, format, audio: buffer.toString('base64') });
+        } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) });
+        }
       }
 
       if (pathname === '/api/identity-pilot/status' && method === 'GET') {
@@ -3555,8 +3710,11 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     }
     refreshTimeControl();
     orchestrator.startRecoveryLoop();
+    orchestrator.startReminderLoop();
     if (getConfig().dailyMoments?.enabled) dailyMoments.start();
     if (getConfig().qzoneInteractions?.enabled) qzoneInteractions.start();
+    if (getConfig().groupDigest?.enabled) groupDigest.start();
+    groupGame.startLoop();   // 内部按配置判断是否推进；重启后从磁盘恢复进行中的局
     if (getConfig().proactive?.enabled) orchestrator.startProactiveLoop();
     orchestrator.startScheduledWakeTicker();
     autoUpdate.start();

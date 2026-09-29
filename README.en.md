@@ -36,6 +36,12 @@ mode and its resolution are recorded in [CHANGES](docs/CHANGES.md).
   fallback parsing for inline tool calls.
 - **Sticker system** — auto-collect with QQ favourites first, fuzzy lookup fallback, sync guard so
   an API failure cannot wipe the local library.
+- **Games & reminders** — hosts mini-games: stateless ones run straight from the prompt (word chain,
+  guess-the-number, 20 questions, truth-or-dare), with `dice` plus the group member list for rolls, draws
+  and random picks; a **state-machine host** covers turn-based multiplayer games (number bomb,
+  who-is-the-spy — turns, vote counting and verdicts live in code, the spy's word travels by private
+  message only and never enters the model context; experimental, off by default). "Remind me at X"
+  becomes a **persistent reminder** (survives restarts) delivered in its own voice when the time comes.
 - **Proactive talk** — three independently switchable links (cold-topic opener / follow-up
   nudge when nobody answers / model-scheduled wake-up), multiple active windows, interval
   guard, skip-reason logging, catch-up for messages missed during restarts.
@@ -49,7 +55,8 @@ mode and its resolution are recorded in [CHANGES](docs/CHANGES.md).
   **keyless local whisper.cpp** (offline, free, one click to install or fully remove in the
   console, or `node scripts/install-asr-local.mjs`). QQ voice (SILK) is decoded locally — no
   protocol-side transcoding; videos also get a 2x2 frame strip for the vision model plus separate
-  soundtrack transcription, so it sees and hears. ASR keys are configured separately from search;
+  soundtrack transcription, so it sees and hears. With an OpenAI-compatible TTS endpoint configured (off by default) it can also reply by voice.
+  ASR keys are configured separately from search;
   an hourly quota gate applies, and muted-group pre-checks report the reason instead of sending
   blindly.
 
@@ -441,7 +448,7 @@ effective value for every item.
 | Global impressions injected (chars) | ≤3000 | ≤1500 |
 | Sticker list in the prompt | ≤5 | ≤3 |
 
-Context: the **fixed floor** of every model call (system prompt + 22-24 tool schemas depending on toggles) is about
+Context: the **fixed floor** of every model call (system prompt + 26-29 tool schemas depending on toggles) is about
 12k-15k tokens and cannot be changed by settings. Measured over 7 days on a live instance
 (867 calls / 18.4M tokens): input is 98.8% of all tokens, and the **uncached** part of the input
 accounts for 76% of the cost — so saving tokens means reading less history, running fewer rounds

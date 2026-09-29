@@ -2978,6 +2978,36 @@ input[type=checkbox], input[type=radio] {
 .checkbox-row label { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
 .experimental-settings .checkbox-row { flex-wrap: nowrap; }
 
+/* ── 群多选列表（群游戏「允许开局的群」/ 群日报「发到哪些群」）──
+   行标签以前借用 .checkbox-row，但它在 .field 里会被 `.field label`（0,1,1）压成
+   字段标题样式（display:block / 12px / muted），复选框与群名之间没有间距、基线还错位，
+   看着就是"勾选框和群名重叠"。改用专用类（.group-checklist .group-checklist-row，
+   0,2,0）显式做成 flex 行，并补上群多起来时的筛选 / 全选 / 滚动。 */
+.group-checklist-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.group-checklist-bar input[type=search] {
+  flex: 1 1 150px; width: auto; min-width: 110px; height: 30px; padding: 0 10px;
+  border-radius: 8px; background: var(--bg-3); font-size: 12.5px;
+}
+.group-checklist-bar .btn { height: 30px; }
+.group-checklist-count { margin-left: auto; font-size: 12px; white-space: nowrap; }
+.group-checklist-list {
+  max-height: 168px; overflow-y: auto; padding: 4px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--bg-2);
+}
+.group-checklist .group-checklist-row {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0; padding: 4px 8px; border-radius: 8px;
+  font-size: 13px; font-weight: 400; letter-spacing: normal; color: var(--text);
+  cursor: pointer;
+}
+.group-checklist .group-checklist-row:hover { background: var(--bg-3); }
+.group-checklist .group-checklist-row.is-hidden { display: none; }
+.group-checklist .group-checklist-row:has(input:checked) { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.group-checklist-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-checklist-id { flex: 0 0 auto; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.group-checklist-stale { flex: 0 0 auto; font-size: 11.5px; color: var(--orange); }
+.group-checklist-empty { margin-top: 4px; font-size: 12px; }
+
 /* ── 概览数字（当前版本 / 目标版本 / 上次检查 …）── */
 .update-deploy-summary {
   display: grid;

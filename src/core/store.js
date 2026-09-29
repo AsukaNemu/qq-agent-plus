@@ -66,7 +66,13 @@ export class ChatStore {
     this.maxPerChat = Math.max(0, Number(maxPerChat) || 0);
     this.transactionDepth = 0;
     fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-    this.db = new DatabaseSync(filename || path.join(dataDir, 'messages.sqlite'));
+    // filename 只用于测试隔离：给相对名时按 dataDir 解析，避免落到进程 CWD（2026-09-28 踩过：
+    // 相对名把测试库建进了仓库根目录，残留文件让后续运行读到旧行、排查绕了一大圈）。
+    this.db = new DatabaseSync(
+      filename
+        ? (path.isAbsolute(filename) ? filename : path.join(dataDir, filename))
+        : path.join(dataDir, 'messages.sqlite')
+    );
     this.db.exec(`
       PRAGMA journal_mode=WAL;
       PRAGMA synchronous=FULL;
@@ -867,10 +873,14 @@ export class ChatStore {
     };
   }
 
-  recent(chatKey, { limit = 80, offset = 0, includeSelf = true, readOnly = false } = {}) {
+  recent(chatKey, { limit = 80, offset = 0, includeSelf = true, readOnly = false, afterId = 0 } = {}) {
+    // afterId：只取 id 更大的消息（增量消费）。固定"最新 N 条"的窗口在积压超过 N 时
+    // 会静默丢掉最老的那些——游戏 tick 丢的就是票（2026-09-29 审查 P2）
     return this.db.prepare(`SELECT * FROM messages WHERE chat_key=? ${includeSelf ? '' : 'AND self=0'}
-      ${readOnly ? "AND state='acked'" : ''} ORDER BY id DESC LIMIT ? OFFSET ?`)
-      .all(chatKey, Math.max(1, Number(limit) || 1), Math.max(0, Number(offset) || 0)).reverse().map(entry);
+      ${readOnly ? "AND state='acked'" : ''}
+      ${Number(afterId) > 0 ? 'AND id > ?' : ''}
+      ORDER BY id DESC LIMIT ? OFFSET ?`)
+      .all(chatKey, ...(Number(afterId) > 0 ? [Number(afterId)] : []), Math.max(1, Number(limit) || 1), Math.max(0, Number(offset) || 0)).reverse().map(entry);
   }
 
   findByMid(chatKey, mid) {

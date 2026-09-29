@@ -177,6 +177,27 @@ export const DEFAULT_CONFIG = {
     localBin: '',             // 本机转写可执行文件，留空按 whisper-cli → whisper-cpp → main 找
     localModel: ''            // 本机转写的模型文件路径（如 ggml-base.bin）
   },
+  // 语音回复（与 asr 对称：OpenAI 兼容的 /audio/speech，如硅基流动/自建网关）：默认关。
+  // 开启前填好 baseUrl 与 model（voice 按服务商文档填）。
+  tts: {
+    enabled: false,
+    provider: 'openai',       // openai（兼容 /audio/speech）/ volc（火山 v1）/ doubao（豆包语音合成 2.0，v3）/ minimax（T2A v2）
+    baseUrl: '',
+    apiKey: '',
+    appId: '',                // 火山 v1：语音技术控制台的 AppID（纯数字）；豆包 2.0 可不填
+    cluster: '',              // 火山 v1：cluster（默认 volcano_tts；**不是音色**）
+    resourceId: '',           // 豆包 2.0：资源 ID（默认 seed-tts-2.0；1.0 音色要 seed-tts-1.0）
+    groupId: '',              // MiniMax：账户里的 GroupId
+    // 按服务分别存 Key（切预设不串用；切回来还能看到已存的那把）：
+    //   { "siliconflow": "sk-…", "volc": "<access token>", "doubao": "<api key>", "minimax": "…" }
+    keys: {},
+    model: '',
+    voice: '',
+    format: 'mp3',
+    speed: 1,                 // 语速（0.25~4；实测硅基流动真实生效，聊天语速 1.05~1.15 更活）
+    gain: 0,                  // 音量增益 dB（-10~10；觉得发闷可以 +2~+4）
+    timeoutMs: 30000
+  },
   // 安全例外（默认全部关闭）
   security: {
     allowPrivateImageHosts: false           // true 时图片下载允许内网地址（仅本地测试/自建图床）
@@ -271,6 +292,22 @@ export const DEFAULT_CONFIG = {
     repository: 'https://github.com/sakurawwwxh/qq-agent-plus.git',
     branch: 'main',
     intervalHours: 6
+  },
+  // 群日报：每天定时把"昨天群里聊了啥"汇总成一条发到指定群。
+  // 白名单制（chats 为空则不发任何群）；默认关。
+  groupDigest: {
+    enabled: false,
+    time: '09:30',
+    chats: [],
+    maxChars: 300
+  },
+  // 群游戏（实验性，默认关）：白名单制、每群同时一局；私聊发词默认关闭（风控考虑）。
+  groupGame: {
+    enabled: false,
+    chats: [],
+    allowPrivateInvite: false,
+    maxDurationMin: 60,
+    dailyLimitPerChat: 6
   },
   // 每日群聊记忆总结与 QQ 空间动态
   dailyMoments: {

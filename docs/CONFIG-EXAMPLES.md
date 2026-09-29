@@ -195,6 +195,112 @@
   随依赖安装）在本地解成 16k 单声道 PCM，再交给所选服务转写。协议端的 `get_record` 不会替你转码
   （实测 NapCat：传 `out_format=mp3/wav` 仍返回同一个原始 URL），所以这一步必须自己做。
 
+## tts：语音回复（可选，默认关闭）
+
+```json
+{
+  "tts": {
+    "enabled": true,
+    "provider": "openai",
+    "baseUrl": "https://api.siliconflow.cn/v1",
+    "apiKey": "<语音合成的 Key>",
+    "model": "FunAudioLLM/CosyVoice2-0.5B",
+    "voice": "FunAudioLLM/CosyVoice2-0.5B:anna",
+    "speed": 1.1,
+    "gain": 0
+  }
+}
+```
+
+- **四种适配器**（按 `provider` 分发，`src/llm/tts.js`）：
+  `openai`（兼容 `POST {baseUrl}/audio/speech`，硅基流动/OpenAI/自建，**已实测**）、
+  `volc`（火山引擎语音合成 **v1** HTTP，需要数字 `appId` + `apiKey`=Access Token，`cluster` 固定 `volcano_tts`，
+  音色如 `BV001_streaming`；老接口，账号没开通 v1 服务时会固定报 3001）、
+  `doubao`（火山引擎**豆包大模型语音合成 2.0**，`https://openspeech.bytedance.com/api/v3/tts/unidirectional`，
+  只填 `apiKey`（控制台密钥，走 `X-Api-Key`）与 `voice`，`resourceId` 默认 `seed-tts-2.0`；
+  **2026-09-28 用真实账号实测**：音频/语速/音量/格式/错误码都核过，自然度明显高于 v1 与硅基流动）、
+  `minimax`（T2A v2，需要 `apiKey` + `groupId`，音色如 `female-shaonv`，音频是 hex 编码、适配器已处理）。
+  volc / minimax 按官方文档实现但机器上没凭据、未实测：填好凭据点控制台「试听」即可验证，报错会把人话原因（含火山错误码含义）带出来。
+
+豆包 2.0 的写法（当前最推荐的音质）：
+
+```json
+{
+  "tts": {
+    "enabled": true,
+    "provider": "doubao",
+    "baseUrl": "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
+    "keys": { "doubao": "<语音技术控制台里的密钥>" },
+    "resourceId": "seed-tts-2.0",
+    "voice": "zh_female_vv_uranus_bigtts",
+    "speed": 1.1,
+    "gain": 2
+  }
+}
+```
+
+- 与 `asr` 对称但**默认关**。
+- **服务预设**：控制台「设置 → 语音回复」有预设下拉（硅基流动 / OpenAI 官方 / 火山 v1 / 豆包 2.0 / MiniMax / 自定义），
+  选中会把地址、资源 ID 填好，并给出这家的常用模型与音色候选；OpenAI 兼容那几家还能点「获取模型列表」从官网拉全量。
+  音色没有可查接口（硅基流动与 OpenAI 都实测 404），只能内置——表在 `src/llm/tts-presets.js`。
+  火山/豆包/MiniMax **没有模型列表接口**，界面上会直接说明该填什么（不再显示"共 0 个"）。
+- **火山的两套凭据不一样，别混**：v1 要「应用管理」里的数字 AppID + Access Token + `cluster=volcano_tts`；
+  豆包 2.0 只要控制台密钥（`X-Api-Key`），**不需要 AppID / Cluster**，但要多填一个 `resourceId`。
+  常见填错：把资源 ID（`seed-tts-2.0`）填进 AppID、把音色名（`zh_*_uranus_bigtts` / `ICL_uranus_*`）填进 Cluster ——
+  控制台会当场提示，服务端报错也会说明（`3001` = AppID/Token 不对；`45000010` = Key 不对；`45000030` = 没开通该资源；
+  `55000000` = 音色与资源 ID 不匹配）。
+- 豆包 2.0 的音色表 = **火山官方 2.0 全量清单（102 个，按控制台分类分组）**，控制台「候选音色」里的分类与火山控制台的音色列表一一对应；
+  2026-09-28 在真实账号上把这 102 个逐个打过一遍：中文 99 个全部可用，3 个英文音色该账号未开通（会用 `resource not granted` 说明，别的账号可能已开通）。
+  想用自己克隆的音色（形如 `ICL_uranus_zh_female_xxx_tob`）直接手填进「音色」即可 —— 界面不会自动替换不在表里的音色。
+- `voice`：硅基流动是「模型id:音色」（`…:anna / bella / claire / diana / benjamin / alex / charles / david`），OpenAI 官方是裸音色名（`alloy / nova / …`），火山系是音色 ID。
+- `speed`（0.25~4）与 `gain`（-10~10 dB）：本机实测**真实生效**（同一句 0.7→8.1s、1.3→4.7s）；聊天语速 1.05~1.15 更活，觉得闷可以把 gain 提 2~4。
+- 平淡的另一半在**文本**：合成内容要写成口语（语气词 + 「——」「……」「？」带停顿），工具描述里已这样教模型。
+- 开启后模型多一个 `send_voice` 工具：短句 1~3 句、≤120 字最自然；提示词只会在开启时才教它用。
+- 协议端需要支持 `record` 消息段；不支持时发送会失败并提示改用文字（不会反复重试）。
+- 与 `asr` 的 Key 分开配置（听和说是两个服务是常态）。
+
+## groupDigest：群日报（可选，默认关闭）
+
+```json
+{
+  "groupDigest": {
+    "enabled": true,
+    "time": "09:30",
+    "chats": ["group:123456"],
+    "maxChars": 300
+  }
+}
+```
+
+- 每天到点把「过去 24 小时这个群聊了什么」汇总成一条，用机器人的人设口吻发到群里（只发白名单里的群）。
+- 少于 5 条消息的群当天跳过；生成走 `purpose:'write'`，吃对应思考档位与省 Token 上限。
+- 手动触发/查看状态：`POST /api/group-digest/run`、`GET /api/group-digest/status`。
+
+## groupGame：群游戏（实验性，默认关闭）
+
+```json
+{
+  "groupGame": {
+    "enabled": true,
+    "chats": ["group:123456"],
+    "allowPrivateInvite": true,
+    "dailyLimitPerChat": 6,
+    "maxDurationMin": 60
+  }
+}
+```
+
+- `maxDurationMin` 是单局时长上限，**与游戏自身的上限取较小值**（数字炸弹 20 分钟、谁是卧底 45 分钟）；
+  设得比它俩大不会延长。到点引擎自动结算。
+- 开局名单缺省=最近发过言的群友（上限 `maxPlayers`）。模型可以用 `group_game` 的 `players` 参数
+  锁定名单，传 QQ 号或**群名片**都行（名片要一字不差，且必须最近发过言——这是防提示注入把词发给任意 QQ 的硬门）。
+
+- 主持人由模型担任（氛围/解说），**轮次、计票与判定由状态机负责**（`src/features/group-game.js`）：
+  数字炸弹（1~100 猜数，谁踩中谁输）、谁是卧底（4~10 人，词只走私聊，公开摘要不含身份）。
+- 白名单制、每群同时一局、每天每群有开局上限；进行中的局落盘 `data/games.json`，重启可恢复，超时自动收尾。
+- `allowPrivateInvite`：卧底发词必须开（只发给报名者、每人每局一条、失败不重试）；默认关。
+- 控制台入口：设置 → 实验功能 → 「群游戏」。开局：群里说「来个数字炸弹 / 谁是卧底」。
+
 ## pacing：自主节奏（实验性，默认关闭）
 
 ```json

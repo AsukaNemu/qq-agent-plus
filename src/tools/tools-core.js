@@ -5,7 +5,10 @@
 // 工具命名去掉了 qq_ 前缀（更短，省 token）。
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { getConfig } from '../core/config.js';
+import { nextAtFromHHMM } from '../core/reminders.js';
+import { synthesizeSpeech, ttsConfigured } from '../llm/tts.js';
 
 // 消息 id 归一化：模型常把聊天记录里的 "#123" 连 # 一起传进来，而 OneBot 只认纯数字 id。
 // store.js 里有一份同名函数但没导出，所以这里保留 tools 层自用的一份。
@@ -653,6 +656,182 @@ export function buildToolDefs() {
             recentCount: m.count
           }))
         });
+      }
+    },
+    {
+      name: 'dice',
+      description: '掷骰子/随机：骰子（默认 1 个 6 面）、区间整数、抛硬币、从名单里随机抽一个。用于游戏主持、抽签、随机点名、公平做决定。结果由系统随机数生成，可如实转述。',
+      parameters: {
+        type: 'object',
+        properties: {
+          kind: { type: 'string', enum: ['dice', 'number', 'coin', 'pick'], description: 'dice=掷骰子；number=区间整数；coin=抛硬币；pick=从 items 抽一个' },
+          sides: { type: 'integer', description: '骰子面数（默认 6，2~1000）' },
+          count: { type: 'integer', description: '骰子个数（默认 1，1~10）' },
+          min: { type: 'integer', description: 'number 用：最小值（默认 1）' },
+          max: { type: 'integer', description: 'number 用：最大值（默认 100）' },
+          items: { type: 'array', items: { type: 'string' }, description: 'pick 用：候选名单（2~50 个）' }
+        },
+        required: ['kind']
+      },
+      async execute(_ctx, args) {
+        const roll = (n) => crypto.randomInt(0, n);
+        const kind = String(args.kind || '');
+        if (kind === 'dice') {
+          const sides = Math.min(1000, Math.max(2, Number(args.sides) || 6));
+          const count = Math.min(10, Math.max(1, Number(args.count) || 1));
+          const rolls = Array.from({ length: count }, () => 1 + roll(sides));
+          const total = rolls.reduce((a, b) => a + b, 0);
+          return ok({ kind, sides, count, rolls, total, text: count === 1 ? `🎲 ${rolls[0]}` : `🎲 ${rolls.join(' + ')} = ${total}` });
+        }
+        if (kind === 'coin') return ok({ kind, result: roll(2) === 0 ? '正面' : '反面' });
+        if (kind === 'pick') {
+          const items = (Array.isArray(args.items) ? args.items : [])
+            .map((x) => sanitizeUserText(String(x ?? '').trim())).filter(Boolean).slice(0, 50);
+          if (items.length < 2) return err('pick 需要 2~50 个候选项（items 数组）');
+          const picked = items[roll(items.length)];
+          return ok({ kind, picked, candidates: items.length });
+        }
+        const min = Math.trunc(Number(args.min) || 1);
+        const max = Math.trunc(Number(args.max) || 100);
+        if (max <= min) return err('max 必须大于 min');
+        return ok({ kind: 'number', min, max, result: min + roll(max - min + 1) });
+      }
+    },
+    {
+      name: 'get_group_member_list',
+      description: '获取本群完整成员名单（QQ 号 / 群名片 / 角色），用于随机点名、找人、统计群规模。名单可能偏旧（协议端缓存）；大群按角色排序后只返回前 limit 个。',
+      parameters: {
+        type: 'object',
+        properties: { limit: { type: 'integer', description: '最多返回多少（默认 50，最大 200）' } }
+      },
+      async execute(ctx, args) {
+        if (ctx.kind !== 'group') return err('只有群聊才有成员名单');
+        const limit = Math.min(200, Math.max(1, Number(args.limit) || 50));
+        let list = null;
+        try {
+          list = await ctx.onebot.getGroupMemberList(ctx.chatId);
+        } catch (error) {
+          return err(`获取成员名单失败：${String(error?.message ?? error).slice(0, 120)}（协议端可能不支持该接口）`);
+        }
+        const rank = { owner: 0, admin: 1, member: 2 };
+        const mapped = (Array.isArray(list) ? list : []).map((m) => ({
+          userId: String(m?.user_id ?? m?.userId ?? ''),
+          name: sanitizeUserText(String(m?.card || m?.nickname || m?.name || '')),
+          role: String(m?.role || 'member')
+        })).filter((m) => /^\d{1,15}$/.test(m.userId));
+        if (!mapped.length) return err('协议端返回了空名单');
+        mapped.sort((a, b) => (rank[a.role] ?? 3) - (rank[b.role] ?? 3));
+        return ok({ total: mapped.length, returned: Math.min(limit, mapped.length), members: mapped.slice(0, limit) });
+      }
+    },
+    {
+      name: 'remind',
+      description: '给当前会话设一个定时提醒（到点你会被唤醒，用你的口吻把这件事说出来）；也可查询/取消。minutes 或 HH:MM 二选一，HH:MM 按北京时间、已过则算明天。这是给别人设的提醒（重启后依然有效），与给自己排开口时机的 schedule_wake 不同。',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['add', 'list', 'cancel'], description: 'add=新增；list=查看本会话待触发；cancel=取消（不传 id 取消最近一条）' },
+          minutes: { type: 'number', description: 'add 用：多少分钟后（1~43200）' },
+          at: { type: 'string', description: 'add 用：绝对时间 HH:MM（北京时间，已过则算明天）' },
+          text: { type: 'string', description: 'add 用：提醒内容（必填，≤200 字）' },
+          id: { type: 'string', description: 'cancel 用：提醒 id（list 里可见）' }
+        },
+        required: ['action']
+      },
+      async execute(ctx, args) {
+        const store = ctx.reminders;
+        if (!store) return err('当前环境不支持提醒');
+        const action = String(args.action || '');
+        // 提醒的绝对时间按项目统一口径（Asia/Shanghai）格式化：服务器时区不同时，
+        // "明天 09:30" 会被格式化成另一个钟点误导模型（2026-09-29 审查 P2）
+        const fmt = (ts) => new Date(ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+        if (action === 'list') {
+          const items = store.list(ctx.chatKey);
+          if (!items.length) return ok({ pending: 0, hint: '本会话没有待触发的提醒' });
+          return ok({ pending: items.length, reminders: items.map((it) => ({ id: it.id, at: fmt(it.at), text: it.text })) });
+        }
+        if (action === 'cancel') {
+          const hit = store.cancel({ id: String(args.id || ''), chatKey: ctx.chatKey });
+          if (!hit) return err('没找到对应的待触发提醒（可用 list 查看 id）');
+          return ok({ canceled: true, text: hit.text, at: fmt(hit.at) });
+        }
+        let at = null;
+        if (args.at !== undefined && String(args.at).trim() !== '') {
+          at = nextAtFromHHMM(String(args.at));
+          if (at === null) return err('at 需要是 HH:MM（24 小时制，如 09:30）');
+        } else {
+          const m = Number(args.minutes);
+          if (!Number.isFinite(m) || m < 1 || m > 30 * 24 * 60) return err('minutes 需要是 1~43200 之间的数字（最多 30 天）');
+          at = Date.now() + Math.round(m) * 60000;
+        }
+        try {
+          const { id } = store.add({ chatKey: ctx.chatKey, at, text: String(args.text ?? ''), createdBy: ctx.selfNickname || '' });
+          return ok({ created: true, id, at: fmt(at), note: '到点你会被唤醒并知道该提醒什么；不需要再回复这条结果。' });
+        } catch (error) {
+          return err(String(error?.message ?? error));
+        }
+      }
+    },
+    {
+      name: 'group_game',
+      description: '主持群游戏：action=start 开局（game 传 number-bomb 数字炸弹 / undercover 谁是卧底）、stop 结束、status 查看。开局后群友用普通发言参与，轮次、计票与判定都由系统负责，你只负责氛围与解说；**绝不要提到谁的词或谁的身份**。',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['start', 'stop', 'status'], description: 'start=开局；stop=结束；status=看当前局' },
+          game: { type: 'string', description: 'start 用：number-bomb（数字炸弹）/ undercover（谁是卧底）' },
+          players: { type: 'array', items: { type: 'string' }, description: 'start 可选：指定参与者，传 QQ 号或**群名片**都行（系统只认最近发过言的群友，名片要一字不差）。想锁定"就这几个人玩"时必须传，否则最近发过言的所有人都会进局' }
+        },
+        required: ['action']
+      },
+      async execute(ctx, args) {
+        const mgr = ctx.games;
+        if (!mgr) return err('当前环境不支持群游戏');
+        if (ctx.kind !== 'group') return err('群游戏只在群聊里开');
+        const action = String(args.action || '');
+        if (action === 'status') return ok(mgr.status(ctx.chatKey));
+        if (action === 'stop') {
+          const r = await mgr.stop(ctx.chatKey, '主持人叫停');
+          return r.ok ? ok({ stopped: true }) : err(r.error);
+        }
+        const players = Array.isArray(args.players) && args.players.length
+          ? args.players.map((x) => ({ userId: String(x), name: String(x) }))
+          : null;
+        const r = await mgr.start({ chatKey: ctx.chatKey, gameId: String(args.game || ''), players });
+        return r.ok ? ok({ started: true, note: `${r.text}。接下来顺着群友的发言解说着走，别替他们玩。` }) : err(r.error);
+      }
+    },
+    {
+      name: 'send_voice',
+      description: '把一段文字合成语音发到当前会话（想"说"而不是"打"时用）。只适合短句 1~3 句、≤120 字；**必须写成口语**：带语气词和标点（「哎——」「不是吧？」「……行吧行吧」），破折号/省略号/问号能带出停顿与起伏，书面句会念得很平、像播报。别整段朗读、别频繁用（平时打字更像真人）。',
+      parameters: {
+        type: 'object',
+        properties: { text: { type: 'string', description: '要说的内容（≤200 字，口语短句）' } },
+        required: ['text']
+      },
+      async execute(ctx, args) {
+        const cfg = getConfig();
+        if (!ttsConfigured(cfg)) return err('语音回复未启用或未配置（设置 → 语音回复）');
+        const text = String(args.text ?? '').trim();
+        if (!text) return err('text 不能为空');
+        if (text.length > 200) return err('语音内容太长了（≤200 字），说短一点');
+        let audio = null;
+        try {
+          audio = await synthesizeSpeech({ cfg: cfg.tts, text, signal: ctx.signal });
+        } catch (error) {
+          return err(String(error?.message ?? error));
+        }
+        try {
+          const seconds = Math.max(1, Math.round(text.length / 4));
+          await ctx.sender.voice(ctx.chatKey, {
+            file: `base64://${audio.buffer.toString('base64')}`,
+            seconds,
+            label: text.slice(0, 40)
+          }, { runId: ctx.session?.leaseId, signal: ctx.signal });
+          return ok({ sent: true, seconds, note: '语音已发出；不需要再回复这条结果。' });
+        } catch (error) {
+          return err(`语音发送失败：${String(error?.message ?? error).slice(0, 120)}（若协议端不支持 record 段，请改用 send_message）`);
+        }
       }
     },
     {

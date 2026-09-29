@@ -140,7 +140,12 @@ test('提示词里的每个段头都能被弱化（清洗白名单不许落后�
     'src/features/daily-moments.js',
     'src/pilots/experimental-tool-scheduler.js',
     // 工具描述也进模型上下文：send_sticker 的说明里就有【可用表情包】
-    'src/tools/tools-core.js'
+    'src/tools/tools-core.js',
+    // 2026-09-28：编排器（定时提醒/游戏唤醒的 note）、群游戏与群日报都会往上下文塞段头，
+    // 漏扫一个，新段头就可能在白名单之外被群友伪造
+    'src/core/orchestrator.js',
+    'src/features/group-game.js',
+    'src/features/group-digest.js'
   ];
   // 只豁免"我们自己生成、且不授予任何权限"的普通标记
   const ALLOW = new Set(['【拍一拍】', '【图片】', '【合并转发聊天记录】']);

@@ -19,6 +19,12 @@ function faceNameOf(id) {
 
 const RECONNECT_MIN_MS = 3000;
 const RECONNECT_MAX_MS = 30000;
+// 发送超时：文本类 15 秒够用；**语音/图片这类要协议端转码或上传的段**很慢 ——
+// 2026-09-29 实测一条 38KB（7 秒）的 mp3 走 send_private_msg 要 16.4 秒，正好卡在 15 秒
+// 超时线上，于是模型发了语音却被记成 unknown（超时≠没发出去，但也确实可能没发出去）。
+// 给媒体段留足余量，宁可等久一点也不要"发没发出去说不清"。
+const TEXT_TIMEOUT_MS = 15000;
+const MEDIA_TIMEOUT_MS = 60000;
 
 export class OneBotActionError extends Error {
   constructor(message, {
@@ -173,7 +179,7 @@ export class OneBotClient {
   }
 
   /** OneBot HTTP API（发送与查询都走这里）。 */
-  async call(action, params = {}, timeoutMs = 15000, signal) {
+  async call(action, params = {}, timeoutMs = TEXT_TIMEOUT_MS, signal) {
     const res = await fetch(`${this.httpUrl}/${action}`, {
       method: 'POST',
       headers: {
@@ -235,12 +241,12 @@ export class OneBotClient {
   }
 
   /** 发送消息段。返回 OneBot 响应 data（含 message_id）。 */
-  async sendSegments(kind, id, segments, signal) {
+  async sendSegments(kind, id, segments, signal, { timeoutMs = TEXT_TIMEOUT_MS } = {}) {
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
     const params = kind === 'private'
       ? { user_id: Number(id), message: segments }
       : { group_id: Number(id), message: segments };
-    return this.call(action, params, 15000, signal);
+    return this.call(action, params, timeoutMs, signal);
   }
 
   async sendText(kind, id, text, { replyToMessageId = null, atUserId = null, signal } = {}) {
@@ -292,7 +298,7 @@ export class OneBotClient {
       segments.push({ type: 'at', data: { qq: at } });
     }
     segments.push({ type: 'image', data: { file: String(imageUrl) } });
-    return this.sendSegments(kind, id, segments, signal);
+    return this.sendSegments(kind, id, segments, signal, { timeoutMs: MEDIA_TIMEOUT_MS });
   }
 
   async sendFace(kind, id, faceId, { replyToMessageId = null, atUserId = null, text = null, signal } = {}) {
@@ -335,6 +341,39 @@ export class OneBotClient {
       });
     }
     return this.call('group_poke', { group_id: Number(id), user_id: Number(targetUserId || id) }, 15000, signal);
+  }
+
+  /** 发送语音（record 段）。file 支持 base64://（本地合成结果）或协议端可取的 URL/路径。 */
+  async sendRecord(kind, id, file, { replyToMessageId = null, atUserId = null, signal } = {}) {
+    const segments = [];
+    if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
+      const rid = String(replyToMessageId).trim();
+      if (!/^-?[1-9]\d*$/.test(rid)) {
+        throw new OneBotActionError('replyToMessageId 必须是非零整数', {
+          action: kind === 'private' ? 'send_private_msg' : 'send_group_msg',
+          outcome: 'failed'
+        });
+      }
+      segments.push({ type: 'reply', data: { id: rid } });
+    }
+    if (atUserId !== undefined && atUserId !== null && String(atUserId).trim() !== '') {
+      const at = String(atUserId).trim();
+      if (!/^\d+$/.test(at)) {
+        throw new OneBotActionError('atUserId 必须是正整数 QQ 号，且不能为 all', {
+          action: kind === 'private' ? 'send_private_msg' : 'send_group_msg',
+          outcome: 'failed'
+        });
+      }
+      segments.push({ type: 'at', data: { qq: at } });
+    }
+    segments.push({ type: 'record', data: { file: String(file) } });
+    // 语音是最慢的一段（协议端要转码 + 上传）：用媒体超时，别用文本那份
+    return this.sendSegments(kind, id, segments, signal, { timeoutMs: MEDIA_TIMEOUT_MS });
+  }
+
+  /** 群成员名单（OneBot v11 标准接口；大群协议端可能只给缓存，noCache 可强刷）。 */
+  async getGroupMemberList(groupId, { noCache = false } = {}) {
+    return this.call('get_group_member_list', { group_id: Number(groupId), no_cache: noCache === true });
   }
 
   async getMsg(messageId) {

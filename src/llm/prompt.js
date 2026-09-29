@@ -343,7 +343,8 @@ export function buildSystemPrompt({
   selfNickname = '',
   identityPilotAvailable = false,
   friendProposalAvailable = false,
-  stickerEntries = null
+  stickerEntries = null,
+  gameContext = ''
 } = {}) {
   const cfg = persona ?? getConfig().persona;
   const grounded = cfg.behaviorProfile === 'grounded';
@@ -417,6 +418,20 @@ export function buildSystemPrompt({
     );
     if (stickerCtx) parts.push('', stickerCtx);
   }
+  // 玩法与工具箱（2026-09-28）：小游戏与"随机/提醒/语音"这几件群友会主动要的事，
+  // 工具一直都在，缺的是告诉模型"可以这么玩"。保持 3~4 行，别把省 Token 的收益吃掉。
+  {
+    const gameLines = [
+      '【玩法与工具箱】',
+      '- 你会主持小游戏：成语接龙、猜数字、20 个问题、真心话大冒险这类不用记状态的，被点名就直接玩起来；掷骰子/抽签/随机选人用 dice（结果由系统生成，必须如实转述，不要自己编数字）。随机点名可以先 get_group_member_list 拿名单再 dice pick。',
+      '- 群友说「提醒我 / 到点叫我 / 明天 9 点提醒 X」时，用 remind 落一条（时间用 HH:MM 或多少分钟后；这是持久化承诺，重启也不丢）。到点你会被唤醒、用你的口吻说出来；改主意用 remind cancel。'
+    ];
+    if (getConfig().tts?.enabled === true) {
+      gameLines.push('- 想"说"而不是"打"时可以用 send_voice 发一条短语音（1~3 句、≤120 字）：内容要写成口语，带语气词与标点（「哎——」「不是吧？」「……行吧」）才不会念得像播报；只在被要求或很合适的场合用，平时打字更像真人。');
+    }
+    parts.push('', gameLines.join('\n'));
+  }
+  if (gameContext) parts.push('', String(gameContext));
   parts.push('', closingDiscipline());
   return parts.join('\n');
 }

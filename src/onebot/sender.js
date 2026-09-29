@@ -342,6 +342,38 @@ export class SendQueue {
     });
   }
 
+  /** 发送语音（本地合成的音频 → base64 record 段）。发送成功后留档，否则下次运行不知道自己发过语音。 */
+  voice(chatKey, { file, seconds = 0, label = '' } = {}, options = {}) {
+    const [kind, id] = String(chatKey).split(':');
+    const chain = this.#chain(chatKey);
+    return chain(async () => {
+      if (options.runId && this.store.hasUncertainEffects(options.runId)) throw new Error('Previous send delivery is uncertain');
+      this.#checkRate(chatKey);
+      await sleep(randInt(600, 1500));
+      const data = await this.#deliver(chatKey, options, { type: 'voice', seconds }, () => this.onebot.sendRecord(kind, id, file, {
+        replyToMessageId: options.replyToMessageId ?? null,
+        atUserId: options.atUserId ?? null,
+        signal: options.signal
+      }));
+      const ts = Date.now();
+      let targetUserId = String(options.atUserId || '');
+      if (!targetUserId && options.replyToMessageId != null) {
+        const replied = this.store.findByMid(chatKey, options.replyToMessageId);
+        if (replied && !replied.self) targetUserId = String(replied.senderId || '');
+      }
+      if (!targetUserId && kind === 'private') targetUserId = String(id);
+      this.store.appendSelf(chatKey, {
+        text: `[语音${seconds ? `${seconds}秒` : ''}:${String(label || '').slice(0, 40)}]`,
+        ts,
+        mid: data?.message_id ?? null,
+        targetUserId,
+        eventKind: 'message'
+      });
+      this.onSent?.({ chatKey, text: '[语音]', messageId: data?.message_id ?? null, voice: seconds });
+      return { message_id: data?.message_id ?? null };
+    });
+  }
+
   /** 拍一拍。发送成功后留档（self 记录），否则下一次运行不知道自己拍过。 */
   poke(chatKey, targetUserId, options = {}) {
     const [kind, id] = String(chatKey).split(':');

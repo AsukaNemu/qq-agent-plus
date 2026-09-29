@@ -13,7 +13,8 @@ export const EXPERIMENTAL_READ_ONLY_TOOLS = new Set([
   'memory_query',
   'person_memory_lookup',
   'web_search',
-  'web_fetch'
+  'web_fetch',
+  'dice'          // 纯计算、无 IO 与副作用，可并行
 ]);
 
 // 这些也是“读取/观察”类工具，但当前不做并发预启动：
@@ -26,7 +27,8 @@ export const EXPERIMENTAL_ORDERED_READ_TOOLS = new Set([
   'get_sticker_image',
   'read_forward',
   'get_message_images',
-  'get_message_audio'
+  'get_message_audio',
+  'get_group_member_list'   // 走协议端的读，保持串行
 ]);
 
 export const EXPERIMENTAL_TERMINAL_TOOL = 'finish';
@@ -44,7 +46,10 @@ export const EXPERIMENTAL_SAME_ROUND_ACTION_TOOLS = new Set([
   'collect_sticker',
   'sticker_note',
   'report_feedback',
-  'friend_request_propose'
+  'friend_request_propose',
+  'remind',        // 本地持久化写入
+  'group_game',    // 开局/结束：本地状态 + 对外公告
+  'send_voice'     // 对外发送
 ]);
 
 export function experimentalToolSchedulerConfig(cfg = {}) {

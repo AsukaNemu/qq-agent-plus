@@ -6379,6 +6379,31 @@ function renderSettings() {
   box.innerHTML = `
     ${renderSettingsSection(c)}`;
   bindSettingsEvents(c);
+  bindCrossSectionControls();
+}
+
+// 跨页控件：群勾选列表与群日报试跑按钮分布在"实验功能 / 每日动态"两个页面上，
+// bindSettingsEvents 里按 settingsSection 分块，只有当前页会执行 —— 放那里会出现
+// "切到该页也一直显示正在读取群列表"（2026-09-28 实测：列表永远不填充）。
+// 所以这一类"哪个页面都要能绑"的控件单独在这里、每次渲染都跑一遍。
+function bindCrossSectionControls() {
+  const digestRunBtn = $('#digest-run-btn');
+  if (digestRunBtn && !digestRunBtn.dataset.bound) {
+    digestRunBtn.dataset.bound = '1';
+    digestRunBtn.addEventListener('click', async () => {
+      const out = $('#digest-run-result');
+      if (out) out.textContent = '生成中…（先保存设置再试跑）';
+      try {
+        const r = await api('/api/group-digest/run', { method: 'POST' });
+        if (!out) return;
+        if (r.skipped === 'no-chats') out.textContent = '没有配置群（chats 为空）';
+        else if (r.skipped === 'already-running') out.textContent = '正在跑，稍等';
+        else out.textContent = JSON.stringify(r.results || r).slice(0, 220);
+      } catch (e) { if (out) out.textContent = `失败：${e.message}`; }
+    });
+  }
+  renderGroupChecklist('cfg-game-chats-box', state.config?.groupGame?.chats || []);
+  renderGroupChecklist('cfg-digest-chats-box', state.config?.groupDigest?.chats || []);
 }
 
 function renderSettingsSection(c) {
@@ -6763,7 +6788,61 @@ function renderAsrSection(c) {
     <div class="hint">
       ${status}
       每小时上限是按量计费服务的硬闸门（跨会话共享）；本地转写不花钱，但也受这个次数限制。
-    </div>`;
+    </div>
+    <h3 id="settings-tts">语音回复（TTS）</h3>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-tts-enabled" ${c.tts?.enabled === true ? 'checked' : ''} />
+      <label for="cfg-tts-enabled">允许它发语音（send_voice 工具；默认关）</label></div>
+    <div class="field"><label for="cfg-tts-service">服务预设</label>
+      <select id="cfg-tts-service"><option value="">（加载中…）</option></select>
+      <div class="hint" id="tts-preset-hint"></div></div>
+    <div class="field"><label for="cfg-tts-baseurl">服务地址</label>
+      <input type="text" id="cfg-tts-baseurl" value="${esc(c.tts?.baseUrl || '')}" placeholder="https://api.siliconflow.cn/v1" /></div>
+    <div class="field" id="cfg-tts-model-field"><label for="cfg-tts-model">模型</label>
+      <div style="display:flex;gap:8px">
+        <input type="text" id="cfg-tts-model" value="${esc(c.tts?.model || '')}" placeholder="FunAudioLLM/CosyVoice2-0.5B" style="flex:1" />
+        <button class="btn btn-small" id="tts-fetch-models-btn" type="button">获取模型列表</button>
+      </div>
+      <select id="cfg-tts-model-pick" style="display:none;margin-top:6px"></select>
+      <div class="hint" id="tts-models-hint" style="display:none"></div></div>
+    <div class="field"><label for="cfg-tts-voice">音色（voice）</label>
+      <div style="display:flex;gap:8px">
+        <input type="text" id="cfg-tts-voice" value="${esc(c.tts?.voice || '')}" placeholder="FunAudioLLM/CosyVoice2-0.5B:anna" style="flex:1" />
+        <button class="btn btn-small" id="tts-voice-pick-btn" type="button">候选音色</button>
+      </div>
+      <select id="cfg-tts-voice-pick" style="display:none;margin-top:6px"></select>
+      <div class="hint" id="tts-voice-hint" style="display:none"></div></div>
+    <div class="field-row" id="tts-volc-fields" style="display:none">
+      <div class="field"><label for="cfg-tts-appid" id="tts-appid-label">AppID（火山）</label>
+        <input type="text" id="cfg-tts-appid" value="${esc(c.tts?.appId || '')}" placeholder="语音技术控制台的 AppID" />
+        <div class="hint" id="tts-appid-hint"></div>
+        <div class="hint" id="tts-appid-warn" style="display:none;color:var(--orange)"></div></div>
+      <div class="field" id="tts-cluster-field"><label for="cfg-tts-cluster">Cluster（火山 v1 用）</label>
+        <input type="text" id="cfg-tts-cluster" value="${esc(c.tts?.cluster || '')}" placeholder="volcano_tts" />
+        <div class="hint">填 <code>volcano_tts</code>；这里是「资源分组」不是音色 —— 填音色名会报 3001/3005。</div>
+        <div class="hint" id="tts-cluster-warn" style="display:none;color:var(--orange)"></div></div>
+      <div class="field" id="tts-resourceid-field"><label for="cfg-tts-resourceid">资源 ID（豆包 2.0 用）</label>
+        <input type="text" id="cfg-tts-resourceid" value="${esc(c.tts?.resourceId || '')}" placeholder="seed-tts-2.0" />
+        <div class="hint">默认 <code>seed-tts-2.0</code>（大模型语音合成 2.0）。1.0 的音色要换成 <code>seed-tts-1.0</code>，要与音色配套。</div>
+        <div class="hint" id="tts-resourceid-warn" style="display:none;color:var(--orange)"></div></div>
+    </div>
+    <div class="field" id="tts-minimax-fields" style="display:none"><label for="cfg-tts-groupid">GroupId（MiniMax）</label>
+      <input type="text" id="cfg-tts-groupid" value="${esc(c.tts?.groupId || '')}" placeholder="账户信息里的 GroupId" /></div>
+    <div class="field"><label for="cfg-tts-key" id="tts-key-label">API Key（按供应商分别保存；留空/掩码 = 保持不变）</label>
+      <div style="display:flex;gap:8px">
+        <input type="password" id="cfg-tts-key" value="" placeholder="输入新 Key 可替换" autocomplete="new-password" style="flex:1" />
+        <button class="btn btn-small" id="tts-reveal-key-btn" type="button">显示</button>
+        <button class="btn btn-small" id="tts-hide-key-btn" type="button">隐藏</button>
+      </div>
+      <div class="hint" id="tts-key-hint"></div></div>
+    <div class="field-row">
+      <div class="field"><label for="cfg-tts-speed">语速（0.25~4，1=原速）</label>
+        <input type="number" id="cfg-tts-speed" min="0.25" max="4" step="0.05" value="${esc(c.tts?.speed ?? 1)}" /></div>
+      <div class="field"><label for="cfg-tts-gain">音量增益 dB（-10~10）</label>
+        <input type="number" id="cfg-tts-gain" min="-10" max="10" step="1" value="${esc(c.tts?.gain ?? 0)}" /></div>
+    </div>
+    <div class="hint">短句 1~3 句最自然；改完先「保存设置」再试听：
+      <button class="btn btn-small" id="tts-test-btn" type="button" style="margin-left:8px">试听</button>
+      <span id="tts-test-result" class="muted"></span></div>`;
 }
 
 function renderSearchSection(c) {
@@ -6951,6 +7030,31 @@ function renderExperimentalSettingsSection(c) {
           </span>
         </div>
       </div>
+      <h3 style="margin-top:18px">群游戏（数字炸弹 / 谁是卧底）</h3>
+      <div class="hint">系统负责轮次、计票与判定，模型只负责氛围与解说；卧底的词只走私聊，公开摘要里不含身份。
+        默认关、白名单制、每群同时一局。</div>
+      <div class="checkbox-row"><input type="checkbox" id="cfg-game-enabled" ${c.groupGame?.enabled === true ? 'checked' : ''} />
+        <label for="cfg-game-enabled">启用群游戏</label></div>
+      <div class="field-row">
+        <div class="field"><label>允许开局的群（勾选机器人已加入的群）</label>
+          <div id="cfg-game-chats-box" class="group-checklist"><span class="muted">正在读取群列表…</span></div></div>
+        <div class="field"><label for="cfg-game-daily">每群每天最多开局数</label>
+          <input type="number" id="cfg-game-daily" min="1" max="50" value="${esc(c.groupGame?.dailyLimitPerChat ?? 6)}" /></div>
+      </div>
+      <div class="checkbox-row"><input type="checkbox" id="cfg-game-private" ${c.groupGame?.allowPrivateInvite === true ? 'checked' : ''} />
+        <label for="cfg-game-private">允许私聊发词/身份（谁是卧底必需；只发给报名者、每人每局一条，失败不重试）</label></div>
+      <div class="field-row">
+        <div class="field"><label for="cfg-game-maxplayers">每局人数上限</label>
+          <input type="number" id="cfg-game-maxplayers" min="2" max="30" value="${esc(c.groupGame?.maxPlayers ?? 10)}" /></div>
+        <div class="field"><label for="cfg-game-round">单回合超时（秒，0=插件默认）</label>
+          <input type="number" id="cfg-game-round" min="0" max="600" value="${esc(c.groupGame?.roundSeconds ?? 0)}" /></div>
+      </div>
+      <div class="checkbox-row"><input type="checkbox" id="cfg-game-bomb" ${(Array.isArray(c.groupGame?.games) ? c.groupGame.games : ['number-bomb', 'undercover']).includes('number-bomb') ? 'checked' : ''} />
+        <label for="cfg-game-bomb">允许「数字炸弹」</label></div>
+      <div class="checkbox-row"><input type="checkbox" id="cfg-game-undercover" ${(Array.isArray(c.groupGame?.games) ? c.groupGame.games : ['number-bomb', 'undercover']).includes('undercover') ? 'checked' : ''} />
+        <label for="cfg-game-undercover">允许「谁是卧底」</label></div>
+      <div class="checkbox-row"><input type="checkbox" id="cfg-game-reveal" ${c.groupGame?.revealWords !== false ? 'checked' : ''} />
+        <label for="cfg-game-reveal">谁是卧底结算时公开双方词（关掉只公布卧底是谁）</label></div>
       <div class="hint" id="experiment-launch-result"></div>
     </section>`;
 }
@@ -8200,7 +8304,21 @@ function renderDailyMomentsSection(c) {
       <button class="btn btn-primary btn-small" id="daily-moments-run-btn">立即总结并执行</button>
       <span id="daily-moments-action-result" class="muted"></span>
     </div>
-    <div id="daily-moments-status" class="daily-moments-status"><span class="muted">正在读取状态…</span></div>`;
+    <div id="daily-moments-status" class="daily-moments-status"><span class="muted">正在读取状态…</span></div>
+    <h3 id="settings-digest">群日报</h3>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-digest-enabled" ${c.groupDigest?.enabled === true ? 'checked' : ''} />
+      <label for="cfg-digest-enabled">每天定时把「过去 24 小时群里聊了啥」汇总成一条发到指定群（默认关）</label></div>
+    <div class="field-row">
+      <div class="field"><label for="cfg-digest-time">发送时间（北京时间 HH:MM）</label>
+        <input type="text" id="cfg-digest-time" value="${esc(c.groupDigest?.time || '09:30')}" placeholder="09:30" /></div>
+      <div class="field"><label>发到哪些群（勾选机器人已加入的群）</label>
+        <div id="cfg-digest-chats-box" class="group-checklist"><span class="muted">正在读取群列表…</span></div></div>
+    </div>
+    <div class="settings-actions">
+      <button class="btn btn-small" id="digest-run-btn" type="button">立即试跑一次</button>
+      <span id="digest-run-result" class="muted"></span>
+      <span class="muted">试跑会真的把日报发到上面配置的群里</span>
+    </div>`;
 }
 
 function renderMomentWindowRow(window) {
@@ -8859,6 +8977,413 @@ function asrServiceOf(provider, baseUrl) {
 function asrServiceOptions(provider, baseUrl) {
   const current = asrServiceOf(provider, baseUrl);
   return ASR_SERVICES.map((item) => `<option value="${item.id}" ${item.id === current ? 'selected' : ''}>${esc(item.label)}</option>`).join('');
+}
+
+// ── 群多选：查机器人已加入的群，让用户勾选（比手填 group:xxx 好用）──
+// 数据来自 OneBot 的 get_group_list（后端 /api/onebot/groups）。配置里有、但当前不在名单里的
+// （退群/改名/协议端未连接）也照样列出来，避免一次保存把既有配置静默丢掉。
+// 群多起来（几十上百个）纯勾选没法用，所以列表带滚动，并在群数 ≥3 时给筛选框、≥2 时给
+// 全选/清空（作用于当前可见行）与已选计数。
+async function renderGroupChecklist(boxId, selected) {
+  const box = document.querySelector('#' + boxId);
+  if (!box) return;
+  let groups = [];
+  try {
+    const r = await api('/api/onebot/groups');
+    groups = Array.isArray(r?.groups) ? r.groups : [];
+  } catch { /* 拿不到就只列已配置的 */ }
+  const sel = new Set((Array.isArray(selected) ? selected : []).map((x) => String(x)));
+  const seen = new Set();
+  const items = [];
+  for (const g of groups) {
+    const key = 'group:' + g.id;
+    seen.add(key);
+    items.push({ key, name: String(g.name ?? ''), id: String(g.id), stale: false });
+  }
+  for (const key of sel) {
+    if (seen.has(key)) continue;
+    items.push({ key, name: key, id: '', stale: true });
+  }
+  if (!items.length) {
+    box.innerHTML = '<span class="muted">拿不到群列表（协议端未连接或接口不可用）：刷新页面重试，或先让机器人在群里说句话记录会话。</span>';
+    return;
+  }
+  const showFilter = items.length >= 3;
+  const showBulk = items.length >= 2;
+  const rowHtml = (it) => '<label class="group-checklist-row" data-search="' + esc((it.name + ' ' + it.id).toLowerCase()) + '">'
+    + '<input type="checkbox" class="group-check" value="' + esc(it.key) + '"' + (sel.has(it.key) ? ' checked' : '') + ' />'
+    + '<span class="group-checklist-name" title="' + esc(it.name) + '">' + esc(it.name) + '</span>'
+    + (it.stale
+      ? '<span class="group-checklist-stale">不在当前群列表</span>'
+      : '<span class="group-checklist-id">' + esc(it.id) + '</span>')
+    + '</label>';
+  box.innerHTML = [
+    (showFilter || showBulk) ? '<div class="group-checklist-bar">'
+      + (showFilter ? '<input type="search" class="group-checklist-filter" placeholder="筛选群名或群号" />' : '')
+      + (showBulk ? '<button type="button" class="btn btn-small group-checklist-all">全选</button>'
+        + '<button type="button" class="btn btn-small group-checklist-none">清空</button>' : '')
+      + '<span class="group-checklist-count muted"></span></div>' : '',
+    '<div class="group-checklist-list">', items.map(rowHtml).join(''), '</div>',
+    '<div class="group-checklist-empty muted" hidden>没有匹配的群</div>',
+  ].join('');
+  // 行已渲染 = 这份列表可用；加载中 / 拉取失败（只有提示文案）时不置位，
+  // 保存那一步据此跳过 chats，避免在"还没读完"的窗口里把白名单存成空。
+  box.dataset.loaded = '1';
+  // 事件：筛选/全选/清空只作用在当前可见行；计数在勾选后刷新（pickedGroups 读的是
+  // input.group-check:checked，行被筛掉不影响它——被筛掉的行只是隐藏，勾选状态仍在）。
+  const rows = [...box.querySelectorAll('.group-checklist-row')];
+  const filterEl = box.querySelector('.group-checklist-filter');
+  const countEl = box.querySelector('.group-checklist-count');
+  const emptyEl = box.querySelector('.group-checklist-empty');
+  const visibleRows = () => rows.filter((r) => !r.classList.contains('is-hidden'));
+  const refreshCount = () => {
+    if (!countEl) return;
+    const all = [...box.querySelectorAll('input.group-check')];
+    countEl.textContent = '已选 ' + all.filter((n) => n.checked).length + ' / ' + all.length;
+  };
+  const applyFilter = () => {
+    const q = (filterEl?.value || '').trim().toLowerCase();
+    let shown = 0;
+    for (const row of rows) {
+      const hit = !q || (row.dataset.search || '').includes(q);
+      row.classList.toggle('is-hidden', !hit);
+      if (hit) shown += 1;
+    }
+    if (emptyEl) emptyEl.hidden = shown > 0;
+  };
+  const setVisibleChecked = (checked) => {
+    for (const row of visibleRows()) {
+      const cb = row.querySelector('input.group-check');
+      if (cb) cb.checked = checked;
+    }
+    refreshCount();
+  };
+  filterEl?.addEventListener('input', applyFilter);
+  box.querySelector('.group-checklist-all')?.addEventListener('click', () => setVisibleChecked(true));
+  box.querySelector('.group-checklist-none')?.addEventListener('click', () => setVisibleChecked(false));
+  box.querySelector('.group-checklist-list')?.addEventListener('change', (e) => {
+    if (e.target?.classList?.contains('group-check')) refreshCount();
+  });
+  refreshCount();
+}
+function pickedGroups(boxId) {
+  // 盒子不在场（在别的设置页保存）→ 返回 null，调用方据此"不覆盖 chats"，
+  // 否则一次无关页面的保存就会把白名单清空（2026-09-28 审查 P1）
+  const box = document.querySelector('#' + boxId);
+  if (!box) return null;
+  // 在场但还没渲染出行（"正在读取群列表…" 或拉取失败的提示）→ 同样返回 null：
+  // 这时候的"零勾选"是没读完，不是用户清空，不能拿它覆盖已有配置。
+  if (box.dataset.loaded !== '1') return null;
+  return [...box.querySelectorAll('input.group-check:checked')].map((n) => n.value);
+}
+
+// ── 语音回复（TTS）：服务预设与模型/音色候选 ──
+// 预设表（每家的常用模型与音色）放在后端 src/llm/tts-presets.js，这里拉取后填下拉与 datalist，
+// 前端不另抄一份（抄一份就会有"改了表忘了改另一处"的漂移）。音色没有可查的接口（两家都实测 404），
+// 只能内置；模型可点「获取模型列表」从官网拉全量。
+async function bindTtsControls() {
+  const svc = document.querySelector('#cfg-tts-service');
+  if (!svc) return;
+  const q = (sel) => document.querySelector(sel);
+  const baseUrlInput = q('#cfg-tts-baseurl');
+  const modelInput = q('#cfg-tts-model');
+  const modelPick = q('#cfg-tts-model-pick');
+  const voiceInput = q('#cfg-tts-voice');
+  const voicePick = q('#cfg-tts-voice-pick');
+  const presetHint = q('#tts-preset-hint');
+  const voiceHint = q('#tts-voice-hint');
+  const hostOf = (u) => { try { return new URL(String(u || '').trim()).host.toLowerCase(); } catch { return ''; } };
+  const pathOf = (u) => { try { return new URL(String(u || '').trim()).pathname.toLowerCase(); } catch { return ''; } };
+  let services = [];
+  try {
+    const r = await api('/api/tts/presets');
+    services = Array.isArray(r?.services) ? r.services : [];
+  } catch { /* 拉不到就用最小回退 */ }
+  if (!services.length) {
+    services = [{ id: 'siliconflow', label: '硅基流动', provider: 'openai', creds: ['key'], baseUrl: 'https://api.siliconflow.cn/v1', hosts: ['api.siliconflow.cn'], models: [{ id: 'FunAudioLLM/CosyVoice2-0.5B', voices: ['anna', 'bella', 'claire', 'diana'] }] }];
+  }
+  // 地址 → 服务：域名与路径都要认。火山 v1 与豆包 2.0 同域名（靠 /api/v1 与 /api/v3 区分），
+  // 只按域名会认错家，保存时 Key 就会存到别家名下（2026-09-28 加豆包时补的）
+  const matchService = (url) => {
+    const host = hostOf(url);
+    if (!host) return null;
+    const byHost = services.filter((x) => (x.hosts || []).includes(host));
+    if (!byHost.length) return null;
+    if (byHost.length === 1) return byHost[0];
+    const path = pathOf(url);
+    return byHost.find((x) => x.pathContains && path.includes(String(x.pathContains).toLowerCase()))
+      || byHost.find((x) => !x.pathContains) || byHost[0];
+  };
+  const currentService = () => {
+    const byUrl = matchService(baseUrlInput?.value || '');
+    if (byUrl) return byUrl;
+    // 地址不在任何预设主机表里 + 配置是 openai 家族 → 「自定义/自建」。
+    // 运行时 ttsServiceOf 是同一口径；不补这条的话，自建配置每次进设置页都被回显成
+    // 硅基流动，Key 掩码按错家判断，再保存还会把 Key 存到 siliconflow 名下（2026-09-29 审查 P1）
+    const prov = String(state.config?.tts?.provider || '').trim().toLowerCase();
+    if (prov === 'openai' || prov === 'custom') {
+      const custom = services.find((x) => x.id === 'custom');
+      if (custom) return custom;
+    }
+    return services.find((x) => x.id === svc.value) || services[services.length - 1];
+  };
+  // 音色两种写法都吃：纯字符串，或 { id, label, cat }（火山/豆包的音色表带中文名与分类）
+  const normVoice = (v) => (typeof v === 'string'
+    ? { id: v, label: v, cat: '' }
+    : { id: String(v?.id || '').trim(), label: String(v?.label || v?.id || '').trim(), cat: String(v?.cat || '').trim() });
+  const voiceEntriesFor = (service, model) => {
+    const byModel = (service?.models || []).find((m) => m.id === model)?.voices || [];
+    const list = byModel.length ? byModel : (service?.voicesFlat || []);
+    return list.map(normVoice).filter((v) => v.id);
+  };
+  // 音色写法按家不同：硅基流动 = 模型id:音色；OpenAI/火山/MiniMax = 裸名
+  const voiceValueFor = (service, model, voice) => (service?.provider === 'openai' && service?.id === 'siliconflow' && model ? `${model}:${voice}` : voice);
+  const fillVoicePick = (service, model) => {
+    // 音色优先按模型查；火山/豆包这类"没有模型名"的家用服务级音色表（voicesFlat）
+    const entries = voiceEntriesFor(service, model);
+    if (voicePick) {
+      const opt = (v) => `<option value="${esc(voiceValueFor(service, model, v.id))}">${esc(v.label)}</option>`;
+      // 带分类的表（豆包 2.0 的 102 个音色）按分类分组：与火山控制台的音色列表能一一对上
+      const cats = [...new Set(entries.map((v) => v.cat).filter(Boolean))];
+      voicePick.innerHTML = cats.length > 1
+        ? cats.map((cat) => `<optgroup label="${esc(cat)}">${entries.filter((v) => v.cat === cat).map(opt).join('')}</optgroup>`).join('')
+        : entries.map(opt).join('');
+    }
+    if (voiceHint) {
+      voiceHint.style.display = entries.length ? 'none' : '';
+      voiceHint.textContent = entries.length ? '' : '这一家没有内置音色表：按服务商文档填 voice（MiniMax 如 female-shaonv）。';
+    }
+    return entries.length;
+  };
+  const fillModelPick = (ids) => {
+    if (!modelPick) return;
+    modelPick.innerHTML = ids.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
+    modelPick.style.display = ids.length ? '' : 'none';
+  };
+  // 这家存过 Key 没有：看 keyServices（服务端只下发布尔口径，不下发明文）
+  const storedKeyServices = () => {
+    // 注意：这里在顶层函数里，拿不到渲染函数的 c —— 必须从 state.config 取
+    // （2026-09-28 实测踩过：用 c 会抛 ReferenceError，并把它后面的绑定一起打断）
+    const conf = state.config || {};
+    return Array.isArray(conf.tts?.keyServices)
+      ? conf.tts.keyServices
+      : (conf.tts?.hasApiKey ? [conf.tts?.currentService] : []);
+  };
+  const refreshKeyField = (service) => {
+    const node = document.querySelector('#cfg-tts-key');
+    if (!node) return;
+    const stored = storedKeyServices();
+    node.value = service && stored.includes(service.id) ? '******' : '';
+  };
+  // 各家的凭据字段只在选中那家时出现，并把"填什么、去哪拿"写在旁边
+  // （2026-09-28 实测：用户把「资源 ID」填进 AppID、把音色 ID 填进 Cluster，就是因为原来的标签没说清楚）
+  const showProviderFields = (service) => {
+    const prov = service?.provider || 'openai';
+    const isVolcFamily = prov === 'volc' || prov === 'doubao';
+    const volcBox = q('#tts-volc-fields');
+    if (volcBox) volcBox.style.display = isVolcFamily ? '' : 'none';
+    const clusterField = q('#tts-cluster-field');
+    if (clusterField) clusterField.style.display = prov === 'volc' ? '' : 'none';
+    const resField = q('#tts-resourceid-field');
+    if (resField) resField.style.display = prov === 'doubao' ? '' : 'none';
+    const appidLabel = q('#tts-appid-label');
+    if (appidLabel) appidLabel.textContent = prov === 'doubao' ? 'AppID（豆包 2.0：可留空）' : 'AppID（火山 v1 必填）';
+    const appidHint = q('#tts-appid-hint');
+    if (appidHint) {
+      appidHint.textContent = prov === 'doubao'
+        ? '豆包 2.0 默认走 API Key 鉴权，AppID 不是必需的；只有在改用「AppID + Access Token」鉴权时才填（纯数字）。'
+        : '语音技术 → 应用管理里的一串数字（如 1234567890）。别把「资源 ID」或音色名填进来 —— 那两样是另一个参数。';
+    }
+    const keyLabel = q('#tts-key-label');
+    if (keyLabel) {
+      keyLabel.textContent = prov === 'doubao'
+        ? 'API Key（豆包 2.0；按供应商分别保存，留空/掩码 = 保持不变）'
+        : (prov === 'volc'
+          ? 'Access Token（火山 v1；按供应商分别保存，留空/掩码 = 保持不变）'
+          : 'API Key（按供应商分别保存；留空/掩码 = 保持不变）');
+    }
+    const keyHint = q('#tts-key-hint');
+    if (keyHint) {
+      const link = service?.keyUrl
+        ? `（<a href="${esc(service.keyUrl)}" target="_blank" rel="noreferrer">打开火山控制台 → 语音技术</a>）`
+        : '';
+      const stored = storedKeyServices();
+      const volcOnly = !stored.includes('doubao') && stored.includes('volc');
+      keyHint.innerHTML = prov === 'doubao'
+        ? `填控制台里的密钥 ${link}：豆包 2.0 走 X-Api-Key 鉴权，不需要填 Cluster。`
+          + (volcOnly ? ' 你之前给「火山 v1」存过一把 Key（两套凭据不是同一个，需要重新粘一次）：切到那家点「显示」复制过来即可。' : '')
+        : (prov === 'volc' ? `填「应用管理」里的 Access Token ${link} —— 不是 AppID，也不是音色。` : '');
+      keyHint.style.display = keyHint.textContent.trim() ? '' : 'none';
+    }
+    const mmBox = q('#tts-minimax-fields');
+    if (mmBox) mmBox.style.display = prov === 'minimax' ? '' : 'none';
+    // 模型栏：这一家不要模型名就整栏藏掉（火山 v1 / 豆包）；「自定义/自建」虽然 models 为空
+    // 但**必须填模型名**（note 里写了），也保留；有内置模型但不支持拉取的（MiniMax）
+    // 留输入框 + 内置候选，只把「获取模型列表」按钮藏掉
+    const modelField = q('#cfg-tts-model-field');
+    const needsModelField = (service?.models || []).length > 0 || service?.id === 'custom';
+    if (modelField) modelField.style.display = needsModelField ? '' : 'none';
+    const fetchBtnEl = q('#tts-fetch-models-btn');
+    if (fetchBtnEl) fetchBtnEl.style.display = prov === 'openai' && service?.id !== 'custom' ? '' : 'none';
+  };
+  // 实时校验火山的三个框：把"填错位置"当场指出来（用户实测就把资源 ID 填进了 AppID、音色填进了 Cluster）
+  const validateVolcFields = () => {
+    const prov = currentService()?.provider || 'openai';
+    const setWarn = (sel, msg) => {
+      const node = q(sel);
+      if (!node) return;
+      node.style.display = msg ? '' : 'none';
+      node.textContent = msg || '';
+    };
+    const appid = String(q('#cfg-tts-appid')?.value || '').trim();
+    const cluster = String(q('#cfg-tts-cluster')?.value || '').trim();
+    const resId = String(q('#cfg-tts-resourceid')?.value || '').trim();
+    setWarn('#tts-appid-warn', prov === 'volc' && appid && !/^\d{5,15}$/.test(appid)
+      ? '看起来不是 AppID（应为纯数字）。seed-tts-2.0 这类是「资源 ID」，不属于这里。' : '');
+    setWarn('#tts-cluster-warn', cluster && !/^volcano_/i.test(cluster)
+      ? `「${cluster}」看着像音色/资源 ID，不是 cluster：这里固定填 volcano_tts（音色请填到「音色」栏）。` : '');
+    setWarn('#tts-resourceid-warn', resId && !/^(seed-tts-|volc\.)/i.test(resId)
+      ? '资源 ID 形如 seed-tts-2.0 / seed-tts-1.0 / volc.service_type.xxxx。' : '');
+    // 豆包模式下填了纯数字 AppID 不是错误，但鉴权套件变了，必须说清 Key 栏该填什么
+    if (prov === 'doubao' && /^\d{5,15}$/.test(appid)) {
+      setWarn('#tts-appid-warn', 'AppID 已填：豆包将改走「AppID + Access Token」鉴权 —— 此时下面的 API Key 栏要填 Access Token，不是控制台密钥；留空 AppID 则走 X-Api-Key（控制台密钥）。');
+    }
+  };
+  const renderFor = (service, { resetModel = false } = {}) => {
+    if (!service) return;
+    const models = service.models || [];
+    fillModelPick(models.map((m) => m.id));
+    if (resetModel || !String(modelInput?.value || '').trim()) {
+      if (modelInput && models[0]?.id) modelInput.value = models[0].id;
+      // 换家后别把上一家的模型名留在框里（火山/豆包不用模型名，留着会被当参数发出去）。
+      // 「自定义/自建」相反：模型名必填，清了它保存出去就是必报错（2026-09-29 审查 P1）
+      if (modelInput && !models.length && service?.id !== 'custom') modelInput.value = '';
+    }
+    if (modelInput) modelInput.placeholder = (models.length || service?.id === 'custom') ? 'FunAudioLLM/CosyVoice2-0.5B' : '（这家不需要模型名）';
+    const model = String(modelInput?.value || '').trim();
+    // 换家后音色若不在新家候选里（比如从硅基流动切到火山），顺手换成第一个候选并说明，
+    // 否则会把上一家的音色原样发过去、报错还看不懂
+    const entries = voiceEntriesFor(service, model);
+    let voiceNote = '';
+    if (voiceInput) {
+      const cur = String(voiceInput.value || '').trim();
+      const values = entries.map((v) => voiceValueFor(service, model, v.id));
+      if (!cur && values.length) {
+        voiceInput.value = values[0];      // 空着就填一个默认，省得用户面对空框
+      } else if (cur && values.length && !values.includes(cur)) {
+        // 不在候选里：**任何时候都不擅自改值** —— 克隆音色（ICL_uranus_*）对火山系两家都有效，
+        // 自动替换等于把用户的音色弄丢（2026-09-29 实测踩过）。只提示，由用户自己决定。
+        voiceNote = `当前音色「${cur}」不在这一家的内置候选里 —— 自定义/克隆音色若这一家支持可照用；不确定就点「候选音色」重选，改完记得保存。`;
+      }
+    }
+    fillVoicePick(service, model);
+    // 提示必须写在 fillVoicePick 之后：那个函数在有候选时会把 hint 清空
+    if (voiceNote && voiceHint) {
+      voiceHint.style.display = '';
+      voiceHint.textContent = voiceNote;
+    }
+    if (presetHint) presetHint.textContent = service.note || '';
+    showProviderFields(service);
+    validateVolcFields();
+    refreshKeyField(service);
+  };
+  // 手打这三个框时也实时校验（不只在校验器里跑一次）
+  for (const sel of ['#cfg-tts-appid', '#cfg-tts-cluster', '#cfg-tts-resourceid']) {
+    q(sel)?.addEventListener('input', validateVolcFields);
+  }
+  svc.innerHTML = services.map((x) => `<option value="${x.id}" data-provider="${esc(x.provider || 'openai')}">${esc(x.label)}</option>`).join('');
+  const first = currentService();
+  if (first) svc.value = first.id;
+  renderFor(first);
+  svc.addEventListener('change', () => {
+    const picked = services.find((x) => x.id === svc.value);
+    if (!picked) return;
+    if (picked.baseUrl && baseUrlInput) baseUrlInput.value = picked.baseUrl;
+    // 切到自定义/自建：地址栏若还留着某个预设的地址就清掉（自建地址用户自己填），
+    // 不然 currentService 会一直解析回上一家、候选与 Key 归属全跟着错（2026-09-29 审查 P1）
+    if (picked.id === 'custom' && matchService(baseUrlInput?.value || '')) {
+      if (baseUrlInput) baseUrlInput.value = '';
+    }
+    // 切到豆包 2.0 时清掉火山 v1 遗留的 AppID：纯数字 AppID 会让适配器改走
+    // AppID+AccessToken 鉴权，把刚填的控制台密钥当 Access Token 用（2026-09-29 审查 P1）
+    if (picked.id === 'doubao') {
+      const appidNode = q('#cfg-tts-appid');
+      if (appidNode && /^\d{5,15}$/.test(String(appidNode.value || '').trim())) appidNode.value = '';
+    }
+    renderFor(picked, { resetModel: true });
+  });
+  modelInput?.addEventListener('input', () => fillVoicePick(currentService(), String(modelInput.value || '').trim()));
+  modelPick?.addEventListener('change', () => {
+    if (modelInput) modelInput.value = modelPick.value;
+    fillVoicePick(currentService(), modelPick.value);
+    if (modelsHint) { modelsHint.style.display = ''; modelsHint.textContent = `已选择：${modelPick.value}`; }
+  });
+  const voicePickBtn = q('#tts-voice-pick-btn');
+  const revealBtn = q('#tts-reveal-key-btn');
+  if (revealBtn) revealBtn.addEventListener('click', async () => {
+    const node = q('#cfg-tts-key');
+    if (!node) return;
+    try {
+      const service = currentService();
+      const r = await api(`/api/tts/key?service=${encodeURIComponent(service?.id || '')}`);
+      if (r.ok && r.apiKey) { node.value = r.apiKey; node.type = 'text'; revealBtn.textContent = '已显示'; }
+      else if (r.ok) { if (presetHint) presetHint.textContent = '这一家还没有保存过 Key'; }
+      else if (presetHint) presetHint.textContent = r.error || '读取失败';
+    } catch (e) { if (presetHint) presetHint.textContent = `读取失败：${e.message}`; }
+  });
+  const hideKeyBtn = q('#tts-hide-key-btn');
+  if (hideKeyBtn) hideKeyBtn.addEventListener('click', () => {
+    const node = q('#cfg-tts-key');
+    if (node) { node.type = 'password'; node.value = '******'; }
+    if (revealBtn) revealBtn.textContent = '显示';
+  });
+  if (voicePickBtn) voicePickBtn.addEventListener('click', () => {
+    if (!voicePick) return;
+    const service = currentService();
+    const count = fillVoicePick(service, String(modelInput?.value || '').trim());
+    voicePick.style.display = count ? '' : 'none';
+    if (voiceHint) {
+      if (count) {
+        voiceHint.style.display = '';
+        voiceHint.textContent = `已填入 ${count} 个候选音色，选一个即写进上面的输入框`
+          + (service?.provider === 'doubao' ? '（音色要账号已开通，未开通会报 resource not granted）' : '')
+          + '。';
+      } else {
+        voiceHint.style.display = '';
+        voiceHint.textContent = '这一家没有内置音色表：直接手填 voice（MiniMax 如 female-shaonv）。';
+      }
+    }
+  });
+  voicePick?.addEventListener('change', () => { if (voiceInput) voiceInput.value = voicePick.value; });
+  const modelsHint = q('#tts-models-hint');
+  const fetchBtn = q('#tts-fetch-models-btn');
+  if (fetchBtn) fetchBtn.addEventListener('click', async () => {
+    if (modelsHint) { modelsHint.style.display = ''; modelsHint.textContent = '拉取中…'; }
+    try {
+      const keyNode = q('#cfg-tts-key');
+      const rawKey = keyNode?.value?.trim() || '';
+      const r = await api('/api/tts/models', {
+        method: 'POST',
+        body: JSON.stringify({
+          baseUrl: baseUrlInput?.value?.trim() || '',
+          apiKey: rawKey === '******' ? '' : rawKey,
+          provider: currentService()?.provider || 'openai'
+        })
+      });
+      if (!r.ok) { if (modelsHint) modelsHint.textContent = r.error || '拉取失败'; return; }
+      // 这一家没有可拉的模型列表（火山/豆包/MiniMax）：把"该填什么"如实说出来，
+      // 而不是显示"共 0 个"让人以为按钮坏了（2026-09-28 用户实测反馈）
+      if (r.unsupported || !(r.models || []).length) {
+        fillModelPick([]);
+        if (modelsHint) modelsHint.textContent = r.note || '这一家没有可拉的模型列表：按服务商文档填。';
+        return;
+      }
+      fillModelPick(r.models || []);
+      if (modelsHint) {
+        modelsHint.textContent = `共 ${r.models.length} 个${r.ttsOnly ? '（已按语音合成过滤）' : '（没认出语音模型，给的是全量）'}，选一个填进上面的输入框`;
+      }
+    } catch (e) { if (modelsHint) modelsHint.textContent = `失败：${e.message}`; }
+  });
 }
 
 // 语音转文字每小时上限：用户自己填（2026-09-26 要求从档位下拉改成输入框）。
@@ -9637,6 +10162,22 @@ function bindSettingsEvents(c) {
     });
     syncAsrFields();
 
+    bindTtsControls();
+
+    // 语音回复试听：合成一条样例在浏览器里播（不占群聊）
+    const ttsTestBtn = $('#tts-test-btn');
+    if (ttsTestBtn) ttsTestBtn.addEventListener('click', async () => {
+      const out = $('#tts-test-result');
+      if (out) out.textContent = '合成中…';
+      try {
+        const r = await api('/api/tts/test', { method: 'POST', body: JSON.stringify({ text: '大家好呀，我是小鲸鱼，这是一条试听。' }) });
+        if (r.ok && r.audio) {
+          const audio = new Audio(`data:audio/${r.format === 'wav' ? 'wav' : 'mpeg'};base64,${r.audio}`);
+          await audio.play().catch(() => {});
+          if (out) out.textContent = '已合成并开始播放（先保存设置再试听才生效）';
+        } else if (out) out.textContent = r.error || '合成失败';
+      } catch (e) { if (out) out.textContent = `失败：${e.message}`; }
+    });
     // 拉模型列表：从服务商官网的 /models 拉（预设里的模型名会过时，官网不会）
     const fetchModelsBtn = $('#asr-fetch-models-btn');
     if (fetchModelsBtn) fetchModelsBtn.addEventListener('click', async () => {
@@ -11475,9 +12016,30 @@ async function saveConfig({ quiet = false } = {}) {
       ...(c.incidentPilot || {}),
       enabled: chk('#cfg-incident-pilot-enabled', c.incidentPilot?.enabled === true)
     };
+      patch.groupGame = {
+        ...(c.groupGame || {}),
+        enabled: chk('#cfg-game-enabled', c.groupGame?.enabled === true),
+        allowPrivateInvite: chk('#cfg-game-private', c.groupGame?.allowPrivateInvite === true),
+        dailyLimitPerChat: clampInt(val('#cfg-game-daily', c.groupGame?.dailyLimitPerChat ?? 6), 1, 50, 6),
+        maxPlayers: clampInt(val('#cfg-game-maxplayers', c.groupGame?.maxPlayers ?? 10), 2, 30, 10),
+        roundSeconds: clampInt(val('#cfg-game-round', c.groupGame?.roundSeconds ?? 0), 0, 600, 0),
+        revealWords: chk('#cfg-game-reveal', c.groupGame?.revealWords !== false),
+        games: ['number-bomb', 'undercover'].filter((g) => chk(g === 'number-bomb' ? '#cfg-game-bomb' : '#cfg-game-undercover', true)),
+        ...(pickedGroups('cfg-game-chats-box') ? { chats: pickedGroups('cfg-game-chats-box') } : {})
+      };
   }
 
   if (sec === 'moments') {
+    patch.groupDigest = {
+      ...(c.groupDigest || {}),
+      enabled: chk('#cfg-digest-enabled', c.groupDigest?.enabled === true),
+      // HH:MM 之外的输入不采纳（"9点半"这类会静默不排程）：退回已保存的值，宁可不改也不存坏值
+      time: (() => {
+        const raw = String(val('#cfg-digest-time', '') || '').trim();
+        return /^([01]?\d|2[0-3]):([0-5]\d)$/.test(raw) ? raw : (c.groupDigest?.time || '09:30');
+      })(),
+      ...(pickedGroups('cfg-digest-chats-box') ? { chats: pickedGroups('cfg-digest-chats-box') } : {})
+    };
     patch.dailyMoments = {
       ...(c.dailyMoments || {}),
       enabled: chk('#cfg-moments-enabled', c.dailyMoments?.enabled === true),
@@ -11772,6 +12334,34 @@ async function saveConfig({ quiet = false } = {}) {
         }
         : {})
     };
+      patch.tts = (() => {
+        const t = c.tts || {};
+        const keyNode = document.querySelector('#cfg-tts-key');
+        const rawKey = keyNode ? keyNode.value.trim() : '';
+        return {
+          ...t,
+          enabled: chk('#cfg-tts-enabled', t.enabled === true),
+          // provider 必须跟着"当前选中的预设"走：少了它，火山/MiniMax 会被当 openai 兼容打（2026-09-28 审查 P1）
+          provider: (() => {
+            const opt = document.querySelector('#cfg-tts-service')?.selectedOptions?.[0];
+            return opt?.dataset?.provider || t.provider || 'openai';
+          })(),
+          // Key 归属按"选中的预设 id"算（custom/openai/siliconflow/…）：自建地址不在预设
+          // 主机表里，服务端只按地址反查会落到 provider 字符串上（2026-09-29 审查 P0）
+          service: document.querySelector('#cfg-tts-service')?.value || '',
+          baseUrl: String(val('#cfg-tts-baseurl', t.baseUrl || '') || '').trim(),
+          appId: String(val('#cfg-tts-appid', t.appId || '') || '').trim(),
+          cluster: String(val('#cfg-tts-cluster', t.cluster || '') || '').trim(),
+          resourceId: String(val('#cfg-tts-resourceid', t.resourceId || '') || '').trim(),
+          groupId: String(val('#cfg-tts-groupid', t.groupId || '') || '').trim(),
+          model: String(val('#cfg-tts-model', t.model || '') || '').trim(),
+          voice: String(val('#cfg-tts-voice', t.voice || '') || '').trim(),
+          speed: Math.min(4, Math.max(0.25, Number(val('#cfg-tts-speed', t.speed ?? 1)) || 1)),
+          gain: Math.min(10, Math.max(-10, Number(val('#cfg-tts-gain', t.gain ?? 0)) || 0)),
+          // 只送"这一家新填的"；掩码/空 = 保持（服务端合并进 keys[这家]）
+          apiKeyInput: rawKey === '******' ? '' : rawKey
+        };
+      })();
   }
 
   if (sec === 'search') {

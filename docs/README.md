@@ -46,6 +46,7 @@
 - [FRIEND_TRIGGER_PILOT_RESEARCH.md](research/FRIEND_TRIGGER_PILOT_RESEARCH.md)：主动加好友触发条件的调研
 - [SNOWLUMA_FRIEND_API_RESEARCH.md](research/SNOWLUMA_FRIEND_API_RESEARCH.md)：协议端好友接口调研
 - [THREADED_PILOT.md](research/THREADED_PILOT.md)：线程化对话的早期方案
+- [GAME_HOSTING_DESIGN.md](research/GAME_HOSTING_DESIGN.md)：多人游戏状态机（群游戏主持）的设计与实施方案（M1 已实现：框架 + 数字炸弹 + 谁是卧底，代码在 `src/features/group-game.js` 与 `src/features/games/`）
 - [MULTIMODAL_CONTEXT_PILOT.md](research/MULTIMODAL_CONTEXT_PILOT.md)：多模态上下文连续性的早期方案
 
 ## 角色卡与其它

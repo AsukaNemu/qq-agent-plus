@@ -2413,6 +2413,79 @@ try {
       + (okSync ? '' : ' -> ' + JSON.stringify(mismatch)));
   }
 
+  // ── 保存分支回归（2026-09-28 审查 P1）：控件在哪个页面，patch 就得在哪一段构造 ——
+  //    曾经把 tts / groupGame 的保存块放进 moments 分支，等于在看得见控件的页面上点保存什么都不会存。
+  {
+    const posts = [];
+    sandbox.fetch = async (path, opts = {}) => {
+      if (String(path).includes('/api/config') && String(opts.method || '').toUpperCase() === 'POST') {
+        try { posts.push(JSON.parse(opts.body || '{}')); } catch { /* 忽略 */ }
+      }
+      const cfgNow = JSON.parse(vm.runInContext('JSON.stringify(state.config || {})', ctx));
+      return { ok: true, status: 200, json: async () => ({ ok: true, config: cfgNow }), text: async () => '{}' };
+    };
+    const cases = [['asr', 'tts'], ['experiments', 'groupGame'], ['moments', 'groupDigest']];
+    const allKeys = cases.map(([, k]) => k);
+    const results = [];
+    for (const [sec, key] of cases) {
+      vm.runInContext(`state.settingsSection = '${sec}';`, ctx);
+      posts.length = 0;
+      await vm.runInContext('saveConfig({ quiet: true })', ctx);
+      const body = posts.length ? posts[posts.length - 1] : {};
+      const has = Object.prototype.hasOwnProperty.call(body, key);
+      // 越界也要查：在 A 页保存不该带上 B 页的键（因为它们读不到 DOM，会写成空值/清空配置）
+      const leaked = allKeys.filter((k) => k !== key && Object.prototype.hasOwnProperty.call(body, k));
+      results.push([sec, key, has, leaked.join('/'), Object.keys(body).slice(0, 6).join(',')]);
+    }
+    const okBranch = results.every(([, , ok, leaked]) => ok && !leaked);
+    okBranch ? pass++ : fail++;
+    console.log('  ' + (okBranch ? 'OK   ' : 'FAIL ')
+      + '保存分支：asr→tts / experiments→groupGame / moments→groupDigest'
+      + (okBranch ? '' : ' -> ' + JSON.stringify(results)));
+  }
+
+  // ── 群勾选列表的"没读完别覆盖"守卫 ──
+  //    用户报过"群列表一直读取中"（2026-09-28）：那种状态下盒子里只剩提示文案、零勾选，
+  //    若保存照常发 chats: []，一次无关的保存就把白名单清空了。判据是 box.dataset.loaded
+  //    （渲染出真实行才置位）。这里三个断言：没读完不带 chats、读完后能主动清空、日报那份同理。
+  {
+    const posts2 = [];
+    const prevFetch = sandbox.fetch;
+    sandbox.fetch = async (path, opts = {}) => {
+      if (String(path).includes('/api/config') && String(opts.method || '').toUpperCase() === 'POST') {
+        try { posts2.push(JSON.parse(opts.body || '{}')); } catch { /* 忽略 */ }
+      }
+      const cfgNow = JSON.parse(vm.runInContext('JSON.stringify(state.config || {})', ctx));
+      return { ok: true, status: 200, json: async () => ({ ok: true, config: cfgNow }), text: async () => '{}' };
+    };
+    const gbox = document.querySelector('#cfg-game-chats-box');
+    const dbox = document.querySelector('#cfg-digest-chats-box');
+    const checks = [];
+    const saveIn = async (sec) => {
+      vm.runInContext(`state.settingsSection = '${sec}';`, ctx);
+      posts2.length = 0;
+      await vm.runInContext('saveConfig({ quiet: true })', ctx);
+      return posts2[posts2.length - 1] || {};
+    };
+    // 配置里先放一份白名单：没读完时保存必须原样保留（不能变空），读完了没勾才允许清空。
+    vm.runInContext("state.config.groupGame = { ...(state.config.groupGame || {}), chats: ['group:111', 'group:222'] };", ctx);
+    vm.runInContext("state.config.groupDigest = { ...(state.config.groupDigest || {}), chats: ['group:333'] };", ctx);
+    delete gbox.dataset.loaded;
+    const bodyA = await saveIn('experiments');
+    checks.push(['未读完保留原白名单', JSON.stringify(bodyA.groupGame?.chats) === '["group:111","group:222"]', JSON.stringify(bodyA.groupGame?.chats)]);
+    gbox.dataset.loaded = '1';
+    const bodyB = await saveIn('experiments');
+    checks.push(['读完后能清空', Array.isArray(bodyB.groupGame?.chats) && bodyB.groupGame.chats.length === 0, JSON.stringify(bodyB.groupGame?.chats)]);
+    delete dbox.dataset.loaded;
+    const bodyC = await saveIn('moments');
+    checks.push(['日报未读完保留原白名单', JSON.stringify(bodyC.groupDigest?.chats) === '["group:333"]', JSON.stringify(bodyC.groupDigest?.chats)]);
+    sandbox.fetch = prevFetch;
+    const okGuard = checks.every(([, ok]) => ok);
+    okGuard ? pass++ : fail++;
+    console.log('  ' + (okGuard ? 'OK   ' : 'FAIL ') + '群勾选列表：没读完保留原白名单、读完后能清空'
+      + (okGuard ? '' : ' -> ' + JSON.stringify(checks.map(([n, ok, v]) => n + '=' + ok + '(' + v + ')'))));
+  }
+
 } catch (e) {
   fail++;
   console.log('\n加载 app.js 失败: ' + (e && e.message));
