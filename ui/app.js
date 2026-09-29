@@ -7072,19 +7072,27 @@ function renderExperimentalSettingsSection(c) {
           <input type="number" id="cfg-game-daily" min="1" max="50" value="${esc(c.groupGame?.dailyLimitPerChat ?? 6)}" /></div>
       </div>
       <div class="checkbox-row"><input type="checkbox" id="cfg-game-private" ${c.groupGame?.allowPrivateInvite === true ? 'checked' : ''} />
-        <label for="cfg-game-private">允许私聊发词/身份（谁是卧底必需；只发给报名者、每人每局一条，失败不重试）</label></div>
+        <label for="cfg-game-private">允许私聊发词/身份（谁是卧底与狼人杀都必需；只发给报名/在册的人，失败不重试）</label></div>
       <div class="field-row">
         <div class="field"><label for="cfg-game-maxplayers">每局人数上限</label>
           <input type="number" id="cfg-game-maxplayers" min="2" max="30" value="${esc(c.groupGame?.maxPlayers ?? 10)}" /></div>
         <div class="field"><label for="cfg-game-round">单回合超时（秒，0=插件默认）</label>
           <input type="number" id="cfg-game-round" min="0" max="600" value="${esc(c.groupGame?.roundSeconds ?? 0)}" /></div>
+        <div class="field"><label for="cfg-game-discuss">白天讨论时长（秒，0=插件默认 120）</label>
+          <input type="number" id="cfg-game-discuss" min="0" max="600" value="${esc(c.groupGame?.discussSeconds ?? 0)}" /></div>
+        <div class="field"><label for="cfg-game-recruit">开局报名时长（秒，0=不报名直接发牌）</label>
+          <input type="number" id="cfg-game-recruit" min="0" max="300" value="${esc(c.groupGame?.recruitSeconds ?? 45)}" /></div>
       </div>
+      <div class="hint">需要私聊的游戏（谁是卧底/狼人杀）默认先**报名**：想玩的在群里发一句「我玩」或「报名」，
+        够人数才发牌、发牌才发私聊——不会把只是在群里插话的围观者拉进局（把报名时长设 0 就回到"按最近发言者直接发牌"）。</div>
+      <div class="hint">白天讨论到点会自动进投票；中途**超过半数**存活玩家说一句「投吧 / 直接投」也会立刻开投
+        （说「投 3」这种带目标的算投票，不算想开投）。</div>
       <div class="checkbox-row"><input type="checkbox" id="cfg-game-bomb" ${(Array.isArray(c.groupGame?.games) ? c.groupGame.games : ['number-bomb', 'undercover']).includes('number-bomb') ? 'checked' : ''} />
         <label for="cfg-game-bomb">允许「数字炸弹」</label></div>
       <div class="checkbox-row"><input type="checkbox" id="cfg-game-undercover" ${(Array.isArray(c.groupGame?.games) ? c.groupGame.games : ['number-bomb', 'undercover']).includes('undercover') ? 'checked' : ''} />
         <label for="cfg-game-undercover">允许「谁是卧底」</label></div>
       <div class="checkbox-row"><input type="checkbox" id="cfg-game-werewolf" ${(Array.isArray(c.groupGame?.games) ? c.groupGame.games : []).includes('werewolf') ? 'checked' : ''} />
-        <label for="cfg-game-werewolf">允许「狼人杀」（6~9 人：夜里私聊提交行动，白天讨论投票；整局都在私聊，见下面的豁免开关）</label></div>
+        <label for="cfg-game-werewolf">允许「狼人杀」（6~9 人，角色：狼/预言家/女巫/守卫/平民；夜里私聊提交行动，白天讨论投票；整局都在私聊，见下面的豁免开关）</label></div>
       <div class="checkbox-row"><input type="checkbox" id="cfg-game-reveal" ${c.groupGame?.revealWords !== false ? 'checked' : ''} />
         <label for="cfg-game-reveal">谁是卧底/狼人杀结算时公开词与身份（关掉只公布胜方）</label></div>
       <div class="checkbox-row"><input type="checkbox" id="cfg-game-privatedm" ${c.groupGame?.allowGamePrivateDm === true ? 'checked' : ''} />
@@ -12109,6 +12117,9 @@ async function saveConfig({ quiet = false } = {}) {
         dailyLimitPerChat: clampInt(val('#cfg-game-daily', c.groupGame?.dailyLimitPerChat ?? 6), 1, 50, 6),
         maxPlayers: clampInt(val('#cfg-game-maxplayers', c.groupGame?.maxPlayers ?? 10), 2, 30, 10),
         roundSeconds: clampInt(val('#cfg-game-round', c.groupGame?.roundSeconds ?? 0), 0, 600, 0),
+        discussSeconds: clampInt(val('#cfg-game-discuss', c.groupGame?.discussSeconds ?? 0), 0, 600, 0),
+        // 清空输入框 = 回到默认 45（与引擎"键缺失按 45"一致）；写 0 才是关闭报名
+        recruitSeconds: clampInt(val('#cfg-game-recruit', c.groupGame?.recruitSeconds ?? 45) || 45, 0, 300, 45),
         revealWords: chk('#cfg-game-reveal', c.groupGame?.revealWords !== false),
         games: [
           ['number-bomb', '#cfg-game-bomb'],

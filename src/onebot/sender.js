@@ -274,7 +274,9 @@ export class SendQueue {
           ts,
           mid: data?.message_id ?? null,
           targetUserId,
-          eventKind: 'message'
+          // 引擎私聊（群游戏的 game-secret）由调用方指定 eventKind：发送端是首次写库者，
+          // 落库时就得是正确的类型，不能等 ingest 回显（按 mid 幂等、不会回填；2026-09-29 审查 P0）
+          eventKind: options.eventKind || 'message'
         });
         this.onSent?.({ chatKey, text, messageId: data?.message_id ?? null });
         return { text, messageId: data?.message_id ?? null, at: formatClockTime(ts) };

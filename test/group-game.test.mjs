@@ -12,7 +12,10 @@ fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify({
   runtime: { mode: 'active', paused: false },
   allow: { private: ['100000001'] },
   api: { baseUrl: 'https://example.com/v1', apiKey: 'k', model: 'mock', thinking: 'on' },
-  groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, maxDurationMin: 60, dailyLimitPerChat: 6 }
+  groupGame: {
+    enabled: true, chats: ['group:1'], allowPrivateInvite: true, maxDurationMin: 60, dailyLimitPerChat: 6,
+    recruitSeconds: 0, games: ['number-bomb', 'undercover', 'werewolf']
+  }
 }));
 
 const { GroupGameManager } = await import('../src/features/group-game.js');
@@ -22,7 +25,13 @@ const { updateConfig } = await import('../src/core/config.js');
 function makeWorld({ rng = () => 0.42, limit = 6, players = 4, privateDm = false } = {}) {
   // 每个"世界"从零开始：games.json 是共享文件，不清会跨用例污染（上一局的局与每日计数都会带过来）
   fs.rmSync(path.join(dataDir, 'games.json'), { force: true });
-  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: privateDm, dailyLimitPerChat: limit, maxDurationMin: 60 } });
+  updateConfig({
+    groupGame: {
+      enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: privateDm,
+      dailyLimitPerChat: limit, maxDurationMin: 60,
+      recruitSeconds: 0, games: ['number-bomb', 'undercover', 'werewolf'], maxPlayers: 10, discussSeconds: 0
+    }
+  });
   const store = new ChatStore(0, { dataDir, filename: `games-${Math.random().toString(36).slice(2)}.sqlite` });
   // 活跃成员（activeMembers 取的是 self=0 的最近发言者）
   for (let i = 1; i <= players; i += 1) {
@@ -235,6 +244,9 @@ test('私聊豁免开关：关着不带标记、开着对在册玩家带 gameSco
   const onPrivs = on.sent.filter((x) => x.chatKey.startsWith('private:'));
   assert.ok(onPrivs.length >= 6, '6 人各一条身份私聊');
   assert.ok(onPrivs.every((x) => x.options?.gameScoped === true), '开关开着且收件人在册 → 每条私聊都带豁免标记');
+  // 引擎私聊必须在发送时就标明 game-secret（发送端才是首次写库者，见 test/game-secret-prompt.test.mjs）
+  assert.ok(onPrivs.every((x) => x.options?.eventKind === 'game-secret'), '引擎私聊要带 game-secret 标记');
+  assert.ok(on.sent.filter((x) => x.chatKey === 'group:1').every((x) => x.options?.eventKind !== 'game-secret'), '群里公开消息不是 secret');
 });
 
 test('群里的"各种人"（老游戏）：非参与者投票不计；退出有退路；数字炸弹谁都能猜', async () => {
@@ -268,7 +280,8 @@ test('群里的"各种人"（老游戏）：非参与者投票不计；退出有
 });
 
 test('私聊静默消耗：插件认领但不回执的消息，同样标记已读、不唤醒模型', async () => {
-  const { store, sent, mgr } = makeWorld({ players: 6 });
+  // 7 人局才有守卫（6 人局由女巫替掉守卫，2026-09-29）
+  const { store, sent, mgr } = makeWorld({ players: 7 });
   await mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
   const state = mgr.games.get('group:1').state;
   const guard = state.roles.find((r) => r.role === 'guard');
@@ -283,4 +296,184 @@ test('私聊静默消耗：插件认领但不回执的消息，同样标记已�
   assert.equal(await mgr.consumePrivateAction(`private:${guard.userId}`, again), true, '静默也要算"接管"，否则会唤起模型');
   assert.equal(sent.length, 0, '静默消耗不发任何消息');
   assert.equal(store.findByMid(`private:${guard.userId}`, 's2').state, 'acked', '同样要标记已读');
+});
+
+test('白天讨论时长可配：discussSeconds 传进插件（0=插件默认），到点由插件推进', async () => {
+  const { mgr } = makeWorld({ players: 6 });
+  // 默认 0 → 插件用自己的默认（120 秒）
+  await mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  assert.equal(mgr.games.get('group:1').state.discussSeconds, 120);
+  mgr.games.delete('group:1');
+  // 配置 300 → 插件照做
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, discussSeconds: 300, recruitSeconds: 0, games: ['number-bomb', 'undercover', 'werewolf'] } });
+  await mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  assert.equal(mgr.games.get('group:1').state.discussSeconds, 300);
+});
+
+test('报名制：够人才发牌（报名阶段不发任何私聊）、到点人不够就取消、显式名单跳过报名', async () => {
+  // 1) 开报名：只发公告，不发身份私聊
+  const w = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 30, games: ['number-bomb', 'undercover', 'werewolf'] } });
+  const r = await w.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.match(r.text, /报名/);
+  const st = w.mgr.games.get('group:1').state;
+  assert.equal(st.phase, 'recruiting');
+  assert.equal(w.sent.filter((x) => x.chatKey.startsWith('private:')).length, 0, '报名阶段一条私聊都不能发');
+  assert.ok(w.sent.some((x) => /报名中/.test(x.msgs[0])), '要发报名公告');
+
+  // 2) 报名者（发"我玩/报名"）：够 6 人才发牌
+  const ids = ['u1', 'u2', 'u3', 'u4', 'u5', 'u6'];
+  for (const [i, uid] of ids.entries()) {
+    say(w.store, uid, `群友${i + 1}`, i === 0 ? '我玩' : '报名');
+    await w.mgr.tick();
+    const cur = w.mgr.games.get('group:1')?.state;
+    if (i < ids.length - 1) {
+      assert.equal(cur.phase, 'recruiting', `还差 ${ids.length - 1 - i} 人，不能提前发牌`);
+    }
+  }
+  const after = w.mgr.games.get('group:1').state;
+  assert.notEqual(after.phase, 'recruiting', '够人就要发牌进局');
+  assert.equal(after.roles.length, 6);
+  assert.ok(w.sent.filter((x) => x.chatKey.startsWith('private:')).length >= 6, '发牌后才开始私聊发身份');
+
+  // 3) 到点人不够 → 取消
+  const w2 = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 20, games: ['number-bomb', 'undercover', 'werewolf'] } });
+  await w2.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  say(w2.store, 'u1', '群友1', '我玩');
+  await w2.mgr.tick();
+  w2.setClock(w2.getClock() + 25 * 1000);
+  await w2.mgr.tick();
+  assert.equal(w2.mgr.games.has('group:1'), false, '人不够要取消并清状态');
+  assert.ok(w2.sent.some((x) => /报名人数不够|这局先算了/.test(x.msgs[0])));
+
+  // 4) 模型显式给名单 → 跳过报名，直接发牌（"就我们四个玩"）
+  const w3 = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 30, games: ['number-bomb', 'undercover', 'werewolf'] } });
+  const r3 = await w3.mgr.start({ chatKey: 'group:1', gameId: 'werewolf', players: ['群友1', '群友2', '群友3', '群友4', '群友5', '群友6'] });
+  assert.equal(r3.ok, true, JSON.stringify(r3));
+  assert.equal(w3.mgr.games.get('group:1').state.phase, 'night', '显式名单直接开局');
+});
+
+test('审查回归：games 白名单、maxPlayers 生效、报名默认 45、否定式不入选、报名中移出白名单即取消', async () => {
+  // ① games 白名单：没勾狼人杀 → 拒绝 start（以前 UI 勾选是死控件）
+  const w1 = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, dailyLimitPerChat: 6, recruitSeconds: 0, games: ['number-bomb', 'undercover'] } });
+  const denied = await w1.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  assert.equal(denied.ok, false);
+  assert.match(denied.error, /控制台没被允许|没被允许/);
+
+  // ② maxPlayers：控制台设 5 → 名单最多 5 人（用卧底：它的 state.roles 里能直接数名单；
+  //     数字炸弹的 state 不保存名单，断言不了这件事，2026-09-29 审查 P2）
+  const w2 = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, dailyLimitPerChat: 6, recruitSeconds: 0, games: ['undercover'], maxPlayers: 5 } });
+  const started2 = await w2.mgr.start({ chatKey: 'group:1', gameId: 'undercover' });
+  assert.equal(started2.ok, true, JSON.stringify(started2));
+  assert.equal(w2.mgr.games.get('group:1').state.roles.length, 5, 'maxPlayers 要真的截断名单（6 个活跃成员只发 5 张牌）');
+
+  // ③ 报名默认值（键缺失 → 45）在 test/game-recruit-default.test.mjs 里单测（那边是干净配置）
+  const w3 = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, dailyLimitPerChat: 6, games: ['number-bomb', 'undercover', 'werewolf'], recruitSeconds: 45 } });
+  await w3.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  assert.equal(w3.mgr.games.get('group:1').state.phase, 'recruiting');
+
+  // ④ 报名：常见说法都认（我玩/我也玩/我参加/我来/算我一个），否定式不认
+  say(w3.store, 'u1', '群友1', '别带我，你们玩');
+  say(w3.store, 'u2', '群友2', '我不参与');
+  say(w3.store, 'u3', '群友3', '我玩');
+  say(w3.store, 'u4', '群友4', '我也玩');
+  say(w3.store, 'u5', '群友5', '我参加');
+  say(w3.store, 'u6', '群友6', '我来');
+  await w3.mgr.tick();
+  const st = w3.mgr.games.get('group:1')?.state;
+  // 够 6 人（u3,u4,u5,u6 + u1? 不）——u1/u2 被排除，只有 4 人 → 还在报名
+  assert.ok(st && st.phase === 'recruiting', '人数不够应继续报名（u1/u2 不算）');
+  const joiners = st.joiners.map((j) => j.userId).sort();
+  assert.deepEqual(joiners, ['u3', 'u4', 'u5', 'u6'], '明确要玩的 4 人算报名：' + JSON.stringify(joiners));
+
+  // ⑤ 报名中把群移出白名单 → 报名取消（不发身份私聊）
+  updateConfig({ groupGame: { enabled: true, chats: [], allowPrivateInvite: true, dailyLimitPerChat: 6, games: ['number-bomb', 'undercover', 'werewolf'], recruitSeconds: 45 } });
+  await w3.mgr.tick();
+  assert.equal(w3.mgr.games.has('group:1'), false, '白名单外的报名要取消');
+  assert.ok(w3.sent.some((x) => /报名取消/.test(x.msgs[0])));
+  assert.equal(w3.sent.filter((x) => x.chatKey.startsWith('private:')).length, 0, '取消前也没发过私聊');
+});
+
+test('审查回归：新局不重放上一局的历史私聊（私聊水位在发牌时初始化）', async () => {
+  const w = makeWorld({ players: 6 });
+  // 上一局留下的历史私聊（含像行动的内容）
+  w.store.appendIncoming('private:u1', { mid: 'old-1', ts: Date.now() - 60000, senderId: 'u1', senderName: '群友1', text: '刀 2', reply: null, media: [] }, { recordOnly: true });
+  w.store.appendIncoming('private:u1', { mid: 'old-2', ts: Date.now() - 59000, senderId: 'u1', senderName: '群友1', text: '不玩了', reply: null, media: [] }, { recordOnly: true });
+  await w.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  w.sent.length = 0;
+  await w.mgr.tick();
+  await w.mgr.tick();
+  const acted = w.sent.filter((x) => x.chatKey === 'private:u1' && /已记下|退出|查验/.test(x.msgs[0]));
+  assert.equal(acted.length, 0, '新局不能把上一局的历史私聊当成本局行动：' + JSON.stringify(acted.map((x) => x.msgs[0])));
+  assert.equal(w.mgr.games.get('group:1').state.roles.length, 6, '也不该被历史"不玩了"踢出人');
+});
+
+test('人满/开局后还有人报名：给一句"来晚了"的提示（同一人只提一次）', async () => {
+  // ① 报名阶段满员：maxPlayers=4（卧底 minPlayers=4）→ 第 5 个报名者收到"来晚了一步"
+  const w1 = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, dailyLimitPerChat: 6, recruitSeconds: 30, games: ['undercover'], maxPlayers: 4 } });
+  await w1.mgr.start({ chatKey: 'group:1', gameId: 'undercover' });
+  for (const uid of ['u1', 'u2', 'u3', 'u4', 'u5']) say(w1.store, uid, `群友${uid.slice(1)}`, '我玩');
+  await w1.mgr.tick();
+  assert.ok(w1.sent.some((x) => /来晚了一步|报满/.test(x.msgs[0])), '满员后要有人被回绝：' + JSON.stringify(w1.sent.map((x) => x.msgs[0])));
+  assert.ok(w1.sent.some((x) => /来晚/.test(x.msgs[0]) && /群友5/.test(x.msgs[0])), '要指名道姓说清是谁晚了');
+
+  // ② 开局之后才来报：也提示一次，且不重复
+  const w2 = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, dailyLimitPerChat: 6, recruitSeconds: 0, games: ['werewolf'] } });
+  await w2.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  w2.sent.length = 0;
+  say(w2.store, 'u99', '路人甲', '我玩');   // 局外人（不在名单里）
+  await w2.mgr.tick();
+  assert.equal(w2.sent.filter((x) => /来晚/.test(x.msgs[0])).length, 1, '来晚了要提示一次');
+  say(w2.store, 'u99', '路人甲', '我也来');
+  await w2.mgr.tick();
+  assert.equal(w2.sent.filter((x) => /来晚/.test(x.msgs[0])).length, 1, '同一人不重复提示');
+  // 在册玩家说"我玩"不该被提示
+  const inside = w2.mgr.games.get('group:1').state.roles[0].userId;
+  say(w2.store, inside, '局内人', '我玩');
+  await w2.mgr.tick();
+  assert.equal(w2.sent.filter((x) => /来晚/.test(x.msgs[0])).length, 1, '在册玩家不该被当成迟到的');
+});
+
+test('审查回归：报名消息还是 pending（模型那边在飞）也必须能报上名', async () => {
+  // 以前报名扫描带 readOnly（== 只看 acked），同一群里正好有一次模型运行在飞时，
+  // 这批「我玩」对引擎不可见 → 45 秒到点直接"人数不够"（2026-09-29 审查 P2）
+  const w = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 30, games: ['werewolf'] } });
+  await w.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  // 关键：不用 recordOnly → 落库是 pending（模拟"编排器还没跑完这一批"）
+  for (let i = 1; i <= 6; i += 1) {
+    w.store.appendIncoming('group:1', { mid: 700 + i, ts: Date.now(), senderId: `u${i}`, senderName: `群友${i}`, text: '我玩', reply: null, media: [] });
+  }
+  await w.mgr.tick();
+  const st = w.mgr.games.get('group:1')?.state;
+  assert.equal(st?.phase !== 'recruiting', true, '待处理的报名也要算数：' + JSON.stringify(st?.phase));
+  assert.equal(st.roles.length, 6, '6 个人都要进名单');
+});
+
+test('审查回归：白天讨论/投票消息是 pending 时也要计票', async () => {
+  const w = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 0, discussSeconds: 0, games: ['werewolf'] } });
+  const r = await w.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const st0 = w.mgr.games.get('group:1').state;
+  // 发牌即夜间，而夜里群里说什么都不参与判定 → 先把第 1 夜（全员 AFK）推过去
+  w.setClock(w.getClock() + 95 * 1000);
+  await w.mgr.tick();
+  const st = w.mgr.games.get('group:1').state;
+  assert.equal(st.phase, 'day', '超时结算后应进入白天：' + st.phase);
+  const target = st.roles[0];
+  for (const m of st.roles) {
+    w.store.appendIncoming('group:1', { mid: `v-${m.userId}`, ts: Date.now(), senderId: m.userId, senderName: m.name, text: `投 ${st.roles.indexOf(target) + 1}`, reply: null, media: [] });
+  }
+  await w.mgr.tick();
+  const votes = w.mgr.games.get('group:1')?.state?.votes || {};
+  assert.ok(Object.keys(votes).length >= 5, '待处理状态的票也要记下来：' + JSON.stringify(votes));
 });

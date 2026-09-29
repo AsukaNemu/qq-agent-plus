@@ -919,7 +919,9 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       reply,
       media,
       mentionsSelf,
-      eventKind: 'message'
+      // 引擎发的游戏私聊（身份/查验结果/行动回执）标成 game-secret：提示词构建时会过滤掉，
+      // 模型在私聊里不该是上帝视角（2026-09-29 审查 P2）
+      eventKind: isSelf && groupGame?.isSecretSelfMessage?.(chatKey, event.message_id) ? 'game-secret' : 'message'
     };
     const stored = isSelf ? store.appendSelf(chatKey, message) : store.appendIncoming(chatKey, message, {
       recordOnly: arrivedInactive || !isTimeActive(chatKey)

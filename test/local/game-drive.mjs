@@ -14,7 +14,7 @@ fs.writeFileSync(path.join(tmp, 'config.json'), JSON.stringify({
   groupGame: {
     enabled: true, chats: [CHAT], allowPrivateInvite: true,
     games: ['number-bomb', 'undercover', 'werewolf'], maxPlayers: 10, dailyLimitPerChat: 6,
-    allowGamePrivateDm: true, roundSeconds: 0, revealWords: true
+    allowGamePrivateDm: true, roundSeconds: 0, revealWords: true, recruitSeconds: 0
   }
 }));
 
@@ -111,14 +111,14 @@ for (let i = 0; i < 12 && mgr.games.has(CHAT); i += 1) {
 }
 console.log('  局面：', JSON.stringify(mgr.games.get(CHAT) || '已结束'));
 
-// ── 狼人杀（6 人：夜里私聊行动、白天讨论投票）──────────────────────────────
-console.log('\n=== 狼人杀（6 人：私聊行动 → 回执/查验 → 天亮 → 白天投票整条链路）===');
-for (const [uid, name, t] of [[1001, '阿猫', '有人玩狼人杀吗'], [1002, '阿狗', '我来'], [1003, '小北', '+1'], [1004, '老四', '带上我'], [1005, '小五', '算我'], [1006, '小六', '我也来']]) {
+// ── 狼人杀（7 人：守卫 + 女巫都在场；夜里私聊行动、白天讨论投票）────────────
+console.log('\n=== 狼人杀（7 人：私聊行动 → 回执/查验/女巫两瓶药 → 天亮 → 白天投票整条链路）===');
+for (const [uid, name, t] of [[1001, '阿猫', '有人玩狼人杀吗'], [1002, '阿狗', '我来'], [1003, '小北', '+1'], [1004, '老四', '带上我'], [1005, '小五', '算我'], [1006, '小六', '我也来'], [1007, '小七', '还有位置吗']]) {
   store.appendIncoming(CHAT, { mid: `w${uid}`, ts: (clock += 1000), senderId: String(uid), senderName: name, text: t, reply: null, media: [] }, { recordOnly: true });
 }
 const rw = await mgr.start({ chatKey: CHAT, gameId: 'werewolf' });
 console.log('  start 返回：', JSON.stringify(rw));
-show('开局（群公告 + 6 条身份私聊 + 夜行动提示）', drain());
+show('开局（群公告 + 7 条身份私聊 + 夜行动提示）', drain());
 
 const wState = () => mgr.games.get(CHAT).state;
 const roleOf = (role) => wState().roles.filter((r) => r.role === role && r.alive);
@@ -135,15 +135,18 @@ const gsay = async (uid, name, text) => {
   show(`${name}: ${text}`, drain());
 };
 
-// 第 1 夜：狼刀预言家、守卫守预言家（挡刀）、预言家查一只狼
+// 第 1 夜：狼刀预言家；守卫守一个村民（避开女巫的解药，别撞"同守同救必死"）；女巫被问后救预言家；预言家查狼 1
+console.log('\n— 第 1 夜：狼刀预言家 → 守卫守村民 → 女巫用解药救人 → 预言家查验 → 平安夜 —');
 {
   const seer = roleOf('seer')[0];
   const guard = roleOf('guard')[0];
+  const villager = roleOf('villager')[0];
   const [w1, w2] = roleOf('wolf');
   await pmAction(w1.userId, `刀 ${numOf(seer.userId)}`);
-  await pmAction(w2.userId, `刀 ${numOf(seer.userId)}`);
-  await pmAction(guard.userId, `守 ${numOf(seer.userId)}`);
+  await pmAction(w2.userId, `刀 ${numOf(seer.userId)}`);   // 两只狼都交 → 刀口定下，引擎这才去问女巫
+  await pmAction(guard.userId, `守 ${numOf(villager.userId)}`);
   await pmAction(seer.userId, `查 ${numOf(w1.userId)}`);
+  await pmAction(roleOf('witch')[0].userId, '救');          // 解药：救今晚被刀的人
 }
 // 第 1 天：全员发言 → 投狼 1 出局
 for (const r of wState().roles.filter((x) => x.alive)) await gsay(r.userId, r.name, '我先说说我的看法');
@@ -154,16 +157,19 @@ for (const r of wState().roles.filter((x) => x.alive)) await gsay(r.userId, r.na
     if (target) await gsay(r.userId, r.name, `投 ${numOf(target.userId)}`);
   }
 }
-// 第 2 夜：狼刀守卫（守卫守自己）、预言家再查一次
+// 第 2 夜：狼刀守卫（守卫守自己 → 挡刀）；女巫改用毒药毒最后一只狼；预言家再查一次
+console.log('\n— 第 2 夜：狼刀守卫 → 守卫自守（挡刀）→ 女巫毒最后一只狼 → 狼全灭 —');
 {
   const aliveW = roleOf('wolf');
   const guard = roleOf('guard')[0];
   const seer = roleOf('seer')[0];
-  if (aliveW[0]) await pmAction(aliveW[0].userId, `刀 ${numOf((guard || seer).userId)}`);
+  const witch = roleOf('witch')[0];
+  if (aliveW[0]) await pmAction(aliveW[0].userId, `刀 ${numOf(guard.userId)}`);
   if (guard) await pmAction(guard.userId, `守 ${numOf(guard.userId)}`);
   if (seer) await pmAction(seer.userId, `查 ${numOf(aliveW[0].userId)}`);
+  if (witch && aliveW[0]) await pmAction(witch.userId, `毒 ${numOf(aliveW[0].userId)}`);
 }
-// 第 2 天：发言 → 投掉最后一只狼 → 好人获胜
+// 第 2 天：若还没结束（毒药把最后一只狼毒掉就该结算好人胜），再走一轮发言投票
 if (mgr.games.has(CHAT)) {
   for (const r of wState().roles.filter((x) => x.alive)) await gsay(r.userId, r.name, '我觉得再想想');
   const aliveW = roleOf('wolf');

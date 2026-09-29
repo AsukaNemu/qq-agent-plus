@@ -18,7 +18,9 @@ const CASES = [
   'test-sticker-lookup.mjs',
   'test-send-tools.mjs',
   'test-thinking-toolchoice.mjs',
-  'test-card-segments.mjs'
+  'test-card-segments.mjs',
+  'game-drive.mjs',
+  'game-sim.mjs'
 ];
 
 const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));

@@ -593,6 +593,9 @@ export function buildPastState(store, chatKey, { excludeIds = [], limit = null }
   const exclude = new Set(excludeIds);
   if (maxLimit <= 0) return { text: '', count: 0, messages: [] };
   let messages = store.recent(chatKey, { limit: maxLimit + exclude.size, readOnly: true }).filter((m) => !exclude.has(m.id));
+  // 引擎发的游戏私聊（身份/查验结果/行动回执）不进模型上下文：模型在私聊里不该是上帝视角
+  // （2026-09-29 审查 P2；标记由群游戏管理器在发送时登记、ingest 落库时打上 eventKind='game-secret'）
+  messages = messages.filter((m) => m.eventKind !== 'game-secret');
   // 屏蔽名单兜底过滤：屏蔽生效前已存档的历史消息，也不能再进提示词。
   // 入口拦截只管"新消息"，这里管"老库存"。机器人自己的发言（self）不过滤。
   const [pKind, pId] = String(chatKey || '').split(':');

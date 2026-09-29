@@ -310,6 +310,14 @@ export const DEFAULT_CONFIG = {
     // 私聊白名单里（报名=同意接收；deny 仍优先），用于狼人杀这类全程私聊行动的游戏。
     // 关着也能玩——把想玩的人加进 allow.private（推荐顺手加好友）即可。
     allowGamePrivateDm: false,
+    // 开局报名时长（秒）：需要私聊的游戏（谁是卧底/狼人杀）先挂报名，够 minPlayers 才发牌；
+    // 0 = 不报名（直接按"最近发过言的群友"发牌）。报名阶段不发任何私聊，避免把围观者拉进局。
+    recruitSeconds: 45,
+    // 允许开局的游戏（控制台勾选的那三个）：引擎按这个白名单拒绝 start（以前勾选是死控件）
+    games: ['number-bomb', 'undercover'],
+    // 白天讨论时长（秒；0 = 用插件默认 120）与结算是否公开词/身份
+    discussSeconds: 0,
+    revealWords: true,
     maxDurationMin: 60,
     dailyLimitPerChat: 6
   },

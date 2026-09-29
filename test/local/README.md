@@ -14,6 +14,12 @@ T=$(mktemp -d)
 QQ_AGENT_DATA_DIR=$T node test/local/test-sender-retry.mjs
 ```
 
+一次跑完下表全部用例（各自一个临时 DATA_DIR，互不污染）：
+
+```bash
+node test/local/run.mjs
+```
+
 **必须用临时 QQ_AGENT_DATA_DIR**：下表中标记"需要 DATA_DIR"的用例都要一个可写的数据目录
 （其中两个会 seed 一份放行的 `config.json`，`src/core/access.js` 的 `assertCanSend` 才不拦发送；
 `test-send-tools.mjs` 会往里复制表情名表），指向生产目录会覆盖线上配置。
@@ -32,7 +38,8 @@ QQ_AGENT_DATA_DIR=$T node test/local/test-sender-retry.mjs
 | `test-qzone-reply-fallback.mjs` | 动态互动的"回复"半边：自己的动态列表被限流（retcode=100）时不整轮抛错，改走"已关注动态 + Cookie 详情"兜底 | 是（写 config.json） | < 2 秒 |
 | `test-thinking-toolchoice.mjs` | 思考模式下强制 `tool_choice` 会 400：要自动降级成"允许模型自选"而不是整次失败 | 是（写 config.json） | < 2 秒 |
 | `test-card-segments.mjs` | 分享卡片（json / xml 段）解析成可读文本，并标注"自己的动态" | 否 | < 1 秒 |
-| `game-drive.mjs` | 群游戏整局驱动：数字炸弹的区间收窄 / 越界提醒 / 命中结算，"谁是卧底"的私聊发词、轮次发言、投票淘汰与胜负判定。用桩 sender 把"会发出去的话"逐条打出来，自己建临时 DATA_DIR、跑完删掉，不碰线上数据 | 否（脚本自管） | < 2 秒 |
+| `game-drive.mjs` | 群游戏整局驱动：数字炸弹的区间收窄 / 越界提醒 / 命中结算，"谁是卧底"的私聊发词、轮次发言、投票淘汰与胜负判定，狼人杀（7 人）的私聊夜行动（刀/守/查/女巫用药）到白天投票整条链路。用桩 sender 把"会发出去的话"逐条打出来，自己建临时 DATA_DIR、跑完删掉，不碰线上数据 | 否（脚本自管） | < 2 秒 |
+| `game-sim.mjs` | 虚拟群模拟（人设 + 噪声 + 中途重启）：路人掺和、话痨刷屏、潜水、乱序发言、报名/迟到、退出、AFK，外加"公开消息不泄身份/不点名没接上"等不变量断言。狼人杀局里女巫救人生效（第 1 夜平安夜）、第 2 夜"救改毒"、以及 revealWords=false 时结算不泄身份 | 否（脚本自管） | < 2 秒 |
 
 ## 可选用例依赖
 

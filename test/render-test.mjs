@@ -628,7 +628,10 @@ try {
       && /id="cfg-game-privatedm"[^>]*checked/.test(wolfOnHtml)
       && !/id="cfg-game-privatedm"[^>]*checked/.test(wolfOffHtml)
       && /游戏期间私聊豁免/.test(wolfOnHtml)
-      && /聊天白名单/.test(wolfOnHtml);
+      && /聊天白名单/.test(wolfOnHtml)
+      && /id="cfg-game-discuss"/.test(wolfOnHtml)
+      && /白天讨论时长/.test(wolfOnHtml)
+      && /投吧/.test(wolfOnHtml);
     okWolf ? pass++ : fail++;
     console.log('  ' + (okWolf ? 'OK   ' : 'FAIL ') + '群游戏：狼人杀勾选与「游戏期间私聊豁免」开关随配置（含白名单/加好友提示）');
   }
