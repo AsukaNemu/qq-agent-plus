@@ -97,8 +97,9 @@ export async function downloadImageAsDataUrl(url, signal) {
   signal?.throwIfAborted();
   if (String(url || '').startsWith('base64://')) {
     const buffer = Buffer.from(String(url).slice('base64://'.length), 'base64');
-    if (!buffer.length || buffer.length > 12 * 1024 * 1024) {
-      throw new Error('本地表情图片为空或超过 12 MiB');
+    // 上限与 http(s) 路径保持一致（9 MiB）：高于视觉网关上限会直接被网关 400 掉
+    if (!buffer.length || buffer.length > 9 * 1024 * 1024) {
+      throw new Error('本地表情图片为空或超过 9 MiB');
     }
     const mime = detectMime(buffer);
     if (!mime) throw new Error('本地表情图片格式无效');
@@ -108,11 +109,13 @@ export async function downloadImageAsDataUrl(url, signal) {
   let buffer;
   let contentType;
   try {
-    ({ buffer, contentType } = await safeFetchBinary(safeUrl, 12 * 1024 * 1024, signal));
+    // 9 MiB：视觉网关的图片上限约 10 MB（实测火山方舟报 "exceeds the limit (9.9 MiB)"）。
+    // 原为 12 MiB —— 高于网关上限会在 9.9~12 MiB 形成盲区：本地放行 → 网关 400 → 整次运行失败。
+    ({ buffer, contentType } = await safeFetchBinary(safeUrl, 9 * 1024 * 1024, signal));
   } catch (error) {
-    // 超过常规上限 → 放宽到 96MiB 重拉 + ffmpeg 降采样（Issue #6：群友发 >12MiB 大图）。
-    // 非超限错误原样抛出；ffmpeg 缺失/失败时抛带指引的错误，常规 ≤12MiB 路径不受影响。
-    ({ buffer, contentType } = await fetchOversizedImageAsJpeg(safeUrl, error, signal));
+    // 超过常规上限 → 放宽到 96MiB 重拉 + ffmpeg 降采样（Issue #6：群友发超大图）。
+    // 非超限错误原样抛出；ffmpeg 缺失/失败时抛带指引的错误，常规路径不受影响。
+    ({ buffer, contentType } = await fetchOversizedImageAsJpeg(safeUrl, error, signal, { cap: 9 * 1024 * 1024 }));
   }
   if (!buffer || !buffer.length) throw new Error('图片内容为空');
   const mime = detectMime(buffer) || String(contentType || 'image/jpeg').split(';')[0];

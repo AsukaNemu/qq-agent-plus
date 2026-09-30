@@ -6,11 +6,12 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { asrApiKey, asrAvailable, asrConfigured, asrKeyHost, asrKeySource, asrLocalBin, asrLocalModel, asrSecretId, asrSecretKey, conversationConfigForChat, findWhisperBinSync, getConfig, identityPilotEnabled, incidentPilotEnabled, slangPilotEnabled, updateConfig, onTimeControlChange, DATA_DIR, ROOT } from '../core/config.js';
+import { adminOwnerUin, asrApiKey, asrAvailable, asrConfigured, asrKeyHost, asrKeySource, asrLocalBin, asrLocalModel, asrSecretId, asrSecretKey, conversationConfigForChat, findWhisperBinSync, getConfig, identityPilotEnabled, incidentPilotEnabled, slangPilotEnabled, updateConfig, onTimeControlChange, DATA_DIR, ROOT } from '../core/config.js';
 import { tokenSaverEffective } from '../core/token-saver.js';
 import { customSearch } from '../llm/web-search.js';
 import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes } from '../onebot/onebot.js';
 import { readForwardMessages } from '../onebot/forward-reader.js';
+import { RecallNotifier } from '../onebot/recall-notifier.js';
 import { ChatStore } from '../core/store.js';
 import { MemoryStore } from '../memory/memory.js';
 import { StickerManager } from '../onebot/sticker-manager.js';
@@ -425,6 +426,13 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       });
       log('[ingest] 处理事件出错:', error?.message ?? error);
     })
+  });
+  const recallNotifier = new RecallNotifier({
+    store,
+    onebot,
+    getTargetUin: () => adminOwnerUin(getConfig()),
+    emit,
+    log: moduleLog('recall')
   });
   const stickers = new StickerManager(onebot);
   const sender = new SendQueue({
@@ -1136,6 +1144,18 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       // Echoes are deduplicated by message ID; shared-protocol observe mode also records old-instance replies.
       if (event.message_type === 'group' && event.group_id != null) return ingestMessage('group', String(event.group_id), event, arrivedInactive);
       if (event.message_type === 'private' && event.user_id != null) return ingestMessage('private', String(event.user_id), event, arrivedInactive);
+      return;
+    }
+    if (
+      event.post_type === 'notice'
+      && (event.notice_type === 'group_recall' || event.notice_type === 'friend_recall')
+    ) {
+      const result = await recallNotifier.handle(event);
+      if (result.status === 'notified') {
+        log(`[recall] 已私聊通知 ${result.chatKey}#${result.mid}（媒体 ${result.mediaSent} 个）`);
+      } else if (result.status === 'not-found') {
+        log(`[recall] 撤回消息未在本地记录：${result.chatKey}#${result.mid}`);
+      }
       return;
     }
     if (event.post_type === 'notice' && event.notice_type === 'notify' && event.sub_type === 'poke') {

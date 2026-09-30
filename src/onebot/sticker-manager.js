@@ -14,6 +14,11 @@ import {
 
 const STICKER_ASSET_DIR = path.join(DATA_DIR, 'sticker-assets');
 const MAX_STICKER_BYTES = 8 * 1024 * 1024;
+
+// QQ 收藏表情的写入方式见 #addToQqFavorites：
+// app 进程**写不进 QQ 容器**（macOS com.apple.macl 保护，实测 EPERM），
+// 所以改为让 NapCat 用 `download_file` 自己把图下进容器，再把容器内路径交给 add_custom_face。
+
 const IMAGE_EXTENSIONS = Object.freeze({
   'image/png': 'png',
   'image/jpeg': 'jpg',
@@ -395,15 +400,14 @@ export class StickerManager {
     // 优先加进 QQ 收藏表情：链接稳定、QQ 客户端里也能用、发出去更可靠
     if (cfg.saveToQqFavorites !== false && !(await this.#qqFavoritesFull())) {
       const qq = await this.#addToQqFavorites(usedUrl);
-      if (qq?.emojiId) {
+      if (qq?.added) {
+        // #addToQqFavorites 内部已经 sync 过一次，这里只补写备注并返回条目
         try {
-          await this.sync(true);
-        } catch { /* 拉不到就等下一次同步 */ }
-        try {
-          if (this.peek(qq.emojiId)) this.note(qq.emojiId, { note });
+          if (qq.emojiId && this.peek(qq.emojiId)) this.note(qq.emojiId, { note });
         } catch { /* 备注失败不影响收藏 */ }
         console.log('[sticker] 已加进 QQ 收藏表情：' + note);
-        return this.peek(qq.emojiId) || { id: qq.emojiId, localNote: note, source: 'qq' };
+        const saved = qq.emojiId ? this.peek(qq.emojiId) : null;
+        return saved || { id: qq.emojiId || '', localNote: note, source: 'qq' };
       }
     }
     const entry = await this.collect(message?.mid, { url: usedUrl, srcKey, note });
@@ -446,13 +450,40 @@ export class StickerManager {
     }
   }
 
-  /** 把图加进 QQ 收藏表情（协议端 add_custom_face）；成功返回 emojiId。 */
+  /** 把图加进 QQ 收藏表情（协议端 add_custom_face）；成功返回 { added: true, emojiId }。
+   *
+   *  ⚠️ 沙箱：app 进程**写不进 QQ 容器**（macOS `com.apple.macl` 保护，实测 EPERM），
+   *  而 NapCat 的 add_custom_face 只认「容器内的本地路径」——传 http URL 或 `base64://`
+   *  都会被它当成路径去 stat → ENOENT。
+   *  ✅ 解法：先让 **NapCat 自己**用 `download_file` 把图下进它的容器（返回容器内路径），
+   *  再把该路径交给 add_custom_face。全程不需要 app 具备容器写权限。
+   */
   async #addToQqFavorites(url) {
     if (typeof this.onebot?.call !== 'function' || !/^https?:\/\//i.test(String(url || ''))) return null;
     try {
-      const res = await this.onebot.call('add_custom_face', { file: url }, 60000, null);
-      const emojiId = String(res?.emoji_id || res?.resId || res?.data?.emoji_id || '').trim();
-      return emojiId ? { emojiId } : null;
+      // 1) 让 NapCat 把图下载进它自己的容器
+      //    返回形如 <QQ容器>/Data/.config/QQ/NapCat/temp/xxx.jpg
+      const extMatch = /\.(png|jpe?g|gif|webp)(?:[?#]|$)/i.exec(String(url));
+      const ext = extMatch ? extMatch[1].toLowerCase().replace('jpeg', 'jpg') : 'jpg';
+      const dl = await this.onebot.call(
+        'download_file',
+        { url: String(url), name: `qqagent-${crypto.randomUUID()}.${ext}`, base64: 'false' },
+        60000,
+        null
+      );
+      const localPath = String(dl?.file || dl?.path || dl?.file_path || '').trim();
+      if (!localPath) return null;
+      // 2) 用容器内路径收藏
+      //    NapCat 成功时返回 {"result":0,"errMsg":"success"|"","isExist":0|1} ——
+      //    errMsg 可能是 "success" 而不是空，所以只能看 result；有些封装会直接回 emoji_id，也认。
+      const before = new Set((this.entries || []).map((e) => String(e?.id || '')));
+      const res = await this.onebot.call('add_custom_face', { file: localPath }, 60000, null);
+      const emojiIdRaw = String(res?.emoji_id || res?.resId || res?.data?.emoji_id || '').trim();
+      if (Number(res?.result) !== 0 && !emojiIdRaw) return null;
+      // 3) 拉一次同步定位新条目：QQ 会重新编码，md5 变了，只能靠 diff
+      try { await this.sync(true); } catch { /* 拉不到就等下一次同步 */ }
+      const addedEntry = (this.entries || []).find((e) => !before.has(String(e?.id || '')));
+      return { added: true, emojiId: emojiIdRaw || String(addedEntry?.id || '') };
     } catch (error) {
       const msg = String(error?.message ?? error);
       const maybeFull = /full|limit|上限|超过|超出|500/i.test(msg);
@@ -520,7 +551,7 @@ export class StickerManager {
           additionalProperties: false,
           properties: {
             save: { type: 'boolean', description: 'true=值得收进表情库；false=不值得' },
-            note: { type: 'string', maxLength: 24, description: 'save=true 时写一句简短备注（画的是什么/适合什么场合）；save=false 留空' },
+            note: { type: 'string', maxLength: 60, description: 'save=true 时写一行备注，供以后挑表情时判断贴不贴切：先写画面主体（谁/什么形象、什么表情动作），再写适合的聊天场合（用逗号分隔），20~45 字。⚠️必须描述画面本身，不要只照抄图里的文字（「S」「危」这种没用）；图里的文字有梗意就放括号里附在最后。save=false 留空' },
             reason: { type: 'string', maxLength: 40, description: '一句话说明为什么收/不收（给日志看）' }
           },
           required: ['save']
@@ -535,6 +566,11 @@ export class StickerManager {
           + '值得收：真正的表情包——带字的梗图、猫猫狗狗、卡通形象、抽象搞笑图，能拿来表达情绪、吐槽或怼人的。'
           + '不值得收：本人或朋友的生活照、随手拍、自拍，以及跟聊天无关的截图（游戏、聊天记录、网页）、二维码、证件、广告、纯风景照。'
           + '拿不准就问自己一句：以后聊天时真会用上吗。会就用得上才收，不会就别收。'
+          // 备注是「以后挑表情」的唯一依据：只写图里的字等于没写（实测出现过「S」「梆」「危」这类单字备注，
+          // 导致模型挑不出贴切的表情、干脆不发）。所以这里把「怎么写备注」讲清楚。
+          + '决定收时，note 要写一行真正有用的备注：先描述画面主体（谁/什么形象、什么表情和动作），'
+          + '再写适合的聊天场合（如"犯懵、被点名、答不上话时用"），20~45 字。'
+          + '必须描述画面本身，不要只照抄图里的文字；图里的文字有梗意就放括号里附在最后。'
       },
       {
         role: 'user',

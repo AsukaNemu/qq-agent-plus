@@ -258,6 +258,17 @@ function clipLine(text, max = LABEL_CHARS) {
   return value.length > max ? `${value.slice(0, max)}…` : value;
 }
 
+/** id → 稳定的 32 位哈希（FNV-1a）。用于把清单顺序"打散"成伪随机，但同输入结果恒定。 */
+function stableKey(entry) {
+  const s = String(entry?.id || '');
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i += 1) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
 export function buildStickerContext(entries, max = 10, { vision = true } = {}) {
   const all = (Array.isArray(entries) ? entries : [])
     .map(normalizeStickerEntry)
@@ -289,14 +300,17 @@ export function buildStickerContext(entries, max = 10, { vision = true } = {}) {
   const familiarCount = Math.max(1, Math.min(Math.ceil(limit / 2), Math.max(1, usedCount)));
   const familiar = byUsage.slice(0, familiarCount);
   const picked = new Set(familiar.map((e) => e.id));
+  // 轮换位的排序：先把"没用过的""能看懂的"挑出来，剩下的用「id 稳定哈希」打散。
+  // ⚠️ 原来这里按 createdAt 升序 —— 等于永远偏向老图：库一大，新收进来的表情
+  // （比如自动收藏的那批）排在几百张之后，几乎轮不到。用稳定哈希既保证
+  // **同一份库每轮顺序完全一致**（这段清单常驻系统提示、属于缓存前缀，不能每轮换一批），
+  // 又不像按时间排序那样有系统性偏向，新老表情都有机会上榜。
   const rotation = list
     .filter((e) => !picked.has(e.id))
     .sort((a, b) =>
       ((a.lastUsedAt || 0) ? 1 : 0) - ((b.lastUsedAt || 0) ? 1 : 0)   // 没用过的排最前
       || (hasNote(b) ? 1 : 0) - (hasNote(a) ? 1 : 0)                  // 能看懂的优先
-      || (a.lastUsedAt || 0) - (b.lastUsedAt || 0)                    // 用得越早越先上榜
-      || String(a.createdAt || '').localeCompare(String(b.createdAt || ''))
-      || String(a.id).localeCompare(String(b.id)))
+      || stableKey(a) - stableKey(b))
     .slice(0, limit - familiar.length);
   const top = [...familiar, ...rotation];
   const lines = top.map((e) => {
@@ -327,8 +341,8 @@ export function buildStickerContext(entries, max = 10, { vision = true } = {}) {
     ? '，完整列表可用 list_stickers 查询；没用过的可以先 get_sticker_image 看一眼再用'
     : '，完整列表可用 list_stickers 查询';
   return `【可用表情包】你的表情库里有 ${list.length} 个表情包（${scope}${tail}）。`
-    + '标〔QQ收藏表情〕的发出去是表情，标〔本地图库〕的是一张图片（QQ 里显示为图片）——'
-    + `群里要"发表情"时优先挑前者：\n${lines.join('\n')}`;
+    + '标〔QQ收藏表情〕的发出去是表情，标〔本地图库〕的发出去是一张图片（QQ 里显示为图片）——'
+    + `两种都能用，随便挑，别老盯着同一批：\n${lines.join('\n')}`;
 }
 
 /** 发送前的表情包策略提示（软策略）。 */

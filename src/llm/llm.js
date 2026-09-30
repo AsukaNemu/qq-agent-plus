@@ -6,6 +6,41 @@ import { normalizeThinkingIntent, thinkingPatchFor, resolveThinkingPatch, modelS
 import { resolveOfficialPrice, resolveModelPrice, priceAt } from '../pricing/model-prices.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { assertTimeAllowed, watchTimeWindow } from '../core/time-gate.js';
+import fs from 'node:fs';
+import nodePath from 'node:path';
+
+// ── 全量用量记账（本地新增）────────────────────────────────────────────
+// 目的：把「所有」LLM 调用的 token 汇总到一处。
+// 原生 data/usage-today.json 只统计会话系统（orchestrator）的消耗；
+// 表情包判断 / 每日动态 / 空间互动 / 身份评估 / 关系评估等模块各自单独记账，
+// 不进那个汇总，所以只看 usage-today.json 会漏掉一大块。
+// chatCompletionWithRetry 是所有模块的唯一汇聚点，故在此统一记录。
+// 输出：$QQ_AGENT_DATA_DIR/usage-all.jsonl（每行一条 JSON）
+function recordAllUsage(args, response) {
+  try {
+    const u = response?.usage;
+    if (!u) return;
+    const prompt = Number(u.prompt_tokens) || 0;
+    const completion = Number(u.completion_tokens) || 0;
+    const cached = Number(
+      u.prompt_tokens_details?.cached_tokens
+      ?? u.prompt_cache_hit_tokens
+      ?? u.cached_tokens
+      ?? 0
+    ) || 0;
+    const dir = process.env.QQ_AGENT_DATA_DIR || nodePath.join(process.cwd(), 'data');
+    const rec = {
+      ts: Date.now(),
+      purpose: String(args?.purpose || ''),
+      model: String(response?.model || ''),
+      prompt,
+      completion,
+      total: Number(u.total_tokens) || (prompt + completion),
+      cached
+    };
+    fs.appendFileSync(nodePath.join(dir, 'usage-all.jsonl'), JSON.stringify(rec) + '\n');
+  } catch { /* 记账失败绝不能影响主流程 */ }
+}
 
 function joinUrl(base, path) {
   return `${String(base).replace(/\/+$/, '')}${path}`;
@@ -290,6 +325,8 @@ export async function chatCompletionWithRetry(args, retries = 2) {
     primaryError = error;
   }
 
+  recordAllUsage(args, response);
+
   const shouldFallback = primaryError
     ? isFallbackWorthy(primaryError)
     : isModerationRefusal(response);
@@ -303,7 +340,9 @@ export async function chatCompletionWithRetry(args, retries = 2) {
     ? `失败（${String(primaryError?.message ?? primaryError).slice(0, 90)}）`
     : '两轮都被审核拦截';
   console.warn(`[llm] 主模型${why}，改用兜底模型 ${fb.model}`);
-  return await runCompletionWithRetries({ ...args, overrides: fb }, 1);
+  const fallbackResponse = await runCompletionWithRetries({ ...args, overrides: fb }, 1);
+  recordAllUsage(args, fallbackResponse);
+  return fallbackResponse;
 }
 
 /**

@@ -109,8 +109,8 @@ export async function testModelChat({ baseUrl, apiKey, model }) {  assertTimeAll
       },
       body: JSON.stringify({
         model: String(model).trim(),
-        messages: [{ role: 'user', content: '请只回复两个字符：pong' }],
-        max_tokens: 16,
+        messages: [{ role: 'user', content: '只回复：pong' }],
+        max_tokens: 256,
         stream: false
       }),
       signal: controller.signal

@@ -127,6 +127,10 @@ export class ChatStore {
       CREATE INDEX IF NOT EXISTS thread_turns_lookup
         ON thread_turns(thread_id, sequence);
       CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS recall_notifications (
+        chat_key TEXT NOT NULL, mid TEXT NOT NULL, notified_at INTEGER NOT NULL,
+        PRIMARY KEY (chat_key, mid)
+      );
     `);
     ensureColumn(this.db, 'conversation_threads', 'mode', "TEXT NOT NULL DEFAULT 'threaded'");
     ensureColumn(this.db, 'conversation_threads', 'disposition', "TEXT NOT NULL DEFAULT 'active'");
@@ -875,6 +879,22 @@ export class ChatStore {
 
   findByMid(chatKey, mid) {
     return entry(this.db.prepare('SELECT * FROM messages WHERE chat_key=? AND mid=?').get(chatKey, normalizeMid(mid)));
+  }
+
+  hasRecallNotification(chatKey, mid) {
+    const normalized = normalizeMid(mid);
+    if (!normalized) return false;
+    return Boolean(this.db.prepare(
+      'SELECT 1 FROM recall_notifications WHERE chat_key=? AND mid=? LIMIT 1'
+    ).get(String(chatKey || ''), normalized));
+  }
+
+  markRecallNotification(chatKey, mid, notifiedAt = Date.now()) {
+    const normalized = normalizeMid(mid);
+    if (!normalized) return false;
+    return this.#transaction(() => this.db.prepare(
+      'INSERT OR IGNORE INTO recall_notifications(chat_key, mid, notified_at) VALUES (?,?,?)'
+    ).run(String(chatKey || ''), normalized, Number(notifiedAt) || Date.now()).changes > 0);
   }
 
   findByLocalId(chatKey, localId) {
