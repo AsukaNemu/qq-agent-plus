@@ -293,15 +293,20 @@ async function currentMessageImageUrls(ctx, entry) {
 }
 
 /**
- * URL 过期时的兜底取图：让 NapCat 自己把图落成**它容器内的本地文件**，再读进来。
+ * URL 过期时的兜底取图：让 NapCat 把图落成容器内的本地文件，再读进来。
  *
- * 背景（2026-09-30 实测）：QQ 的图片直链形如
- *   https://gchat.qpic.cn/download?appid=…&fileid=…&rkey=…&spec=0
- * 其中 rkey 是**会话级临时钥匙**，过期后服务端直接返回
- *   {"retcode":-5503007,"retmsg":"download url has expired"}
- * （HTTP 400）。而且 get_msg 重取到的还是同一个 rkey，刷新救不回来。
- * 但 NapCat 的 get_image 能把图落地到容器内路径，且 **app 读得到那个文件**
- * —— macOS 的 com.apple.macl 只挡写、不挡读（实测可读）。
+ * ⚠️⚠️ **这条兜底在 macOS 上实际不生效** —— 保留它只是为了记录尝试过的路径，
+ * 以及万一将来权限模型变化。原因（2026-09-30 实测）：
+ *   · macOS 的 com.apple.macl / com.apple.provenance **既挡写、也挡读**。
+ *     **agent 沙箱里能读到**（我实测过 356KB 成功），但 **launchd 跑的服务进程会 EPERM**。
+ *     和"app 写不进 QQ 容器"是同一个坑 —— 测试必须意识到沙箱可能放行了额外权限。
+ *   · 反向也不行：QQ 自己的沙箱同样挡写容器外（用 download_file 走路径穿越到
+ *     ~/qq-agent-plus/data/tmp/ 得到 EPERM）。
+ *   · 唯一正路是 NapCat 的 get_rkey 刷新 rkey，但它依赖 PacketBackend，
+ *     而 PacketBackend 不支持本机 QQ 版本（7.0.2-53644-arm64）。
+ *
+ * 所以：**过期图片目前取不到**。新消息的图正常（URL 新鲜）；
+ * 只有放久了的旧消息会 400。自动收藏是在收到消息时立刻处理的，不受影响。
  */
 async function readImageViaNapCat(ctx, file, signal) {
   const name = String(file || '').trim();

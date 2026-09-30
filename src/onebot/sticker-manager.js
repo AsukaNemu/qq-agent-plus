@@ -529,8 +529,13 @@ export class StickerManager {
 
   /**
    * 取图 → { buffer, contentType }。URL 优先；URL 失败（多半是 QQ 的 rkey 过期，
-   * 服务端回 `download url has expired`）时用 NapCat 的 `get_image` 兜底 ——
-   * 让它把图落成容器内的本地文件再读进来（macl 只挡写、不挡读，实测可读）。
+   * 服务端回 `download url has expired`）时尝试用 NapCat 的 `get_image` 兜底。
+   *
+   * ⚠️ **这条兜底在 macOS 上实际不生效**：macl / provenance 对服务进程**既挡写也挡读**，
+   * 服务读容器内文件会 EPERM（沙箱里测试能读，服务不能 —— 别被测试环境骗了）。
+   * 反向也不行：QQ 沙箱挡写容器外。唯一正路是 NapCat 的 get_rkey，
+   * 但它依赖 PacketBackend，而 PacketBackend 不支持本机 QQ 版本（7.0.2-53644-arm64）。
+   * 详见 tools-core.js 里 readImageViaNapCat 的说明。
    */
   async #fetchImageBuffer(url, { file = '', maxBytes = 4 * 1024 * 1024, signal } = {}) {
     try {
