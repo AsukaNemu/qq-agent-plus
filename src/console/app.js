@@ -628,7 +628,8 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
             `验证消息：${request.comment || '（无）'}`,
             `编号：${request.id}`,
             '',
-            `回复“同意好友申请 ${request.id}”或“拒绝好友申请 ${request.id}”，也可以在控制台“设置 → 实验功能”审批。`,
+            `回复“同意好友申请 ${request.id}”或“拒绝好友申请 ${request.id}”（要带上编号），也可以在控制台“设置 → 实验功能”审批。`,
+            '只有一条待审批时，直接回“同意好友申请”或“拒绝好友申请”就行，不用带编号。',
             '同意后会调用 OneBot 接受请求，并自动加入私聊白名单；结果未知时不会自动重试。'
           ].join('\n'),
           signal
@@ -998,6 +999,47 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         log(`[identity-pilot] 入站好友请求审批结果通知失败：${error?.message ?? error}`);
       }
       return true;
+    }
+    // 也接受**不带编号**的写法：管理员常常只打「同意好友申请」，而原来的正则强制要求编号，
+    // 结果这句话落进普通聊天，模型还会瞎回一句「好了 加进来了喵」（2026-09-30 实测）。
+    // 这里按待审批条数分流：只有一条就直接执行（省得抄编号）；多条就列出来让管理员补编号；
+    // 没有就如实说没有——绝不猜。
+    if (incoming.enabled === true) {
+      const bare = /^\s*\/?(同意|拒绝)好友申请\s*$/i.exec(String(text || ''));
+      if (bare) {
+        let pending = [];
+        try {
+          pending = identityPilot?.listIncomingFriendRequests?.({ status: 'pending', limit: 20 }) || [];
+        } catch { /* 库不可用时按"没有"处理，下面会如实回复 */ }
+        let reply;
+        if (!pending.length) {
+          reply = '现在没有待审批的好友申请。';
+        } else if (pending.length === 1) {
+          const decision = bare[1] === '同意' ? 'approve' : 'reject';
+          try {
+            const result = await identityPilot?.decideIncomingFriendRequest(
+              pending[0].id,
+              decision,
+              { decidedBy: String(id) }
+            );
+            if (!result) throw new Error('统一身份库当前不可用');
+            reply = result.note;
+            emit('identity-pilot-update', identityPilot.status());
+          } catch (error) {
+            reply = `好友请求审批失败：${String(error?.message ?? error)}`;
+          }
+        } else {
+          reply = `现在有 ${pending.length} 条待审批的好友申请，要哪一条请带上编号：\n`
+            + pending.map((r) => `· ${r.primaryName || '未命名'}（${r.userId}）　${r.id}`).join('\n')
+            + `\n回复「${bare[1]}好友申请 <编号>」。`;
+        }
+        try {
+          await sendIdentityAdminText(id, reply);
+        } catch (error) {
+          log(`[identity-pilot] 入站好友请求审批结果通知失败：${error?.message ?? error}`);
+        }
+        return true;
+      }
     }
     if (settings.enabled !== true) return false;
     const match = /^\s*\/?(同意|拒绝)好友(?:申请)?\s+(fp_[a-f0-9]{12})\s*$/i.exec(String(text || ''));
