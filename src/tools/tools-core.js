@@ -300,6 +300,12 @@ function imageParts(text, dataUrls) {
  *   emit  (事件上报给 UI/日志)
  * }
  */
+/**
+ * 「整条消息只有媒体占位符」——消息历史里图片/表情包/视频/语音会被渲染成这类方括号占位符，
+ * 它们是给人看的提示，不是可以发出去的内容。send_message 用它挡掉误复读（见 execute 里的注释）。
+ */
+const MEDIA_PLACEHOLDER_ONLY_RE = /^(?:\[(?:图片|表情包|视频|动画表情|语音|音频|文件)\]\s*)+$/;
+
 export function buildToolDefs() {
   return [
     {
@@ -318,6 +324,16 @@ export function buildToolDefs() {
         try {
           const messages = normalizeMessageList(args.messages);
           if (!messages.length) return err('消息内容为空');
+          // 消息历史里图片/表情包被渲染成 [图片] / [表情包] 这类占位符。模型偶尔会把它
+          // 当成"内容"直接复读出去（实测 2026-09-30 12:31：用户说"复读这个"，bot 发了一条
+          // 文字 "[图片]"，用户那边只看到几个字）。整条消息只有占位符时直接挡掉并给出正路。
+          const placeholderOnly = messages.find((m) => MEDIA_PLACEHOLDER_ONLY_RE.test(String(m).trim()));
+          if (placeholderOnly) {
+            return err(`「${String(placeholderOnly).trim()}」是消息历史里的**占位符**，不是能发出去的图片——`
+              + '直接发只会变成这几个字的纯文本。想复读/转发别人发的图或表情包，请改用：'
+              + 'get_message_images 看清内容 → collect_sticker 存进表情库（可顺手写备注）→ send_sticker 发出去；'
+              + '别人发的表情包通常已经自动进库，可以先 list_stickers 找找有没有对应的。');
+          }
           const targetError = messageTargetError(ctx, args);
           if (targetError) return err(targetError);
           const result = await ctx.sender.sendTextBatch(ctx.chatKey, messages, {
