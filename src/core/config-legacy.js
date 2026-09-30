@@ -179,7 +179,13 @@ export const DEFAULT_CONFIG = {
   },
   // 安全例外（默认全部关闭）
   security: {
-    allowPrivateImageHosts: false           // true 时图片下载允许内网地址（仅本地测试/自建图床）
+    allowPrivateImageHosts: false,          // true 时图片下载允许内网地址（仅本地测试/自建图床）
+    // true 时放行代理软件的 fake-ip 段（198.18.0.0/15）。
+    // Clash/Surge/Shadowrocket 的 fake-ip 模式会让**所有域名**都解析成 198.18.x.x，
+    // 于是内网检查会把每个正常外网请求都拦掉（实测 web_fetch 报"域名解析到内网/本机地址"）。
+    // 这个段是 RFC 2544 的基准测试保留段，不是真实内网段，放行不会碰到局域网；
+    // 10./172.16-31./192.168. 等真正的内网段仍然照常拦截。
+    allowProxyFakeIp: false
   },
   // 外部 OneBot v11 服务
   onebot: {

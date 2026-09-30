@@ -60,6 +60,37 @@ function parseEmbeddedIpv4(h) {
   return null;
 }
 
+/**
+ * 代理软件的 fake-ip 段。
+ *
+ * RFC 2544 把 198.18.0.0/15 保留给网络设备基准测试，而 **Clash / Surge / Shadowrocket
+ * 的 fake-ip 模式也用它**：客户端请求域名 → 代理返回一个 198.18.x.x 的假 IP →
+ * 连到这个假 IP 时代理再按 SNI 转发到真实服务器。
+ *
+ * 后果：开了 fake-ip 的机器上**所有域名都会解析成 198.18.x.x**，于是这里的
+ * 内网检查会把每一个正常外网请求都拦掉（实测 `web_fetch` 报
+ * 「域名解析到内网/本机地址，已阻止」，2026-09-30）。
+ *
+ * ⚠️ 放行它是安全的：这个段**不是真实的内网段**（不像 10./172.16-31./192.168.），
+ * 没有内网服务会住在那里；连过去只会到代理的 fake-ip 处理器，不会碰到局域网。
+ * 所以用 `security.allowProxyFakeIp` 单独开关（默认关），与 allowPrivateImageHosts 同理。
+ */
+export function isProxyFakeIp(ip) {
+  const h = String(ip || '').trim();
+  if (net.isIP(h) !== 4) return false;
+  const parts = h.split('.').map(Number);
+  return parts[0] === 198 && parts[1] >= 18 && parts[1] <= 19;
+}
+
+/** 读配置：是否放行 fake-ip（默认关，保持既有安全口径）。 */
+function allowProxyFakeIpFromConfig() {
+  try {
+    return getConfig().security?.allowProxyFakeIp === true;
+  } catch {
+    return false;
+  }
+}
+
 export function isPrivateIp(ip) {
   const h = String(ip || '').toLowerCase().replace(/^\[|\]$/g, '');
   if (!h) return true;
@@ -108,14 +139,16 @@ async function lookupWithTimeout(hostname) {
   return Promise.race([dnsLookup(hostname, { all: true, verbatim: true }), timeout]).finally(() => clearTimeout(timer));
 }
 
-async function resolveSafeHost(hostname, { allowPrivate = false } = {}) {
+async function resolveSafeHost(hostname, { allowPrivate = false, allowProxyFakeIp = false } = {}) {
+  // fake-ip 放行只对"代理假地址"生效，不影响真正的内网段判定（见 isProxyFakeIp 的说明）。
+  const fakeOk = (ip) => allowProxyFakeIp && isProxyFakeIp(ip);
   const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
   if (!h) throw new Error('主机名为空');
   if (!allowPrivate && (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local'))) {
     throw new Error('禁止访问内网/本机地址');
   }
   if (net.isIP(h)) {
-    if (!allowPrivate && isPrivateIp(h)) throw new Error('禁止访问内网/本机地址');
+    if (!allowPrivate && !fakeOk(h) && isPrivateIp(h)) throw new Error('禁止访问内网/本机地址');
     return h;
   }
   let addresses;
@@ -127,14 +160,14 @@ async function resolveSafeHost(hostname, { allowPrivate = false } = {}) {
   if (!addresses.length) throw new Error('域名没有解析结果');
   if (!allowPrivate) {
     for (const { address } of addresses) {
-      if (isPrivateIp(address)) throw new Error('域名解析到内网/本机地址，已阻止');
+      if (!fakeOk(address) && isPrivateIp(address)) throw new Error('域名解析到内网/本机地址，已阻止');
     }
   }
   return addresses[0].address;
 }
 
 /** 校验 URL 的 scheme 与主机（DNS 级）。返回 { url, ip }。 */
-export async function validateFetchUrl(raw, { allowPrivate = false } = {}) {
+export async function validateFetchUrl(raw, { allowPrivate = false, allowProxyFakeIp = false } = {}) {
   let url;
   try {
     url = new URL(String(raw ?? '').trim());
@@ -143,7 +176,10 @@ export async function validateFetchUrl(raw, { allowPrivate = false } = {}) {
   }
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error('仅允许 http/https');
   if (url.username || url.password) throw new Error('URL 不能包含凭据');
-  const ip = await resolveSafeHost(url.hostname, { allowPrivate });
+  const ip = await resolveSafeHost(url.hostname, {
+    allowPrivate,
+    allowProxyFakeIp: allowProxyFakeIp || allowProxyFakeIpFromConfig()
+  });
   return { url, ip };
 }
 
