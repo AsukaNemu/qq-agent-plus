@@ -254,6 +254,15 @@ export const DEFAULT_CONFIG = {
     followUpEnabled: true,      // 发言后没人接话，过十来分钟补一句
     selfWakeEnabled: true       // 模型用 schedule_wake 给自己安排稍后的主动发言
   },
+  // 群邀请 / 群申请自动处理（可选）
+  // 为什么默认关：任何人都能拉 bot 进群，进群后它就会参与聊天、烧 token，
+  // 还可能被引到不适合的语境里。开着时也默认只认"自己人"拉的群。
+  groupInvite: {
+    enabled: false,        // 总开关；关着 = 只私聊通知管理员，绝不自动同意
+    friendsOnly: true,     // 只同意邀请人在私聊白名单里（≈ 好友）的群
+    autoWhitelist: true,   // 同意后把群加进 allow.groups（bot 才会在群里说话）
+    notifyOwner: true      // 每次都私聊告诉管理员（同意/未同意/失败）
+  },
   // 自主节奏（可选）：消息不再即时触发，改由模型按自己安排的节奏醒来统一处理。
   // 默认关闭；开启后建议先在小范围（scope）试，确认能接受"延迟接话"的节奏。
   pacing: {

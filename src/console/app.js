@@ -1067,6 +1067,100 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     return true;
   }
 
+  /**
+   * 群邀请 / 群申请的统一处理（OneBot request_type=group）。
+   *
+   * 批准口径（2026-09-30 用户确认）：
+   *   开关开启 + 邀请人在私聊白名单里（≈ 好友）+ 群不在拒绝名单。
+   * 其余情况一律**不自动同意**，只私聊告诉管理员"有这么回事、为什么没同意"。
+   * 批准后按配置把群加进 allow.groups（bot 才会在那个群说话），并通知管理员。
+   *
+   * 为什么不无条件同意：任何人都能拉 bot 进群，进群后它就会参与聊天、烧 token，
+   * 还可能被引到不适合的语境里。所以默认关、且默认只认自己人。
+   */
+  async function handleGroupInvite(event) {
+    const cfg = getConfig();
+    const opt = cfg.groupInvite || {};
+    const groupId = String(event.group_id);
+    const inviterId = String(event.user_id ?? '');
+    const subType = String(event.sub_type || 'invite');   // invite=被邀请入群 / add=申请加群
+    const wayLabel = subType === 'add' ? '申请加群' : '邀请入群';
+    const ownerUin = String(cfg.admin?.ownerUin || '').trim();
+    const isFriend = (cfg.allow?.private || []).map(String).includes(inviterId);
+    const denied = (cfg.deny?.groups || []).map(String).includes(groupId);
+
+    const why = opt.enabled !== true
+      ? '群邀请自动处理未开启'
+      : denied
+        ? '该群在拒绝名单里'
+        : (opt.friendsOnly !== false && !isFriend)
+          ? `邀请人 ${inviterId || '未知'} 不在私聊白名单（不是自己人）`
+          : '';
+
+    let groupName = '';
+    try {
+      const info = await onebot.call('get_group_info', { group_id: Number(groupId) }, 15000, null);
+      groupName = String(info?.group_name || info?.groupName || '').trim();
+    } catch { /* 拉不到群名不影响主流程 */ }
+    const groupLabel = `${groupName || '（未取到群名）'}（${groupId}）`;
+
+    if (why) {
+      log(`[group-invite] 不自动同意 ${groupId}：${why}`);
+      if (opt.notifyOwner !== false && ownerUin) {
+        try {
+          await sendIdentityAdminText(ownerUin,
+            `【群邀请 · 待你处理】\n群：${groupLabel}\n邀请人：${inviterId || '未知'}\n方式：${wayLabel}\n`
+            + `未自动同意：${why}\n\n`
+            + '想让它自动处理，去控制台把「群邀请自动处理」打开。');
+        } catch (error) {
+          log(`[group-invite] 通知失败：${error?.message ?? error}`);
+        }
+      }
+      return;
+    }
+
+    try {
+      await onebot.call('set_group_add_request', {
+        flag: String(event.flag),
+        sub_type: subType,
+        approve: true
+      }, 20000, null);
+    } catch (error) {
+      log(`[group-invite] 同意入群 ${groupId} 失败：${error?.message ?? error}`);
+      if (opt.notifyOwner !== false && ownerUin) {
+        try {
+          await sendIdentityAdminText(ownerUin,
+            `【群邀请 · 同意失败】\n群：${groupLabel}\n邀请人：${inviterId || '未知'}\n`
+            + `原因：${String(error?.message ?? error)}`);
+        } catch { /* 通知失败就算了 */ }
+      }
+      return;
+    }
+
+    if (opt.autoWhitelist !== false) {
+      const cur = getConfig();
+      const groups = [...new Set([...(cur.allow?.groups || []).map(String), groupId])];
+      const denyGroups = (cur.deny?.groups || []).map(String).filter((g) => g !== groupId);
+      updateConfig({
+        allow: { ...(cur.allow || {}), groups },
+        deny: { ...(cur.deny || {}), groups: denyGroups }
+      });
+    }
+
+    log(`[group-invite] 已同意入群 ${groupId}（邀请人 ${inviterId}，${wayLabel}）`);
+    if (opt.notifyOwner !== false && ownerUin) {
+      try {
+        await sendIdentityAdminText(ownerUin,
+          `【群邀请 · 已自动同意】\n群：${groupLabel}\n邀请人：${inviterId || '未知'}（自己人）\n方式：${wayLabel}\n`
+          + (opt.autoWhitelist !== false
+            ? '已加入白名单，bot 会在群里正常说话。'
+            : '未加白名单，bot 在群里只会看不会说。'));
+      } catch (error) {
+        log(`[group-invite] 通知失败：${error?.message ?? error}`);
+      }
+    }
+  }
+
   async function handleSlangPilotAdminCommand(kind, id, text) {
     const settings = getConfig().slangPilot || {};
     if (
@@ -1220,6 +1314,18 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     if (event.post_type === 'notice' && event.notice_type === 'friend_add' && event.user_id != null) {
       const changed = await identityPilot?.markFriendAdded(String(event.user_id)) || 0;
       if (changed) emit('identity-pilot-update', identityPilot.status());
+      return;
+    }
+    // 群邀请 / 群申请（request_type=group）。口径由 config.groupInvite 决定：
+    // 默认不自动同意；开启且邀请人是自己人（私聊白名单 ≈ 好友）时才批准并加白名单。
+    // 不设这道门的话，任何人都能把 bot 拉进垃圾群 —— 它会在那儿说话、烧 token。
+    if (
+      event.post_type === 'request'
+      && event.request_type === 'group'
+      && event.group_id != null
+      && event.flag
+    ) {
+      await handleGroupInvite(event);
       return;
     }
     // meta/心跳等事件忽略
