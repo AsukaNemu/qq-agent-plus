@@ -72,6 +72,7 @@ function stickerSourceKey(url) {
 
 import { chatCompletionWithRetry } from '../llm/llm.js';
 import { safeFetchBinary, validateImageUrl } from '../llm/safe-fetch.js';
+import { visionEnabled } from '../llm/vision-scan.js';
 import { resolveToolCalls } from '../tools/inline-tools.js';
 
 export class StickerManager {
@@ -350,6 +351,12 @@ export class StickerManager {
   async autoCollect(chatKey, message) {
     const cfg = getConfig().sticker || {};
     if (cfg.autoCollect !== true || cfg.enabled === false || !this.enabled) return null;
+    // ⚠️ 判断表情**必须**能看图。模型不支持视觉时，图片会被网关静默丢弃
+    //（实测 prompt_tokens 只有 108），而工具是**强制调用**的、note 又是必填 ——
+    // 模型只能凭空编一个备注。实测把真人 cosplay 照片标成「卡通人物一脸震惊张大嘴」，
+    // 标签与画面完全对不上，还会把生活照收进表情库（2026-09-30 用户反馈）。
+    // 所以模型看不见图时，干脆不做自动收藏判断。
+    if (!visionEnabled()) return null;
     const media = (message?.media || []).find((item) => item?.kind === 'image' && item.url);
     if (!media) return null;
     const srcKey = String(media.file || '').trim() || stickerSourceKey(media.url);
@@ -569,6 +576,10 @@ export class StickerManager {
   /** 判断一张图值不值得收（工具收藏与自动收藏共用同一口径：只收真正的表情包）。 */
   async judgeImage({ url = '', message = null, signal = null } = {}) {
     if (!url) return { save: false, reason: '这条消息里没有可收藏的图片' };
+    // 同 autoCollect：模型看不见图时不能判断，否则只会编出对不上的备注（见那里的注释）
+    if (!visionEnabled()) {
+      return { save: false, reason: '当前模型看不到图片，没法判断这张图值不值得收' };
+    }
     return this.#judgeSticker({ url }, message, signal);
   }
 
@@ -616,6 +627,11 @@ export class StickerManager {
           + '值得收：真正的表情包——带字的梗图、猫猫狗狗、卡通形象、抽象搞笑图，能拿来表达情绪、吐槽或怼人的。'
           + '不值得收：本人或朋友的生活照、随手拍、自拍，以及跟聊天无关的截图（游戏、聊天记录、网页）、二维码、证件、广告、纯风景照。'
           + '拿不准就问自己一句：以后聊天时真会用上吗。会就用得上才收，不会就别收。'
+          // 2026-09-30：模型不支持视觉时图片会被网关**静默丢弃**，而这里是**强制工具调用**、
+          // note 又必填 —— 模型只能凭空编。实测把真人 cosplay 照标成「卡通人物一脸震惊张大嘴」。
+          // 视觉能力已在调用前用 visionEnabled() 拦过一层，这里再给模型一条"看不到就别编"的兜底。
+          + '⚠️ 如果你其实看不到图片内容（图打不开、显示空白、或你无法辨认画面），'
+          + 'save 必须填 false，并且绝不要凭猜测编造画面描述——编出来的标签会误导以后挑表情。'
           // 备注是「以后挑表情」的唯一依据：只写图里的字等于没写（实测出现过「S」「梆」「危」这类单字备注，
           // 导致模型挑不出贴切的表情、干脆不发）。所以这里把「怎么写备注」讲清楚。
           + '决定收时，note 要写一行真正有用的备注：先描述画面主体（谁/什么形象、什么表情和动作），'
