@@ -281,9 +281,48 @@ async function currentMessageImageUrls(ctx, entry) {
   }
   return media
     .filter((item) => item.kind === 'image' || item.kind === 'video')
-    .map((item) => ({ kind: item.kind, url: String(item.url || item.file || '').trim() }))
+    .map((item) => ({
+      kind: item.kind,
+      url: String(item.url || item.file || '').trim(),
+      // NapCat 的 file 名（形如 xxxxx.jpg）。QQ 直链带会话级 rkey、会过期，
+      // 过期后可以用 get_image({file}) 让它把图落到容器内再读本地文件 —— 见 imageItemToDataUrl。
+      file: String(item.file || '').trim()
+    }))
     .filter((item) => item.url)
     .slice(0, 4);
+}
+
+/**
+ * URL 过期时的兜底取图：让 NapCat 自己把图落成**它容器内的本地文件**，再读进来。
+ *
+ * 背景（2026-09-30 实测）：QQ 的图片直链形如
+ *   https://gchat.qpic.cn/download?appid=…&fileid=…&rkey=…&spec=0
+ * 其中 rkey 是**会话级临时钥匙**，过期后服务端直接返回
+ *   {"retcode":-5503007,"retmsg":"download url has expired"}
+ * （HTTP 400）。而且 get_msg 重取到的还是同一个 rkey，刷新救不回来。
+ * 但 NapCat 的 get_image 能把图落地到容器内路径，且 **app 读得到那个文件**
+ * —— macOS 的 com.apple.macl 只挡写、不挡读（实测可读）。
+ */
+async function readImageViaNapCat(ctx, file, signal) {
+  const name = String(file || '').trim();
+  if (!name || typeof ctx.onebot?.call !== 'function') return null;
+  const data = await ctx.onebot.call('get_image', { file: name }, 20000, signal);
+  const localPath = String(data?.file || data?.path || '').trim();
+  if (!localPath) return null;
+  const buffer = await fs.promises.readFile(localPath);
+  return buffer?.length ? buffer : null;
+}
+
+/** 取一张图 → data URL。先走 URL；URL 失败（多半是 rkey 过期）再用 NapCat 本地文件兜底。 */
+async function imageItemToDataUrl(ctx, item, signal) {
+  try {
+    return await downloadImageAsDataUrl(item.url, signal);
+  } catch (error) {
+    const buffer = await readImageViaNapCat(ctx, item.file, signal).catch(() => null);
+    if (!buffer) throw error;
+    const mime = detectMime(buffer) || 'image/jpeg';
+    return `data:${mime};base64,${buffer.toString('base64')}`;
+  }
 }
 
 function imageParts(text, dataUrls) {
@@ -734,7 +773,7 @@ export function buildToolDefs() {
                 dataUrls.push(await downloadVideoAsFrameStrip(item.url, ctx.signal));
                 videoCount += 1;
               } else {
-                dataUrls.push(await downloadImageAsDataUrl(item.url, ctx.signal));
+                dataUrls.push(await imageItemToDataUrl(ctx, item, ctx.signal));
               }
             } catch (e) { failed.push(String(e?.message ?? e)); }
           }

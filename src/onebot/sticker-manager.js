@@ -52,6 +52,17 @@ function cleanMetadata(value, max) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
+/** 从消息的 media 里找出与这个 URL 对应的 NapCat file 名（get_image 兜底要用）。 */
+function fileForUrl(message, url) {
+  const media = Array.isArray(message?.media) ? message.media : [];
+  const target = String(url || '').trim();
+  const exact = media.find((m) => m && String(m.url || '').trim() === target && m.file);
+  if (exact) return String(exact.file);
+  // URL 对不上（可能已被刷新过）时退回第一条图片的 file —— 同一条消息里基本就一张
+  const first = media.find((m) => m && m.kind === 'image' && m.file);
+  return first ? String(first.file) : '';
+}
+
 /** 图片地址里的稳定标识（fileid 参数），用于自动收藏去重。 */
 function stickerSourceKey(url) {
   const text = String(url || '');
@@ -410,7 +421,12 @@ export class StickerManager {
         return saved || { id: qq.emojiId || '', localNote: note, source: 'qq' };
       }
     }
-    const entry = await this.collect(message?.mid, { url: usedUrl, srcKey, note });
+    const entry = await this.collect(message?.mid, {
+      url: usedUrl,
+      srcKey,
+      note,
+      file: fileForUrl(message, usedUrl)
+    });
     if (entry && !entry.srcKey) {
       entry.srcKey = srcKey;
       this.saveEntries(this.entries);
@@ -511,11 +527,36 @@ export class StickerManager {
     }
   }
 
+  /**
+   * 取图 → { buffer, contentType }。URL 优先；URL 失败（多半是 QQ 的 rkey 过期，
+   * 服务端回 `download url has expired`）时用 NapCat 的 `get_image` 兜底 ——
+   * 让它把图落成容器内的本地文件再读进来（macl 只挡写、不挡读，实测可读）。
+   */
+  async #fetchImageBuffer(url, { file = '', maxBytes = 4 * 1024 * 1024, signal } = {}) {
+    try {
+      const safeUrl = await validateImageUrl(url);
+      const { buffer, contentType } = await safeFetchBinary(safeUrl, maxBytes, signal);
+      if (!buffer?.length) throw new Error('图片内容为空');
+      return { buffer, contentType };
+    } catch (error) {
+      const name = String(file || '').trim();
+      if (!name || typeof this.onebot?.call !== 'function') throw error;
+      const data = await this.onebot.call('get_image', { file: name }, 20000, signal);
+      const localPath = String(data?.file || data?.path || '').trim();
+      if (!localPath) throw error;
+      const buffer = await fs.promises.readFile(localPath);
+      if (!buffer?.length) throw error;
+      return { buffer, contentType: imageType(buffer) || 'image/jpeg' };
+    }
+  }
+
   /** 把图片转成 data URL（视觉模型看的就是它）。 */
-  async #stickerDataUrl(url, signal) {
-    const safeUrl = await validateImageUrl(url);
-    const { buffer, contentType } = await safeFetchBinary(safeUrl, 4 * 1024 * 1024, signal);
-    if (!buffer?.length) throw new Error('图片内容为空');
+  async #stickerDataUrl(url, signal, file = '') {
+    const { buffer, contentType } = await this.#fetchImageBuffer(url, {
+      file,
+      maxBytes: 4 * 1024 * 1024,
+      signal
+    });
     const mime = /^image\//.test(String(contentType || '')) ? String(contentType) : 'image/jpeg';
     return `data:${mime};base64,${buffer.toString('base64')}`;
   }
@@ -538,7 +579,11 @@ export class StickerManager {
     const timeoutSignal = AbortSignal.timeout(90000);
     // 主运行被中止/超时后，这次视觉判断也该停（否则工具早返回了它还在跑）
     const signal = outerSignal ? AbortSignal.any([outerSignal, timeoutSignal]) : timeoutSignal;
-    const dataUrl = await this.#stickerDataUrl(media.url, signal);
+    const dataUrl = await this.#stickerDataUrl(
+      media.url,
+      signal,
+      media.file || fileForUrl(message, media.url)
+    );
     const botName = resolveSelfName(getConfig().persona || {}, this.onebot?.selfNickname || '');
     const sender = String(message?.senderName || '群友').trim().slice(0, 20) || '群友';
     const tool = {
@@ -657,7 +702,7 @@ export class StickerManager {
   }
 
   /** 收藏一条消息里的图片（本地新增条目，不入 QQ 收藏）。 */
-  async collect(messageId, { url, note = '', srcKey = '', signal } = {}) {
+  async collect(messageId, { url, note = '', srcKey = '', signal, file = '' } = {}) {
     note = String(note ?? '').slice(0, 300);
     if (!getConfig().sticker?.collectEnabled) throw new Error('收藏表情功能未开启');
     // 限频
@@ -678,8 +723,11 @@ export class StickerManager {
     let localFile = '';
     let assetFile = '';
     try {
-      const safeUrl = await validateImageUrl(url);
-      const { buffer } = await safeFetchBinary(safeUrl, MAX_STICKER_BYTES, signal);
+      const { buffer } = await this.#fetchImageBuffer(url, {
+        file,
+        maxBytes: MAX_STICKER_BYTES,
+        signal
+      });
       const asset = this.#writeAsset(buffer, id);
       localFile = asset.relativeFile;
       assetFile = asset.file;
