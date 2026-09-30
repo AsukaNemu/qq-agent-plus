@@ -308,6 +308,43 @@ async function currentMessageImageUrls(ctx, entry) {
  * 所以：**过期图片目前取不到**。新消息的图正常（URL 新鲜）；
  * 只有放久了的旧消息会 400。自动收藏是在收到消息时立刻处理的，不受影响。
  */
+/**
+ * 启动自检（一次性）：服务进程到底能不能读 QQ 容器？
+ * macOS 的 macl/provenance 对没有「完全磁盘访问」的进程一律 EPERM，
+ * 而 agent 沙箱通常有 FDA —— 所以**必须由服务自己探测**，不能靠外部测试下结论。
+ * 结论只在日志里说一次，不参与任何业务逻辑。
+ */
+let containerReadProbeDone = false;
+export function probeContainerReadable() {
+  if (containerReadProbeDone) return;
+  containerReadProbeDone = true;
+  const base = path.join(process.env.HOME || '', 'Library/Containers/com.tencent.qq/Data');
+  const dirs = [
+    path.join(base, '.config/QQ/NapCat/temp'),
+    path.join(base, 'tmp'),
+    base
+  ];
+  const writable = [];
+  for (const d of dirs) {
+    const f = path.join(d, `.qqagent-probe-${process.pid}`);
+    try {
+      fs.writeFileSync(f, '');
+      fs.unlinkSync(f);
+      writable.push(d);
+    } catch { /* 不可写 */ }
+  }
+  let readable = '';
+  try {
+    const pic = path.join(base, 'Library/Application Support/QQ');
+    if (fs.existsSync(pic)) {
+      fs.readdirSync(pic);
+      readable = pic;
+    }
+  } catch { /* 不可读 */ }
+  console.log('[probe] QQ 容器：可写目录 ' + (writable.length ? writable.length + ' 个' : '无')
+    + '｜' + (readable ? '可读（get_image 兜底可用）' : '不可读（get_image 兜底无效）'));
+}
+
 async function readImageViaNapCat(ctx, file, signal) {
   const name = String(file || '').trim();
   if (!name || typeof ctx.onebot?.call !== 'function') return null;

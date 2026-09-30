@@ -2,6 +2,7 @@
 import { createApp } from './console/app.js';
 import { installManualFriendReviewRoute } from './console/manual-friend-review-route.js';
 import { installExperimentalMultimodalContextPilot } from './pilots/experimental-multimodal-context.js';
+import { probeContainerReadable } from './tools/tools-core.js';
 
 let app = null;
 process.on('unhandledRejection', (error) => {
@@ -26,6 +27,10 @@ process.on('uncaughtException', (error) => {
 
 // 仅安装一次薄包装；开关关闭时 multimodal-context commit 原样委托旧实现。
 installExperimentalMultimodalContextPilot();
+
+// 启动自检：服务进程能不能读写 QQ 容器（决定 get_image 兜底是否可用）。
+// 只在日志里说一次，不参与业务逻辑 —— 见 tools-core.js 里 probeContainerReadable 的说明。
+try { probeContainerReadable(); } catch { /* 自检失败不影响启动 */ }
 
 app = createApp();
 installManualFriendReviewRoute(app);
