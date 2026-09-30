@@ -800,8 +800,10 @@ export function buildToolDefs() {
         // 要记对话里提到的第三方，写进 finish 的交接里，别挂在一个没有出处的号码名下。
         if (!hasParticipant(ctx, userId)) {
           const looksLikeMessageId = Boolean(ctx.store?.findByMid?.(ctx.chatKey, userId));
+          // 这里原来抄了 send_message 的提示（"如需引用请改用 replyToMessageId"）——
+          // 但 memory_append 根本没有 replyToMessageId 参数，那句话会把它引到另一个错上。
           return err(`${userId} 不是当前会话中出现过的成员 QQ 号`
-            + `${looksLikeMessageId ? '，它是消息 id；如需引用请改用 replyToMessageId' : ''}。${memberHint(ctx)}`);
+            + `${looksLikeMessageId ? '，它是消息 id、不是 QQ 号' : ''}。${memberHint(ctx)}`);
         }
         const entry = ctx.memory.append(ctx.chatKey, 'memberImpression', String(args.content ?? ''), {
           userId,
