@@ -182,6 +182,14 @@ export function findSticker(entries, ref) {
     const byExtractedId = visible.find((e) => e.id === idInRef[1] || e.resId === idInRef[1]);
     if (byExtractedId) return byExtractedId;
   }
+  // 模型偶尔把 id 截断/改写：只留 32 位 md5 并带上「_0_0」之类的后缀
+  // （实测 2026-09-30 01:23：完整 id 是 2676659414_0_0_0_<md5>_0_0，模型填了 <md5>_0_0，
+  //  直配要求严格相等 → 失败）。这里只要 ref 里含 32 位 md5 就按 md5 命中。
+  const md5InRef = md5.match(/[0-9A-F]{32}/);
+  if (md5InRef) {
+    const byMd5 = visible.find((e) => String(e.md5 || '').toUpperCase() === md5InRef[0]);
+    if (byMd5) return byMd5;
+  }
 
   // 分级匹配（Issue #17）：备注命中优先于标签，且只在"同一级内"要求唯一。
   // 旧实现把 tags 与备注同池、双向包含，短标签擦边会把真正的备注命中一起否决 → 明明库里有却报找不到。
@@ -219,6 +227,32 @@ export function findSticker(entries, ref) {
         return text.length > 0 && (text.includes(label) || label.includes(text));
       }));
     if (tagHit.length === 1) return tagHit[0];
+  }
+
+  // 模糊兜底（2026-09-30）：模型经常**改写**备注而不是原样照抄，精确相等与双向包含都会落空。
+  // 实测把库里的「白发猫耳少女头上顶着小花…」填成「…头上顶着一个小花…」（多一个「一个」），
+  // 结果明明库里有却报「找不到表情」。这里按"去标点后的字符集重叠率"再兜一层：
+  // 只在**唯一最高分且与次高分拉开差距**时命中，宁缺勿错（发错图比不发更糟）。
+  const norm = (s) => String(s || '').replace(/[\s\p{P}\p{S}]/gu, '').toLowerCase();
+  const q = norm(raw);
+  if (q.length >= 4) {
+    const qSet = new Set(q);
+    const scored = [];
+    for (const entry of visible) {
+      for (const value of [entry.desc, entry.localNote]) {
+        const t = norm(value);
+        if (t.length < 4) continue;
+        const tSet = new Set(t);
+        let inter = 0;
+        for (const ch of qSet) if (tSet.has(ch)) inter += 1;
+        const ratio = inter / Math.max(qSet.size, tSet.size);
+        if (ratio >= 0.9) scored.push({ entry, ratio, len: t.length });
+      }
+    }
+    scored.sort((a, b) => b.ratio - a.ratio || a.len - b.len);
+    if (scored.length && (scored.length === 1 || scored[0].ratio - scored[1].ratio > 0.02)) {
+      return scored[0].entry;
+    }
   }
   return null;
 }

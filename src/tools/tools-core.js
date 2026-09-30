@@ -219,9 +219,23 @@ function hasParticipant(ctx, userId) {
     .some((member) => String(member.userId) === String(userId));
 }
 
-function messageTargetError(ctx, { replyToMessageId, atUserId }) {
-  const reply = normalizeMid(replyToMessageId);
-  const at = normalizeMid(atUserId);
+function messageTargetError(ctx, args) {
+  // 模型经常把「消息 id」填进 atUserId —— 它想引用某条消息，却填错了字段。
+  // 与其直接报错打断它，不如**就地纠正成引用**：两者语义接近（都指向"那条消息"），
+  // 纠正后行为更贴近它的本意，也不会白白浪费一次工具调用。
+  // 实测 2026-09-30 01:13 的 send_message 报错（把 1034180021 当 QQ 号）就是这种情况。
+  if (args && ctx.kind === 'group') {
+    const atRaw = normalizeMid(args.atUserId);
+    const replyRaw = normalizeMid(args.replyToMessageId);
+    if (atRaw && !replyRaw && /^\d{1,15}$/.test(atRaw)
+      && !hasParticipant(ctx, atRaw)
+      && ctx.store?.findByMid?.(ctx.chatKey, atRaw)) {
+      args.replyToMessageId = atRaw;
+      args.atUserId = null;
+    }
+  }
+  const reply = normalizeMid(args?.replyToMessageId);
+  const at = normalizeMid(args?.atUserId);
   if (reply && at) return 'replyToMessageId 和 atUserId 只能选择一个';
   if (reply) {
     if (!/^-?[1-9]\d*$/.test(reply)) {
