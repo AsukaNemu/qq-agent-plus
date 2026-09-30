@@ -333,16 +333,35 @@ export function probeContainerReadable() {
       writable.push(d);
     } catch { /* 不可写 */ }
   }
-  let readable = '';
+  // 光能列目录不算数 —— 真正失败的是**读 nt_data/Pic 下的图片文件**，
+  // 那类文件带 com.apple.provenance/quarantine，权限更严。这里找一个真图来读。
+  let readResult = '不可读（get_image 兜底无效）';
   try {
-    const pic = path.join(base, 'Library/Application Support/QQ');
-    if (fs.existsSync(pic)) {
-      fs.readdirSync(pic);
-      readable = pic;
+    const picRoot = path.join(base, 'Library/Application Support/QQ');
+    const found = [];
+    const walk = (dir, depth) => {
+      if (found.length >= 3 || depth > 4) return;
+      let items = [];
+      try { items = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const it of items) {
+        if (found.length >= 3) return;
+        const full = path.join(dir, it.name);
+        if (it.isDirectory()) walk(full, depth + 1);
+        else if (/\.(jpg|jpeg|png|gif|webp)$/i.test(it.name)) found.push(full);
+      }
+    };
+    walk(picRoot, 0);
+    if (found.length) {
+      const buf = fs.readFileSync(found[0]);
+      readResult = buf.length ? `可读图片文件（${buf.length} 字节）` : '文件为空';
+    } else {
+      readResult = '没找到可测的图片文件';
     }
-  } catch { /* 不可读 */ }
+  } catch (error) {
+    readResult = `读文件失败：${error?.code || error?.message}`;
+  }
   console.log('[probe] QQ 容器：可写目录 ' + (writable.length ? writable.length + ' 个' : '无')
-    + '｜' + (readable ? '可读（get_image 兜底可用）' : '不可读（get_image 兜底无效）'));
+    + '｜' + readResult);
 }
 
 async function readImageViaNapCat(ctx, file, signal) {
