@@ -167,19 +167,118 @@ export class StickerManager {
     return findSticker(synced.entries, ref);
   }
 
+  /**
+   * NapCat 对 QQ 收藏表情里的远程图片地址偶尔会报
+   * `rich media transfer failed`（尤其是容器无法访问该临时 URL 时）。
+   * 发送前把能取到的图片落到 bot 自己的托管目录，后续走 base64://，
+   * 既绕开远程转发，也让同一张图后面不再重复下载。
+   */
+  #markStickerUnavailable(sticker, reason) {
+    const detail = cleanMetadata(reason, 220) || '图片资源不可用';
+    const message = sticker?.source === 'qq'
+      ? `QQ 收藏表情资源不可用：${detail}。已自动停用这张表情，请改用其他可用表情。`
+      : `表情图片资源不可用：${detail}。已自动停用这张表情，请改用其他可用表情。`;
+    const updated = normalizeStickerEntry({
+      ...sticker,
+      sendable: false,
+      sendErrorCode: 'STICKER_RESOURCE_UNAVAILABLE',
+      sendErrorMessage: message,
+      sendErrorAt: Date.now(),
+      updatedAt: new Date().toISOString()
+    });
+    if (!updated) return message;
+    try {
+      this.saveEntries(this.entries.map((entry) => entry.id === updated.id ? updated : entry));
+    } catch (error) {
+      // 资源状态写不进去时也不能退回原远程地址，否则会再次触发 OneBot 富媒体错误。
+      console.log(`[sticker] 无法保存不可发送标记（${updated.id}）：${String(error?.message ?? error).slice(0, 160)}`);
+    }
+    return message;
+  }
+
+  #resourceUnavailable(sticker, reason) {
+    const message = sticker?.sendable === false && sticker.sendErrorMessage
+      ? sticker.sendErrorMessage
+      : this.#markStickerUnavailable(sticker, reason);
+    const error = new Error(message);
+    error.code = 'STICKER_RESOURCE_UNAVAILABLE';
+    error.stickerId = sticker?.id || '';
+    return error;
+  }
+
+  async #materializeRemoteSticker(sticker) {
+    const url = String(sticker?.url || '').trim();
+    if (!sticker || sticker.localFile || !/^https?:\/\//i.test(url)) return sticker;
+    // 这类 QQ 个人收藏地址在当前 NapCat/QQ 架构下不是可发送的图片资源；
+    // 不再把它原样交给 OneBot，避免每次都落到 rich media transfer failed。
+    if (sticker.source === 'qq' && /^https?:\/\/p\.qpic\.cn\/qq_expression\//i.test(url)) {
+      throw this.#resourceUnavailable(
+        sticker,
+        'QQ 返回的远程地址不是可读取的本地图片，当前协议端无法把个人收藏表情直接转发'
+      );
+    }
+    try {
+      const safeUrl = await validateImageUrl(url);
+      const { buffer, contentType } = await safeFetchBinary(
+        safeUrl,
+        MAX_STICKER_BYTES,
+        AbortSignal.timeout(15000)
+      );
+      const type = imageType(buffer);
+      if (!buffer?.length) {
+        if (sticker.source !== 'qq') return sticker;
+        throw this.#resourceUnavailable(sticker, '远程地址返回了空内容');
+      }
+      if (!type || !/^image\//i.test(String(contentType || type))) {
+        if (sticker.source !== 'qq') return sticker;
+        throw this.#resourceUnavailable(sticker, '远程地址返回的内容不是有效图片');
+      }
+      const cacheId = `cached_${crypto.createHash('sha256').update(String(sticker.id)).digest('hex').slice(0, 20)}`;
+      const asset = this.#writeAsset(buffer, cacheId);
+      const updated = {
+        ...sticker,
+        localFile: asset.relativeFile,
+        sendable: true,
+        sendErrorCode: '',
+        sendErrorMessage: '',
+        sendErrorAt: 0,
+        updatedAt: new Date().toISOString()
+      };
+      this.saveEntries(this.entries.map((entry) => entry.id === sticker.id ? updated : entry));
+      return {
+        ...updated,
+        url: `base64://${buffer.toString('base64')}`
+      };
+    } catch (error) {
+      if (error?.code === 'STICKER_RESOURCE_UNAVAILABLE') throw error;
+      if (sticker.source !== 'qq') {
+        // 历史 AI 收藏条目可能只有旧的远程地址；保持旧的探活/发送流程，
+        // 这类条目不会影响 QQ 个人收藏的富媒体根因修复。
+        console.log(`[sticker] 发送前本地缓存失败，保留远程地址（${sticker.id}）：${String(error?.message ?? error).slice(0, 160)}`);
+        return sticker;
+      }
+      throw this.#resourceUnavailable(sticker, `本地缓存失败（${String(error?.message ?? error).slice(0, 160)}）`);
+    }
+  }
+
   /** QQ 消息图片 URL 带短期 rkey；发送 AI 收藏图前按原消息刷新。 */
   async findForSend(ref) {
     const sticker = await this.find(ref);
+    if (sticker?.sendable === false) {
+      throw this.#resourceUnavailable(sticker, sticker.sendErrorMessage || '该表情已被标记为不可发送');
+    }
     if (sticker?.localFile) {
       const image = this.readImage(ref);
-      if (!image) return null;
+      if (!image) throw this.#resourceUnavailable(sticker, '本地图片文件不存在或格式无效');
       return {
         ...sticker,
         url: `base64://${image.buffer.toString('base64')}`
       };
     }
     const messageId = /^collected_(-?\d+)$/.exec(String(sticker?.id || ''))?.[1];
-    if (!sticker || sticker.source !== 'ai' || !messageId) return sticker;
+    if (!sticker || sticker.source !== 'ai' || !messageId) {
+      return this.#materializeRemoteSticker(sticker);
+    }
     try {
       const data = await this.onebot.getMsg(Number(messageId));
       const segments = Array.isArray(data?.message) ? data.message : [];
@@ -190,7 +289,7 @@ export class StickerManager {
         this.saveEntries(
           this.entries.map((entry) => entry.id === sticker.id ? refreshed : entry)
         );
-        return refreshed;
+        return this.#materializeRemoteSticker(refreshed);
       }
     } catch { /* 源消息过期就退回下面"探活"这条路 */ }
     // 刷不到新链接（原消息已过期/被撤回）的早期条目只有一条老 URL：链接可能早就 400 了。
@@ -210,7 +309,7 @@ export class StickerManager {
       dead.code = 'STICKER_LINK_DEAD';
       throw dead;
     }
-    return sticker;
+    return this.#materializeRemoteSticker(sticker);
   }
 
   note(id, patch) {
@@ -515,9 +614,13 @@ export class StickerManager {
     }
   }
 
-  /** 存档链接会过期：能刷新就刷新一次（拿最新一条带图消息的地址），限时 20 秒。 */
-  async #refreshImageUrl(message, fallback) {
-    if (message?.mid == null || typeof this.onebot?.getMsg !== 'function') return fallback;
+  /** 存档链接会过期：能刷新就刷新一次（拿最新一条带图消息的地址和 file），限时 20 秒。 */
+  async #refreshImageMedia(message, fallback = {}) {
+    const fallbackUrl = String(fallback?.url || '').trim();
+    const fallbackFile = String(fallback?.file || '').trim();
+    if (message?.mid == null || typeof this.onebot?.getMsg !== 'function') {
+      return { url: fallbackUrl, file: fallbackFile };
+    }
     try {
       const data = await Promise.race([
         this.onebot.getMsg(message.mid),
@@ -527,22 +630,29 @@ export class StickerManager {
         })
       ]);
       const segments = Array.isArray(data?.message) ? data.message : [];
-      const item = extractMediaFromSegments(segments).find((x) => x.kind === 'image' && x.url);
-      return item?.url ? item.url : fallback;
+      const item = extractMediaFromSegments(segments)
+        .find((x) => x.kind === 'image' && (x.url || x.file));
+      return {
+        url: String(item?.url || item?.file || fallbackUrl).trim(),
+        file: String(item?.file || fallbackFile).trim()
+      };
     } catch {
-      return fallback;
+      return { url: fallbackUrl, file: fallbackFile };
     }
+  }
+
+  /** 兼容只需要 URL 的旧调用方。 */
+  async #refreshImageUrl(message, fallback) {
+    const refreshed = await this.#refreshImageMedia(message, { url: fallback });
+    return refreshed.url || fallback;
   }
 
   /**
    * 取图 → { buffer, contentType }。URL 优先；URL 失败（多半是 QQ 的 rkey 过期，
    * 服务端回 `download url has expired`）时尝试用 NapCat 的 `get_image` 兜底。
    *
-   * ⚠️ **这条兜底在 macOS 上实际不生效**：macl / provenance 对服务进程**既挡写也挡读**，
-   * 服务读容器内文件会 EPERM（沙箱里测试能读，服务不能 —— 别被测试环境骗了）。
-   * 反向也不行：QQ 沙箱挡写容器外。唯一正路是 NapCat 的 get_rkey，
-   * 但它依赖 PacketBackend，而 PacketBackend 不支持本机 QQ 版本（7.0.2-53644-arm64）。
-   * 详见 tools-core.js 里 readImageViaNapCat 的说明。
+   * get_image 通常会返回 QQ 容器内的本地路径；如果当前进程读不到该路径，
+   * 还要继续尝试它同时返回的新鲜 URL，不能把一次本地权限/路径问题误报成图片永久失效。
    */
   async #fetchImageBuffer(url, { file = '', maxBytes = 4 * 1024 * 1024, signal } = {}) {
     try {
@@ -555,22 +665,39 @@ export class StickerManager {
       if (!name || typeof this.onebot?.call !== 'function') throw error;
       const data = await this.onebot.call('get_image', { file: name }, 20000, signal);
       const localPath = String(data?.file || data?.path || '').trim();
-      if (!localPath) throw error;
-      const buffer = await fs.promises.readFile(localPath);
-      if (!buffer?.length) throw error;
-      return { buffer, contentType: imageType(buffer) || 'image/jpeg' };
+      if (localPath && !/^https?:\/\//i.test(localPath)) {
+        try {
+          const buffer = await fs.promises.readFile(localPath);
+          if (buffer?.length) return { buffer, contentType: imageType(buffer) || 'image/jpeg' };
+        } catch { /* 继续尝试 get_image 返回的新鲜 URL */ }
+      }
+      const freshUrl = [data?.url, data?.data?.url, data?.file, data?.data?.file]
+        .map((value) => String(value || '').trim())
+        .find((value) => /^https?:\/\//i.test(value));
+      if (freshUrl) {
+        const safeUrl = await validateImageUrl(freshUrl);
+        const { buffer, contentType } = await safeFetchBinary(safeUrl, maxBytes, signal);
+        if (buffer?.length) return { buffer, contentType };
+      }
+      throw error;
     }
   }
 
   /** 把图片转成 data URL（视觉模型看的就是它）。 */
   async #stickerDataUrl(url, signal, file = '') {
-    const { buffer, contentType } = await this.#fetchImageBuffer(url, {
-      file,
-      maxBytes: 4 * 1024 * 1024,
-      signal
-    });
-    const mime = /^image\//.test(String(contentType || '')) ? String(contentType) : 'image/jpeg';
-    return `data:${mime};base64,${buffer.toString('base64')}`;
+    try {
+      const { buffer, contentType } = await this.#fetchImageBuffer(url, {
+        file,
+        maxBytes: 4 * 1024 * 1024,
+        signal
+      });
+      const mime = /^image\//.test(String(contentType || '')) ? String(contentType) : 'image/jpeg';
+      return `data:${mime};base64,${buffer.toString('base64')}`;
+    } catch (error) {
+      // 让工具层能区分"图片链接失效"和模型 API 自身报错，前者可以安静跳过收藏。
+      if (error && !error.code) error.code = 'STICKER_IMAGE_FETCH';
+      throw error;
+    }
   }
 
   /** 判断一张图值不值得收（工具收藏与自动收藏共用同一口径：只收真正的表情包）。 */
@@ -580,7 +707,7 @@ export class StickerManager {
     if (!visionEnabled()) {
       return { save: false, reason: '当前模型看不到图片，没法判断这张图值不值得收' };
     }
-    return this.#judgeSticker({ url }, message, signal);
+    return this.#judgeSticker({ url, file: fileForUrl(message, url) }, message, signal);
   }
 
   /** 现在还能不能收藏（限频闸门）：工具层在"看图判断"之前先问一句，别白跑一次视觉调用。 */
@@ -595,11 +722,30 @@ export class StickerManager {
     const timeoutSignal = AbortSignal.timeout(90000);
     // 主运行被中止/超时后，这次视觉判断也该停（否则工具早返回了它还在跑）
     const signal = outerSignal ? AbortSignal.any([outerSignal, timeoutSignal]) : timeoutSignal;
-    const dataUrl = await this.#stickerDataUrl(
-      media.url,
-      signal,
-      media.file || fileForUrl(message, media.url)
-    );
+    // QQ 图片链接带短期 rkey。收藏工具可能先看图、再判断、最后入库，
+    // 中间这几步足以让旧链接失效；只在取图失败时刷新并重试，不重复发起模型判断。
+    let dataUrl = '';
+    let imageUrl = String(media.url || '').trim();
+    let imageFile = String(media.file || fileForUrl(message, imageUrl)).trim();
+    let lastFetchError = null;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        dataUrl = await this.#stickerDataUrl(imageUrl, signal, imageFile);
+        break;
+      } catch (error) {
+        lastFetchError = error;
+        signal?.throwIfAborted?.();
+        if (attempt >= 3) throw error;
+        const refreshed = await this.#refreshImageMedia(message, { url: imageUrl, file: imageFile });
+        imageUrl = refreshed.url || imageUrl;
+        imageFile = refreshed.file || imageFile;
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, 800 * attempt);
+          timer.unref?.();
+        });
+      }
+    }
+    if (!dataUrl) throw lastFetchError || new Error('图片内容为空');
     const botName = resolveSelfName(getConfig().persona || {}, this.onebot?.selfNickname || '');
     const sender = String(message?.senderName || '群友').trim().slice(0, 20) || '群友';
     const tool = {
@@ -745,25 +891,51 @@ export class StickerManager {
     // 过一阵子就发不出去了（实测有一条已失效）。落盘后发送走 base64，永不过期。
     let localFile = '';
     let assetFile = '';
+    let currentUrl = url;
+    let currentFile = String(file || '').trim();
     try {
-      const { buffer } = await this.#fetchImageBuffer(url, {
-        file,
-        maxBytes: MAX_STICKER_BYTES,
-        signal
-      });
+      let buffer = null;
+      let lastError = null;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          ({ buffer } = await this.#fetchImageBuffer(currentUrl, {
+            file: currentFile,
+            maxBytes: MAX_STICKER_BYTES,
+            signal
+          }));
+          break;
+        } catch (error) {
+          lastError = error;
+          signal?.throwIfAborted?.();
+          if (attempt >= 3) throw error;
+          const refreshed = await this.#refreshImageMedia(
+            { mid: messageId },
+            { url: currentUrl, file: currentFile }
+          );
+          const nextUrl = refreshed.url || currentUrl;
+          const nextFile = refreshed.file || currentFile;
+          if (nextUrl === currentUrl && nextFile === currentFile) throw error;
+          currentUrl = nextUrl;
+          currentFile = nextFile;
+        }
+      }
+      if (!buffer?.length) throw lastError || new Error('图片内容为空');
       const asset = this.#writeAsset(buffer, id);
       localFile = asset.relativeFile;
       assetFile = asset.file;
     } catch (error) {
-      throw new Error(`这张图取不到（${String(error?.message ?? error)}），没有收藏`);
+      const wrapped = new Error(`这张图取不到（${String(error?.message ?? error)}），没有收藏`);
+      wrapped.code = 'STICKER_IMAGE_FETCH';
+      wrapped.cause = error;
+      throw wrapped;
     }
     const entry = {
       id,
       resId: id,
-      url,
+      url: currentUrl,
       localFile,
       md5: '',
-      srcKey: String(srcKey || '').trim() || stickerSourceKey(url),
+      srcKey: String(srcKey || '').trim() || stickerSourceKey(currentUrl),
       desc: String(note || '').slice(0, 20),
       localNote: String(note || ''),
       tags: [],

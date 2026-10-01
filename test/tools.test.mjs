@@ -110,6 +110,16 @@ test('send_poke：PacketBackend 不可用时返回跳过结果，不报工具异
   assert.match(result.content, /文字和图片消息不受影响/);
 });
 
+test('send_sticker：缺少 stickerId 时给模型纠正，不升级成表情库异常', async () => {
+  const f = context();
+  const result = await tool('send_sticker').execute(f.ctx, {});
+  assert.equal(result.isError, true);
+  assert.equal(result.reportIncident, false);
+  assert.equal(result.errorCode, 'MISSING_STICKER_ID');
+  assert.match(result.content, /没有提供有效的 stickerId/);
+  assert.equal(f.sends.length, 0, '缺少 id 时不应产生外部发送');
+});
+
 test('get_message_images refreshes an expired stored URL from the source message', async () => {
   const png = Buffer.from('89504e470d0a1a0a00000000', 'hex').toString('base64');
   const updates = [];
@@ -137,6 +147,64 @@ test('get_message_images refreshes an expired stored URL from the source message
   assert.match(result.content[1].image_url.url, /^data:image\/png;base64,/);
   assert.equal(updates.length, 1);
   assert.equal(updates[0][2].appendMedia[0].url, `base64://${png}`);
+});
+
+test('collect_sticker refreshes an expired stored URL and passes the file fallback', async () => {
+  const seen = { judge: null, collect: null };
+  const entry = {
+    mid: '78',
+    media: [{ kind: 'image', file: 'old.jpg', url: 'https://expired.invalid/image.png' }],
+    senderId: '42',
+    senderName: '群友',
+    text: '[图片]'
+  };
+  const f = context({
+    store: { findByMid: (_chatKey, mid) => String(mid) === '78' ? entry : null },
+    onebot: {
+      getMsg: async () => ({
+        message: [{ type: 'image', data: { file: 'fresh.jpg', url: 'https://fresh.example/image.png' } }]
+      })
+    },
+    stickers: {
+      judgeImage: async (args) => { seen.judge = args; return { save: true, note: '猫耳女仆，接梗用' }; },
+      collect: async (_mid, opts) => { seen.collect = opts; return { id: 'collected_78', localNote: opts.note }; }
+    }
+  });
+  const result = await tool('collect_sticker').execute(f.ctx, { messageId: '78', note: '旧备注' });
+  assert.equal(result.isError, undefined);
+  assert.equal(seen.judge.url, 'https://fresh.example/image.png');
+  assert.equal(seen.judge.message.media[0].file, 'fresh.jpg');
+  assert.equal(seen.collect.url, 'https://fresh.example/image.png');
+  assert.equal(seen.collect.file, 'fresh.jpg');
+});
+
+test('collect_sticker treats a text message id as a recoverable tool-choice mistake', async () => {
+  const f = context({
+    store: {
+      findByMid: (_chatKey, mid) => String(mid) === '79'
+        ? { mid: '79', media: [], senderId: '42', text: '只是文字，不是图片' }
+        : null
+    },
+    stickers: {
+      judgeImage: async () => { throw new Error('不该对文字消息看图'); },
+      collect: async () => { throw new Error('不该收藏文字消息'); }
+    }
+  });
+  const result = await tool('collect_sticker').execute(f.ctx, { messageId: '79', note: '误用' });
+  assert.equal(result.isError, undefined, '模型选错工具不应升级成异常');
+  assert.match(result.content, /collected.*false/);
+  assert.match(result.content, /send_sticker/);
+  assert.match(result.content, /带 \[图片\]\/\[表情包\]/);
+});
+
+test('get_sticker_image tells the model that an existing library sticker should be sent, not collected', () => {
+  const description = tool('get_sticker_image').description;
+  assert.match(description, /已有/);
+  assert.match(description, /send_sticker/);
+  assert.match(description, /不要对库内已有表情调用 collect_sticker/);
+  const collectDescription = tool('collect_sticker').description;
+  assert.match(collectDescription, /不要传当前文字消息的 id/);
+  assert.match(collectDescription, /直接 send_sticker/);
 });
 
 test('malformed tool JSON returns actionable correction guidance without execution', async () => {
@@ -290,6 +358,27 @@ test('collect_sticker：判断通过才入库，备注优先用判断给的那�
   assert.match(JSON.stringify(result), /本地图库/);
 });
 
+test('collect_sticker：图片链接刷新重试后仍失效时只跳过，不升级成异常', async () => {
+  const f = context({
+    store: {
+      findByMid: () => ({ mid: '1710457251', media: [{ kind: 'image', url: 'https://expired.example/a.jpg' }], senderId: '42', senderName: '群友', text: '图' }),
+      recent: () => []
+    },
+    stickers: {
+      judgeImage: async () => {
+        const error = new Error('这张图取不到（HTTP 400），没有收藏');
+        error.code = 'STICKER_IMAGE_FETCH';
+        throw error;
+      },
+      collect: async () => { throw new Error('不应继续收藏'); }
+    }
+  });
+  const result = await tool('collect_sticker').execute(f.ctx, { messageId: '1710457251', note: 'x' });
+  assert.equal(result.isError, undefined);
+  assert.match(result.content, /skipped/);
+  assert.match(result.content, /collected/);
+});
+
 
 test('send_sticker 的工具描述不再点名默认人设的表情（示例中性化）', () => {
   const description = tool('send_sticker').description;
@@ -299,7 +388,31 @@ test('send_sticker 的工具描述不再点名默认人设的表情（示例中�
 });
 
 
-test('collect_sticker：判断没出来 ≠ 这张不收（别给一个并不存在的结论）', async () => {
+test('send_sticker：最近用过且有替代图时不重复发送', async () => {
+  const f = context({
+    store: {
+      recent: () => [{ self: true, media: [{ kind: 'sticker', stickerId: 'st-1' }] }]
+    },
+    stickers: {
+      entries: [
+        { id: 'st-1', url: 'https://example.com/1.png', desc: '第一张' },
+        { id: 'st-2', url: 'https://example.com/2.png', desc: '第二张' }
+      ],
+      findForSend: async () => ({ id: 'st-1', url: 'https://example.com/1.png', desc: '第一张' }),
+      markUsed: () => {}
+    }
+  });
+  const result = await tool('send_sticker').execute(f.ctx, { stickerId: 'st-1' });
+  const outcome = JSON.parse(result.content);
+  assert.equal(result.isError, undefined);
+  assert.equal(outcome.sent, false);
+  assert.equal(outcome.skipped, true);
+  assert.match(outcome.reason, /避免重复/);
+  assert.equal(f.sends.length, 0, '被轮换策略拦截时不能产生外部发送');
+});
+
+
+test('collect_sticker：判断没出来时跳过且不记异常（别给一个并不存在的结论）', async () => {
   const { updateConfig, DEFAULT_CONFIG } = await import('../src/core/config.js');
   updateConfig({ sticker: { ...DEFAULT_CONFIG.sticker, collectEnabled: true } });
   const f = context({
@@ -311,6 +424,10 @@ test('collect_sticker：判断没出来 ≠ 这张不收（别给一个并不存
   });
   const result = await tool('collect_sticker').execute(f.ctx, { messageId: '1710457251', note: 'x' });
   assert.match(JSON.stringify(result), /没判断出来/);
+  assert.equal(result.isError, undefined);
+  const outcome = JSON.parse(result.content);
+  assert.equal(outcome.collected, false);
+  assert.equal(outcome.skipped, true);
   assert.equal(JSON.stringify(result).includes('这张不收'), false);
 });
 

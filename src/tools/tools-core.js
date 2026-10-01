@@ -69,7 +69,7 @@ async function stickerLookupHint(ctx, key) {
 
 import { normalizeMessageList, safeSlice, sanitizeUserText, textWithQuote, unquoteJsonString } from '../core/util.js';
 import { repairUnescapedStringQuotes } from '../core/json-repair.js';
-import { formatStickerList } from '../onebot/stickers.js';
+import { formatStickerList, STICKER_REPEAT_COOLDOWN_MS } from '../onebot/stickers.js';
 import { validateImageUrl, safeFetchBinary } from '../llm/safe-fetch.js';
 import { webSearch, webFetch } from '../llm/web-search.js';
 import { expandForwardNodes, extractMediaFromSegments } from '../onebot/onebot.js';
@@ -168,6 +168,64 @@ function sendErr(error, metadata = {}) {
       : {}),
     ...metadata
   });
+}
+
+// QQ 媒体链接会因 rkey 过期返回 HTTP 400。图片收藏已经在 StickerManager
+// 内部刷新并重试过，这时再失败属于"这张图暂时不能收藏"，不是 bot 故障；
+// 以成功的跳过结果返回，避免异常面板被同一类过期链接反复刷屏。
+function isStickerImageFetchFailure(error) {
+  if (error?.code !== 'STICKER_IMAGE_FETCH') return false;
+  const text = `${String(error?.message || '')} ${String(error?.cause?.message || '')}`;
+  // 不把安全校验失败吞掉；这类问题仍应进入异常面板人工处理。
+  return !/禁止访问内网|内网\/本机|URL 不能包含凭据|仅允许 http\/https|域名解析到内网/i.test(text);
+}
+
+function skippedStickerCollection(reason = '图片链接暂时不可用，已跳过收藏') {
+  return ok({ collected: false, skipped: true, reason });
+}
+
+// 发送层的最后一道防线：提示词在同一轮里不会刷新，模型仍可能再次选中刚发过的图。
+// sender 会把 stickerId 写进 self 消息的 media，重启后也能从消息库恢复最近使用记录。
+function recentSentStickerIds(ctx, limit = 4) {
+  try {
+    const rows = ctx?.store?.recent?.(ctx.chatKey, { limit: 80, includeSelf: true }) || [];
+    const ids = [];
+    for (const row of [...rows].reverse()) {
+      if (!row?.self || !Array.isArray(row.media)) continue;
+      const sticker = row.media.find((item) => item?.kind === 'sticker'
+        && (item.stickerId || item.id));
+      const id = String(sticker?.stickerId || sticker?.id || '').trim();
+      if (id && !ids.includes(id)) ids.push(id);
+      if (ids.length >= limit) break;
+    }
+    return ids;
+  } catch {
+    return [];
+  }
+}
+
+function stickerRepeatBlock(ctx, sticker) {
+  const recentIds = recentSentStickerIds(ctx);
+  const lastUsedAt = Number(sticker?.lastUsedAt) || 0;
+  const globallyRecent = lastUsedAt > 0
+    && Date.now() - lastUsedAt >= 0
+    && Date.now() - lastUsedAt < STICKER_REPEAT_COOLDOWN_MS;
+  if (!recentIds.includes(sticker.id) && !globallyRecent) return null;
+
+  const entries = Array.isArray(ctx?.stickers?.entries)
+    ? ctx.stickers.entries.filter((entry) => entry && entry.hidden !== true)
+    : [];
+  const alternatives = entries.filter((entry) => entry.id !== sticker.id
+    && !recentIds.includes(entry.id)
+    && !(Number(entry.lastUsedAt) > 0
+      && Date.now() - Number(entry.lastUsedAt) >= 0
+      && Date.now() - Number(entry.lastUsedAt) < STICKER_REPEAT_COOLDOWN_MS));
+  // 表情库只有一张，或所有候选都在冷却时，不要让轮换策略让 bot 完全失去表情能力。
+  if (!alternatives.length) return null;
+  return {
+    recentIds,
+    reason: `表情「${sticker.desc || sticker.localNote || sticker.id}」最近已经用过，为避免重复这次没有发送；请从可用表情包里换一张未在最近使用记录中的表情。`
+  };
 }
 
 const REPAIRABLE_ARGUMENT_TOOLS = new Set(['finish']);
@@ -286,6 +344,8 @@ async function currentMessageImageUrls(ctx, entry) {
     .filter((item) => item.kind === 'image' || item.kind === 'video')
     .map((item) => ({
       kind: item.kind,
+      // 保留 URL 作为主地址（调用方/收藏记录需要它）；图片 URL 失效时由
+      // imageItemToDataUrl 用 file → get_image → 本地路径/新 URL 兜底。
       url: String(item.url || item.file || '').trim(),
       // NapCat 的 file 名（形如 xxxxx.jpg）。QQ 直链带会话级 rkey、会过期，
       // 过期后可以用 get_image({file}) 让它把图落到容器内再读本地文件 —— 见 imageItemToDataUrl。
@@ -367,14 +427,25 @@ export function probeContainerReadable() {
     + '｜' + readResult);
 }
 
+function imageResponseUrl(data) {
+  return [data?.url, data?.data?.url, data?.file, data?.data?.file]
+    .map((value) => String(value || '').trim())
+    .find((value) => /^https?:\/\//i.test(value)) || '';
+}
+
 async function readImageViaNapCat(ctx, file, signal) {
   const name = String(file || '').trim();
   if (!name || typeof ctx.onebot?.call !== 'function') return null;
   const data = await ctx.onebot.call('get_image', { file: name }, 20000, signal);
   const localPath = String(data?.file || data?.path || '').trim();
-  if (!localPath) return null;
-  const buffer = await fs.promises.readFile(localPath);
-  return buffer?.length ? buffer : null;
+  if (localPath && !/^https?:\/\//i.test(localPath)) {
+    try {
+      const buffer = await fs.promises.readFile(localPath);
+      if (buffer?.length) return { buffer };
+    } catch { /* get_image 可能返回 QQ 沙箱内当前进程不可读的路径，继续用新 URL */ }
+  }
+  const url = imageResponseUrl(data);
+  return url ? { url } : null;
 }
 
 /** 取一张图 → data URL。先走 URL；URL 失败（多半是 rkey 过期）再用 NapCat 本地文件兜底。 */
@@ -382,10 +453,13 @@ async function imageItemToDataUrl(ctx, item, signal) {
   try {
     return await downloadImageAsDataUrl(item.url, signal);
   } catch (error) {
-    const buffer = await readImageViaNapCat(ctx, item.file, signal).catch(() => null);
-    if (!buffer) throw error;
-    const mime = detectMime(buffer) || 'image/jpeg';
-    return `data:${mime};base64,${buffer.toString('base64')}`;
+    const refreshed = await readImageViaNapCat(ctx, item.file, signal).catch(() => null);
+    if (refreshed?.buffer) {
+      const mime = detectMime(refreshed.buffer) || 'image/jpeg';
+      return `data:${mime};base64,${refreshed.buffer.toString('base64')}`;
+    }
+    if (refreshed?.url) return downloadImageAsDataUrl(refreshed.url, signal);
+    throw error;
   }
 }
 
@@ -457,11 +531,11 @@ export function buildToolDefs() {
     },
     {
       name: 'send_sticker',
-      description: '发送一个收藏表情（一条消息只能一张表情，不能附带文字；想说的话先用 send_message 单独发）。stickerId 直接填【可用表情包】里那行开头的备注名即可，也接受完整 id。',
+      description: '发送一个收藏表情（一条消息只能一张表情，不能附带文字；想说的话先用 send_message 单独发）。stickerId 是必填的非空字符串，直接填【可用表情包】里那行开头的备注名即可，也接受完整 id；绝对不要传空对象 {} 或省略 stickerId，没选好就先 list_stickers。',
       parameters: {
         type: 'object',
         properties: {
-          stickerId: { type: 'string', description: '表情 id' },
+          stickerId: { type: 'string', minLength: 1, description: '必填，非空表情 id；从【可用表情包】逐字照抄，不要省略，不要传空字符串' },
           replyToMessageId: { type: ['integer', 'string'], description: '可选：要引用的消息 id（聊天记录里的 #数字）' },
           atUserId: { type: ['integer', 'string'], description: '可选：要 @ 的 QQ 号' }
         },
@@ -469,17 +543,39 @@ export function buildToolDefs() {
       },
       async execute(ctx, args) {
         try {
+          const stickerRef = unquoteJsonString(args?.stickerId);
+          if (!stickerRef || !String(stickerRef).trim()) {
+            return err('这次没有提供有效的 stickerId，未发送表情。请从【可用表情包】中选择一个真实 id；如果还没选好，先调用 list_stickers，不要重复传空对象。', {
+              reportIncident: false,
+              errorCode: 'MISSING_STICKER_ID'
+            });
+          }
           let sticker = null;
           try {
-            sticker = await ctx.stickers.findForSend(unquoteJsonString(args.stickerId));
+            sticker = await ctx.stickers.findForSend(stickerRef);
           } catch (error) {
             if (error?.code === 'STICKER_LINK_DEAD') {
               return err(`${error.message}。换一张，或用 list_stickers 看看别的。`);
+            }
+            if (error?.code === 'STICKER_RESOURCE_UNAVAILABLE') {
+              return err(`${error.message}。本次未发送，请换一张可用表情。`, {
+                reportIncident: false,
+                errorCode: error.code
+              });
             }
             throw error;
           }
           if (!sticker) return err(`找不到表情。${await stickerLookupHint(ctx, args.stickerId)}`);
           if (!sticker.url) return err(`表情 ${sticker.id} 没有可发送的图片地址`);
+          const repeatBlock = stickerRepeatBlock(ctx, sticker);
+          if (repeatBlock) {
+            return ok({
+              sent: false,
+              skipped: true,
+              reason: repeatBlock.reason,
+              recentStickerIds: repeatBlock.recentIds
+            });
+          }
           const targetError = messageTargetError(ctx, args);
           if (targetError) return err(targetError);
           // 有本地文件的就是"托管内联"：findForSend 会给 base64，别过 validateImageUrl（它只收 http(s)）。
@@ -530,7 +626,7 @@ export function buildToolDefs() {
     },
     {
       name: 'get_sticker_image',
-      description: '查看一个没有备注/不确定含义的表情的图片（视觉模型可直接"看懂"）。',
+      description: '查看表情库里已有的表情图片（视觉模型可直接"看懂"）。看完如果要发送就用 send_sticker；不要对库内已有表情调用 collect_sticker。',
       parameters: {
         type: 'object',
         properties: { stickerId: { type: 'string', description: '表情 id' } },
@@ -542,8 +638,31 @@ export function buildToolDefs() {
           if (!sticker) return err(`找不到表情。${await stickerLookupHint(ctx, args.stickerId)}`);
           if (!sticker.url) return err('该表情没有图片地址');
           const dataUrl = await downloadImageAsDataUrl(sticker.url, ctx.signal);
-          return { content: imageParts(`表情 ${sticker.id}（你的备注：${sticker.localNote || sticker.desc || '无'}）（先判断情绪/态度再回应）：`, [dataUrl]) };
+          const visionNote = await describeImages([dataUrl], {
+            context: `表情库备注：${sticker.localNote || sticker.desc || '无'}。请核对备注是否和画面一致。`,
+            signal: ctx.signal,
+            maxTokens: 240
+          });
+          if (visionNote !== null) {
+            return ok(
+              `视觉模型识别结果：${visionNote || '视觉模型没有返回可用描述'}\n`
+              + `表情 ${sticker.id} 的已有备注：${sticker.localNote || sticker.desc || '无'}。`
+              + '这是表情库里已经存在的表情；如果要发它，直接调用 send_sticker，别调用 collect_sticker。'
+            );
+          }
+          return {
+            content: imageParts(
+              `表情 ${sticker.id}（你的备注：${sticker.localNote || sticker.desc || '无'}）（先判断情绪/态度再回应）。这是表情库里已经存在的表情；如果要发它，直接调用 send_sticker，别调用 collect_sticker：collect_sticker 只用于收藏聊天记录中那条带图片的消息。`,
+              [dataUrl]
+            )
+          };
         } catch (error) {
+          if (error?.code === 'STICKER_RESOURCE_UNAVAILABLE') {
+            return err(`${error.message}。这张表情不能查看，请换一张可用表情。`, {
+              reportIncident: false,
+              errorCode: error.code
+            });
+          }
           return err(error?.message ?? error);
         }
       }
@@ -573,7 +692,7 @@ export function buildToolDefs() {
     },
     {
       name: 'collect_sticker',
-      description: '收藏别人刚发的表情/图片到你的表情库（偶尔用；看图工具不可用时凭群友的用法与你的判断，别瞎收）。需要备注一句简短说明。',
+      description: '收藏聊天记录中别人刚发的图片/表情包到你的表情库（偶尔用；别瞎收）。messageId 必须是那条带 [图片]/[表情包] 的消息前的 #数字；不要传当前文字消息的 id、stickerId 或 collected_...。已经通过 get_sticker_image 看过库内表情时，直接 send_sticker，不要 collect_sticker。需要备注一句简短说明。',
       parameters: {
         type: 'object',
         properties: {
@@ -586,31 +705,58 @@ export function buildToolDefs() {
         try {
           const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
           if (!entry) return err(`在当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
-          const imageMedia = (entry.media || []).find((m) => m.kind === 'image' && m.url);
-          if (!imageMedia) return err('该消息没有可收藏的图片');
+          // QQ 图片链接带 rkey，存档里的旧链接很容易过期（HTTP 400）。
+          // 与 get_message_images 走同一条路径，先用 get_msg 刷新 URL，并保留
+          // NapCat 的 file 名给 sticker-manager 做本地 get_image 兜底。
+          const currentMedia = await currentMessageImageUrls(ctx, entry);
+          const imageMedia = currentMedia.find((m) => m.kind === 'image' && (m.url || m.file));
+          if (!imageMedia) {
+            // 这是模型最容易犯的语义错误：看了库内已有表情后，把当前文字消息的
+            // messageId 拿来 collect。它不是 bot/QQ 故障，也不值得进入异常面板；
+            // 返回结构化的可恢复结果，让模型改用 send_sticker 或找真正的图片消息。
+            return skippedStickerCollection(
+              `消息 #${normalizeMid(entry.mid)} 没有可收藏的图片。若你刚才用 get_sticker_image 看的是库内表情，请直接用 send_sticker；若要收藏别人刚发的图，请传那条带 [图片]/[表情包] 消息自己的 #数字，不要重试当前文字消息。`
+            );
+          }
           // 与"自动收藏"同一口径：先判一下这是不是真表情包 —— 只靠模型自己的判断，
           // 生活照/自拍/形象图会混进表情库，之后按图片发出去（用户 2026-09-27 反馈）
           if (typeof ctx.stickers.collectRateLimited === 'function' && ctx.stickers.collectRateLimited()) {
             return err('收藏太频繁了（每小时有上限），过一会儿再收');
           }
-          const verdict = await ctx.stickers.judgeImage({
-            url: imageMedia.url,
-            message: { mid: entry.mid, senderName: entry.senderName || '' },
-            signal: ctx.signal
-          });
+          let verdict;
+          try {
+            verdict = await ctx.stickers.judgeImage({
+              url: imageMedia.url,
+              message: { mid: entry.mid, senderName: entry.senderName || '', media: [imageMedia] },
+              signal: ctx.signal
+            });
+          } catch (error) {
+            if (isStickerImageFetchFailure(error)) return skippedStickerCollection();
+            throw error;
+          }
           if (!verdict) {
-            // 没判断出来（模型没提交/被服务商内容过滤）与"判断为不收"是两回事，别混成一句结论
-            return err('这次没判断出来（图片可能被服务商拦截或模型没提交决定），过会儿再试一次；确实想留就再调一次 collect_sticker，把 note 写清楚');
+            // 没判断出来（模型没提交/被服务商内容过滤）与"判断为不收"是两回事，
+            // 但这也是一次可恢复的跳过，不是 bot 故障：不要把它送进异常面板。
+            return skippedStickerCollection(
+              '这次没判断出来（可能被服务商内容过滤或模型未提交），没有收藏；稍后可以重试。'
+            );
           }
           if (verdict.save !== true) {
             return err(`这张不收（${verdict.reason || '不像表情包'}）：只收以后聊天用得上的表情包，生活照/截图/自拍不存`);
           }
           // 与 send_message/send_sticker 一样归一化：模型常传 "#123"，直接当 id 会生成
           // collected_#123，而刷新逻辑只认 collected_123，收藏的表情链接就永远不刷新。
-          const saved = await ctx.stickers.collect(normalizeMid(args.messageId), {
-            url: imageMedia.url,
-            note: String(verdict?.note || args.note || '')
-          });
+          let saved;
+          try {
+            saved = await ctx.stickers.collect(normalizeMid(args.messageId), {
+              url: imageMedia.url,
+              file: imageMedia.file,
+              note: String(verdict?.note || args.note || '')
+            });
+          } catch (error) {
+            if (isStickerImageFetchFailure(error)) return skippedStickerCollection();
+            throw error;
+          }
           return ok({
             collected: true,
             id: saved.id,

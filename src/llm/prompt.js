@@ -233,11 +233,11 @@ function qqSceneRules(grounded = false) {
   if (vision) {
     lines.push(
       '- 消息里出现 [图片] / [表情包] / [视频]，或要用某个没备注的收藏表情时，可以用 get_message_images / get_sticker_image 看图（你能直接看懂图片内容），再自然回应；不要假装看不到图，也不要编造图片内容；工具获取失败就老实说看不到。',
-      '- ⚠️ [图片] / [表情包] / [视频] 这些方括号是**消息历史里的占位符，不是能发出去的内容**——绝不要把占位符本身当文字发出去（发出去对方只会看到几个字）。要"复读/转发"别人发的图或表情包时，走这条路：get_message_images 看清 → collect_sticker 存进表情库 → send_sticker 发出去（别人发的表情包通常已自动进库，先 list_stickers 找找）。',
+      '- ⚠️ [图片] / [表情包] / [视频] 是消息历史占位符，绝不要把占位符本身当文字发出去。复读别人发的图先 list_stickers：已在库里就直接 send_sticker；只有收藏聊天记录中的新图时，才对带 [图片]/[表情包] 的消息用 get_message_images → collect_sticker，且 messageId 必须是那条图片消息自己的 #数字。get_sticker_image 只看库内已有表情，看完不要 collect_sticker。',
       '- 【看图先读情绪，别描述画面】别人发图/表情包时，先定个性：它传达的是什么态度（无语/呆滞、嘲讽/阴阳、卖萌撒娇、赞同捧场、震惊、玩笑式威胁、摆烂、委屈、催人、敷衍…），然后直接对那个态度说话。禁止描述画面：像「你这猫怎么流口水了」「这图是啥意思」都算描述；对态度说话的例子：流口水的猫＝呆滞/看傻 → 「你这是什么呆滞表情」「看傻了？」；维尼拿棍＝玩笑式威胁 → 「拿棍子吓唬谁呢」。拿不准就轻描淡写回一句，别硬编情绪、也别逐帧解释。',
       '- 消息里的 [QQ表情14 微笑] / [QQ表情489] 是对方发的 QQ 系统表情（编号是 QQ 表情编号，不是表情库的 stickerId）：想回同一个就用 send_face 传名字（如 微笑）；要发图片表情就用 send_sticker 传备注名（见【可用表情包】），别拿这个编号去 get_sticker_image / send_sticker。',
       '- 想表达情绪时可以用 send_face 发 QQ 系统表情（如 微笑 / 得意 / 流泪 / 玫瑰 / 汪汪），也可以用 send_sticker 发图库里的图片表情（stickerId 直接填备注名，不用背长 id）；都是一条只能一个表情、不能带文字。接梗、被逗笑、吐槽、无语、自嘲时，优先想一下有没有贴切的表情，该用就用，别连着刷。',
-      '- 图库可以自己攒：别人发的表情包会自动进库（不用你操心）；你也可以主动存——看到有意思、能当表情用的图，先 get_message_images 看一眼，确认好玩就用 collect_sticker 存进去（顺手写一句备注）；库里没备注的图，用 list_stickers 找、get_sticker_image 看，再用 sticker_note 补一句备注，以后用 send_sticker 发更准。挑真的会用的存，别什么都收。'
+      '- 图库可以自己攒：别人发的表情包会自动进库；主动收藏时，只对确实带 [图片]/[表情包] 的消息用 get_message_images → collect_sticker（messageId 传那条图片消息的 #数字）。库内没备注的图用 get_sticker_image 看、sticker_note 备注，之后用 send_sticker 发，不要 collect_sticker。挑真的会用的存，别什么都收。'
     );
   } else {
     lines.push(

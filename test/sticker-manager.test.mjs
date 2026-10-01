@@ -16,10 +16,12 @@ fs.writeFileSync(path.join(root, 'stickers.json'), JSON.stringify([{
 
 const { StickerManager } = await import('../src/onebot/sticker-manager.js');
 const { buildToolDefs } = await import('../src/tools/tools.js');
-const { buildStickerContext, buildStickerStrategyHint, findSticker } = await import('../src/onebot/stickers.js');
+const { buildStickerContext, buildStickerStrategyHint, findSticker, formatStickerList } = await import('../src/onebot/stickers.js');
 
 test('refreshes a collected QQ image URL from its source message before sending', async (t) => {
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const { updateConfig, DEFAULT_CONFIG } = await import('../src/core/config.js');
+  updateConfig({ security: { ...DEFAULT_CONFIG.security, allowPrivateImageHosts: true, allowProxyFakeIp: true } });
   const calls = [];
   const manager = new StickerManager({
     async call(action) {
@@ -154,6 +156,16 @@ test('prompt exposes sticker IDs and exact unique labels remain compatible', () 
   ], '无语团子'), null);
 });
 
+test('刚用过的表情在有替代图时暂时不进入候选清单', () => {
+  const prompt = buildStickerContext([
+    { id: 'recent-1', desc: '刚刚用过', url: 'https://example.com/1.png', useCount: 8, lastUsedAt: Date.now() - 1000 },
+    { id: 'other-1', desc: '换一张', url: 'https://example.com/2.png', useCount: 1, lastUsedAt: Date.now() - 3600000 }
+  ], 10);
+  assert.doesNotMatch(prompt, /stickerId：recent-1/);
+  assert.match(prompt, /stickerId：other-1/);
+  assert.match(prompt, /最近发过的 1 张暂时不列出/);
+});
+
 test('sticker list keeps familiar ones and rotates unused ones in', () => {
   // 复现用户反馈的场景：收藏很多，但发过的图永远占住名额，其余永远不露面。
   const entries = [];
@@ -172,8 +184,8 @@ test('sticker list keeps familiar ones and rotates unused ones in', () => {
   const prompt = buildStickerContext(entries, 10);
   const shown = ids(prompt);
   assert.equal(shown.length, 10, '清单条数按 max 取满');
-  // 常用位（前一半）：只放用过的，按次数与最近使用排
-  assert.deepEqual(shown.slice(0, 5).sort(), ['st-01', 'st-02', 'st-03', 'st-05', 'st-06']);
+  // 保底位（前一半）：只放用过但较久没用的，避免使用次数高的老图永远霸榜
+  assert.deepEqual(shown.slice(0, 5).sort(), ['st-01', 'st-02', 'st-04', 'st-05', 'st-06']);
   // 轮换位：没用过的顶上来了（改造前这里是"发过的占满、其余永不出现"）
   assert.ok(shown.slice(5).every((id) => Number(id.slice(3)) > 6),
     `轮换位应全是没用过的，实际：${shown.join(',')}`);
@@ -186,7 +198,7 @@ test('sticker list keeps familiar ones and rotates unused ones in', () => {
   const next = ids(buildStickerContext(afterUse, 10));
   assert.equal(next.length, 10);
   assert.ok(!next.includes('st-07'), '用过的图离开轮换位');
-  assert.ok(next.includes('st-12'), `下一张没用过的应补进来，实际：${next.join(',')}`);
+  assert.ok(next.some((id) => Number(id.slice(3)) > 7), `下一张没用过的应补进来，实际：${next.join(',')}`);
   // 上限 60：手改配置写大了也不会把整库塞进提示词
   const big = [];
   for (let i = 0; i < 200; i++) big.push({ id: `b-${i}`, url: `https://example.com/b${i}.png` });
@@ -329,6 +341,44 @@ test('取不到图就不收藏（不是存一个迟早失效的链接）', async
   );
 });
 
+test('收藏时图片链接过期会刷新源消息并重试，不把旧 HTTP 400 带进库', async (t) => {
+  const http = await import('node:http');
+  const png = Buffer.from('89504e470d0a1a0a00000000', 'hex');
+  let requests = 0;
+  const server = http.createServer((req, res) => {
+    requests += 1;
+    if (req.url === '/old.png') {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end('{"error":"expired"}');
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'image/png' });
+    res.end(png);
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => new Promise((r) => server.close(r)));
+  const { updateConfig, DEFAULT_CONFIG } = await import('../src/core/config.js');
+  updateConfig({
+    security: { ...DEFAULT_CONFIG.security, allowPrivateImageHosts: true },
+    sticker: { ...DEFAULT_CONFIG.sticker, collectEnabled: true }
+  });
+  const port = server.address().port;
+  const manager = new StickerManager({
+    async call() { return {}; },
+    async getMsg() {
+      return { message: [{ type: 'image', data: { url: `http://127.0.0.1:${port}/fresh.png`, file: 'fresh.jpg' } }] };
+    }
+  });
+  const entry = await manager.collect('-557', {
+    url: `http://127.0.0.1:${port}/old.png`,
+    file: 'old.jpg',
+    note: '刷新测试'
+  });
+  assert.match(entry.url, /\/fresh\.png$/);
+  assert.equal(requests, 2);
+  assert.ok(entry.localFile);
+});
+
 
 test('老条目链接失效时不发坏图（明确报"已失效"，而不是拿它当表情找不到）', async (t) => {
   const http = await import('node:http');
@@ -352,6 +402,45 @@ test('老条目链接失效时不发坏图（明确报"已失效"，而不是拿
     assert.match(String(error?.message || ''), /失效/);
     return true;
   });
+});
+
+test('QQ 收藏表情远程响应不是图片时会持久停用，不再重复触发富媒体发送失败', async (t) => {
+  const http = await import('node:http');
+  let requests = 0;
+  const server = http.createServer((req, res) => {
+    requests += 1;
+    res.writeHead(200, { 'content-type': 'image/jpeg' });
+    res.end(Buffer.from('7da96c', 'hex'));
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => new Promise((r) => server.close(r)));
+  const { updateConfig, DEFAULT_CONFIG } = await import('../src/core/config.js');
+  updateConfig({ security: { ...DEFAULT_CONFIG.security, allowPrivateImageHosts: true, allowProxyFakeIp: true } });
+  const manager = new StickerManager({ async call() { return []; } });
+  const id = 'qq-bad-resource';
+  const url = `http://127.0.0.1:${server.address().port}/face.jpg`;
+  manager.saveEntries([...manager.entries, {
+    id, resId: id, url, source: 'qq', desc: '坏 QQ 收藏表情'
+  }]);
+
+  await assert.rejects(() => manager.findForSend(id), (error) => {
+    assert.equal(error?.code, 'STICKER_RESOURCE_UNAVAILABLE');
+    assert.match(String(error?.message || ''), /不是有效图片/);
+    return true;
+  });
+  assert.equal(requests, 1);
+  const saved = JSON.parse(fs.readFileSync(path.join(root, 'stickers.json'), 'utf8'))
+    .find((entry) => entry.id === id);
+  assert.equal(saved.sendable, false);
+  assert.equal(saved.sendErrorCode, 'STICKER_RESOURCE_UNAVAILABLE');
+
+  await assert.rejects(() => manager.findForSend(id), (error) => {
+    assert.equal(error?.code, 'STICKER_RESOURCE_UNAVAILABLE');
+    return true;
+  });
+  assert.equal(requests, 1, '同一坏资源第二次不能再次请求远程地址');
+  assert.equal(formatStickerList(manager.entries).stickers.some((entry) => entry.id === id), false);
+  assert.equal(buildStickerContext(manager.entries).includes(id), false);
 });
 
 test('收藏夹容量状态：满 500 时告诉控制台"新收藏会进本地库"', async () => {

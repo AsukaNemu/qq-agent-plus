@@ -388,6 +388,7 @@ export class SendQueue {
         text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`,
         ts,
         mid: data?.message_id ?? null,
+        media: [{ kind: 'sticker', stickerId: sticker.id }],
         targetUserId,
         eventKind: 'message'
       });

@@ -7,6 +7,10 @@ import { sanitizeUserText } from '../core/util.js';
 
 const STICKER_FILE = path.join(DATA_DIR, 'stickers.json');
 
+// 发过的表情暂时离开候选清单，避免模型在连续几轮里盯着同一张图。
+// 不是永久禁用：超过这个时间后仍可再次使用；库里只有一张图时也会回退允许使用。
+export const STICKER_REPEAT_COOLDOWN_MS = 15 * 60 * 1000;
+
 export function nowIso() {
   return new Date().toISOString();
 }
@@ -33,6 +37,12 @@ export function normalizeStickerEntry(raw) {
     usage: String(entry.usage ?? '').trim(),
     source: entry.source === 'manual' ? 'manual' : (entry.source === 'ai' ? 'ai' : 'qq'),
     hidden: entry.hidden === true,
+    // 远程 QQ 收藏图可能已经失效，但元数据同步仍会保留它。
+    // 发送失败后把资源状态持久化，避免模型下一轮再次选中同一张坏图。
+    sendable: entry.sendable !== false,
+    sendErrorCode: String(entry.sendErrorCode || '').trim().slice(0, 100),
+    sendErrorMessage: String(entry.sendErrorMessage || '').trim().slice(0, 300),
+    sendErrorAt: Number(entry.sendErrorAt) || 0,
     metadataEdited: entry.metadataEdited === true,
     useCount: Math.max(0, Number(entry.useCount) || 0),
     lastUsedAt: Number(entry.lastUsedAt) || 0,
@@ -40,6 +50,19 @@ export function normalizeStickerEntry(raw) {
     createdAt: String(entry.createdAt || nowIso()),
     updatedAt: String(entry.updatedAt || nowIso())
   };
+}
+
+/**
+ * 判断条目是否应该出现在模型的可发送候选里。
+ *
+ * NapCat 的 fetch_custom_face_detail 会给 QQ 个人收藏表情返回 p.qpic.cn 的
+ * 远程地址，但在当前 QQ/容器架构下这类地址可能返回非图片占位字节，直接作为
+ * image URL 发送必然触发 rich media transfer failed。sync 会把这类地址标记为
+ * 不可发送；若协议端以后提供本地文件或其他可用地址，merge 会自动恢复它。
+ */
+export function isStickerSendable(entry) {
+  if (!entry || entry.hidden === true || entry.sendable === false) return false;
+  return true;
 }
 
 export function loadStickerStore(file = STICKER_FILE, { strict = false } = {}) {
@@ -87,11 +110,17 @@ export function mergeStickerLibrary(existing, fetched) {
     const id = String(item.emoji_id || item.resId || item.id || '').trim();
     if (!id) continue;
     const old = byId.get(id);
+    const nextUrl = String(item.url || old?.url || '').trim();
+    const resourceChanged = Boolean(old?.url && nextUrl && old.url !== nextUrl);
+    const source = old?.source || 'qq';
+    const unsupportedQqRemote = source === 'qq'
+      && !old?.localFile
+      && /^https?:\/\/p\.qpic\.cn\/qq_expression\//i.test(nextUrl);
     const merged = normalizeStickerEntry({
       ...(old || {}),
       id,
       resId: String(item.resId || item.emoji_id || id).trim(),
-      url: String(item.url || old?.url || '').trim(),
+      url: nextUrl,
       md5: String(item.md5 || old?.md5 || '').trim().toUpperCase(),
       desc: old?.metadataEdited
         ? old.desc
@@ -99,10 +128,19 @@ export function mergeStickerLibrary(existing, fetched) {
       localNote: old?.localNote || '',
       tags: old?.tags || [],
       usage: old?.usage || '',
-      source: old?.source || 'qq',
+      source,
       useCount: old?.useCount || 0,
       lastUsedAt: old?.lastUsedAt || 0,
       lastContext: old?.lastContext || '',
+      // 同一个坏地址再次同步时继续保持不可发送；QQ 给了新 URL 时才允许重新体检。
+      sendable: unsupportedQqRemote ? false : (resourceChanged ? true : old?.sendable !== false),
+      sendErrorCode: unsupportedQqRemote
+        ? 'STICKER_RESOURCE_UNAVAILABLE'
+        : (resourceChanged ? '' : old?.sendErrorCode || ''),
+      sendErrorMessage: unsupportedQqRemote
+        ? 'QQ 收藏表情资源未本地化：当前协议端无法可靠读取 p.qpic.cn 远程地址，已自动跳过。'
+        : (resourceChanged ? '' : old?.sendErrorMessage || ''),
+      sendErrorAt: unsupportedQqRemote ? (old?.sendErrorAt || Date.now()) : (resourceChanged ? 0 : old?.sendErrorAt || 0),
       createdAt: old?.createdAt || nowIso(),
       updatedAt: nowIso()
     });
@@ -260,7 +298,7 @@ export function findSticker(entries, ref) {
 export function formatStickerList(entries, query = '', limit = 48) {
   const list = (Array.isArray(entries) ? entries : [])
     .map(normalizeStickerEntry)
-    .filter((entry) => entry && !entry.hidden);
+    .filter(isStickerSendable);
   const q = String(query ?? '').trim().toLowerCase();
   const filtered = q
     ? list.filter((e) => {
@@ -306,31 +344,40 @@ function stableKey(entry) {
 export function buildStickerContext(entries, max = 10, { vision = true } = {}) {
   const all = (Array.isArray(entries) ? entries : [])
     .map(normalizeStickerEntry)
-    .filter((entry) => entry && !entry.hidden);
+    .filter(isStickerSendable);
   // 关闭图片输入（api.vision=false）时 get_sticker_image 会被从工具表里摘掉：没备注的表情
   // 既看不懂、也没法看图，留在清单里只是每轮多烧一行 token。所以那种配置下只列有备注的。
   const list = vision
     ? all
     : all.filter((entry) => Boolean(String(entry.desc || entry.localNote || '').trim()));
   if (!list.length) return '';
+  const now = Date.now();
+  const cooled = list.filter((entry) => Number(entry.lastUsedAt) > 0
+    && now - Number(entry.lastUsedAt) >= 0
+    && now - Number(entry.lastUsedAt) < STICKER_REPEAT_COOLDOWN_MS);
+  // 有替代图时，最近发过的图不进入本轮候选；如果整库都在冷却，说明库太小，
+  // 不能让 bot 因为轮换策略完全失去发表情的能力。
+  const available = list.filter((entry) => !cooled.includes(entry));
+  const candidates = available.length ? available : list;
   // 名单上限 60：这是"给模型看多少"，不是库容量（同步一律拉 500，见 sticker-manager.sync）。
   const limit = Math.max(1, Math.min(60, Number(max) || 10));
-  // 选图口径 = 常用保底 + 没用过的轮换。
+  // 选图口径 = 较久没用的已用表情保底 + 没用过的轮换。
   // 以前整份清单按 useCount 降序取前 N，发过的图永远占住名额 —— 几百个收藏里
   // 只有最先发出去的那几张能被模型看见（用户反馈"收藏了很多，但只会发那几张"）。
   // 现在一半留给"没用过/最久没用"的：发掉一张，下一张就自然顶上来。
   // 排序只看 useCount / lastUsedAt / createdAt / id，同一份库每轮结果完全一致 ——
   // 这段清单常驻系统提示、属于缓存前缀，不能每次运行都换一批。
   const hasNote = (e) => Boolean(String(e.desc || e.localNote || '').trim());
-  const byUsage = [...list].sort((a, b) =>
-    (b.useCount || 0) - (a.useCount || 0)
+  const byUsage = [...candidates].sort((a, b) =>
+    Boolean(b.useCount) - Boolean(a.useCount)
+    || (a.lastUsedAt || 0) - (b.lastUsedAt || 0)
+    || (a.useCount || 0) - (b.useCount || 0)
     || (hasNote(b) ? 1 : 0) - (hasNote(a) ? 1 : 0)
-    || (b.lastUsedAt || 0) - (a.lastUsedAt || 0)
     || String(a.id).localeCompare(String(b.id)));
   // 常用位 = min(名额的一半, 真的用过的张数)：老图不够填时，名额让给"没用过的"。
   // 用户 2026-09-26 反馈"它还是用旧表情包"：库里 39 张只有 11 张用过，而常用位固定占一半名额，
   // 每次都是同一批老图排在最前面；把用过的张数当上限，轮换位就能多带几张新的进来。
-  const usedCount = list.filter((e) => (e.useCount || 0) > 0).length;
+  const usedCount = candidates.filter((e) => (e.useCount || 0) > 0).length;
   const familiarCount = Math.max(1, Math.min(Math.ceil(limit / 2), Math.max(1, usedCount)));
   const familiar = byUsage.slice(0, familiarCount);
   const picked = new Set(familiar.map((e) => e.id));
@@ -339,7 +386,7 @@ export function buildStickerContext(entries, max = 10, { vision = true } = {}) {
   // （比如自动收藏的那批）排在几百张之后，几乎轮不到。用稳定哈希既保证
   // **同一份库每轮顺序完全一致**（这段清单常驻系统提示、属于缓存前缀，不能每轮换一批），
   // 又不像按时间排序那样有系统性偏向，新老表情都有机会上榜。
-  const rotation = list
+  const rotation = candidates
     .filter((e) => !picked.has(e.id))
     .sort((a, b) =>
       ((a.lastUsedAt || 0) ? 1 : 0) - ((b.lastUsedAt || 0) ? 1 : 0)   // 没用过的排最前
@@ -360,21 +407,24 @@ export function buildStickerContext(entries, max = 10, { vision = true } = {}) {
   });
   // 库刚建起来时"常用的一半"也全是没用过的：那时别写"前几个是常用的"，
   // 否则和逐行的（没用过）标记自相矛盾（2026-09-26 审查）。
-  const unusedTotal = list.filter((e) => !(e.useCount || 0)).length;
+  const unusedTotal = candidates.filter((e) => !(e.useCount || 0)).length;
   const topUsed = top.filter((e) => (e.useCount || 0) > 0).length;
   // 抬头只看"清单里到底有什么"，别按 rotation 是否为空下结论 —— 那两个边界（清单只有一个、
   // 或全库都用过）原来会和逐行的（没用过）标记打架（2026-09-26 审查 P2）
   const scope = topUsed === 0
     ? `这 ${top.length} 个都还没用过（用掉一张，下一张会自动顶上来）`
     : (unusedTotal > 0
-      ? `前 ${familiar.filter((e) => (e.useCount || 0) > 0).length} 个是常用的，后 ${top.length - familiar.filter((e) => (e.useCount || 0) > 0).length} 个是没用过/很久没用的`
+      ? `前 ${familiar.filter((e) => (e.useCount || 0) > 0).length} 个是较久没用的，后 ${top.length - familiar.filter((e) => (e.useCount || 0) > 0).length} 个是没用过/很久没用的`
         + ` —— 优先挑后面这批没见过的用（库里还有 ${unusedTotal} 张没发过；一张用过了就像老图一样可以一直用，别老是那两三张）`
-      : `前 ${topUsed} 个是常用的，后 ${top.length - topUsed} 个是最近没用过的（换着用，别老是那两三张；库里暂时没有没用过的了）`);
+      : `前 ${topUsed} 个是较久没用的，后 ${top.length - topUsed} 个是最近没用过的（换着用，别老是那两三张；库里暂时没有没用过的了）`);
   // 关闭图片输入时不能提 get_sticker_image（那个工具已经不在工具表里了）
   const tail = vision
     ? '，完整列表可用 list_stickers 查询；没用过的可以先 get_sticker_image 看一眼再用'
     : '，完整列表可用 list_stickers 查询';
-  return `【可用表情包】你的表情库里有 ${list.length} 个表情包（${scope}${tail}）。`
+  const cooldownHint = cooled.length && available.length
+    ? `最近发过的 ${cooled.length} 张暂时不列出，`
+    : '';
+  return `【可用表情包】你的表情库里有 ${list.length} 个表情包（${cooldownHint}${scope}${tail}）。`
     + '标〔QQ收藏表情〕的发出去是表情，标〔本地图库〕的发出去是一张图片（QQ 里显示为图片）——'
     + `两种都能用，随便挑，别老盯着同一批：\n${lines.join('\n')}`;
 }
