@@ -42,7 +42,7 @@ import {
   incidentDatabasePath,
   incidentErrorAnnotation
 } from '../pilots/incident-pilot.js';
-import { safeFetchBinary } from '../llm/safe-fetch.js';
+import { safeFetchBinary, validateImageUrl } from '../llm/safe-fetch.js';
 import { integrationStatus, updateSnowLumaPassword } from './integrations.js';
 import { AutoUpdateManager, autoUpdatePending, readAutoUpdateState } from '../auto-update.js';
 import { checkForUpdate, ignoreVersion } from '../update-notice.js';
@@ -832,6 +832,75 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     }
   }
 
+  // 撤回事件到达时，QQ 可能已经删掉原图或让 rkey 失效；收消息时先缓存一份，
+  // 这样撤回通知不依赖 QQ 撤回后的 get_msg/get_image 是否还愿意返回内容。
+  const mediaCacheDir = path.join(DATA_DIR, 'media-cache');
+  const MEDIA_CACHE_MAX_BYTES = 8 * 1024 * 1024;
+
+  function mediaCachePath(media) {
+    const source = String(media?.file || media?.url || '').trim();
+    if (!source) return '';
+    const digest = crypto.createHash('sha256').update(source).digest('hex').slice(0, 32);
+    const rawExt = path.extname(String(media.file || '').split('?')[0]).toLowerCase();
+    const ext = /\.(?:jpg|jpeg|png|gif|webp)$/i.test(rawExt) ? rawExt : '.bin';
+    return path.join(mediaCacheDir, `${digest}${ext}`);
+  }
+
+  async function cacheIncomingImage(media) {
+    const target = mediaCachePath(media);
+    if (!target) return null;
+    try {
+      const existing = await fs.promises.stat(target).catch(() => null);
+      if (existing?.isFile() && existing.size > 0 && existing.size <= MEDIA_CACHE_MAX_BYTES) {
+        return { ...media, cacheFile: target };
+      }
+
+      let data = null;
+      const file = String(media.file || '').trim();
+      if (file && typeof onebot.call === 'function') {
+        data = await onebot.call('get_image', { file }, 8000);
+      }
+      const localPath = String(data?.file || data?.path || '').trim();
+      let buffer = null;
+      if (localPath && !/^https?:\/\//i.test(localPath)) {
+        const stat = await fs.promises.stat(localPath).catch(() => null);
+        if (stat?.isFile() && stat.size > 0 && stat.size <= MEDIA_CACHE_MAX_BYTES) {
+          buffer = await fs.promises.readFile(localPath);
+        }
+      }
+      if (!buffer) {
+        const freshUrl = [data?.url, data?.data?.url, media.url]
+          .map((value) => String(value || '').trim())
+          .find((value) => /^https?:\/\//i.test(value));
+        if (!freshUrl) return null;
+        const safeUrl = await validateImageUrl(freshUrl);
+        ({ buffer } = await safeFetchBinary(safeUrl, MEDIA_CACHE_MAX_BYTES));
+      }
+      if (!buffer?.length || buffer.length > MEDIA_CACHE_MAX_BYTES) return null;
+      await fs.promises.mkdir(mediaCacheDir, { recursive: true, mode: 0o700 });
+      const temp = `${target}.${process.pid}.tmp`;
+      await fs.promises.writeFile(temp, buffer, { mode: 0o600 });
+      await fs.promises.rename(temp, target);
+      return { ...media, cacheFile: target };
+    } catch {
+      // 缓存是增强项；取图失败不应阻塞正常消息入库或触发聊天。
+      return null;
+    }
+  }
+
+  async function cacheMessageMedia(chatKey, stored) {
+    const images = (Array.isArray(stored?.media) ? stored.media : [])
+      .filter((media) => media?.kind === 'image' && (media.file || media.url))
+      .slice(0, 4);
+    if (!images.length || stored?.mid == null) return;
+    const cached = [];
+    for (const media of images) {
+      const item = await cacheIncomingImage(media);
+      if (item?.cacheFile) cached.push(item);
+    }
+    if (cached.length) store.updateByMid(chatKey, stored.mid, { appendMedia: cached });
+  }
+
   async function ingestMessage(kind, id, event, arrivedInactive = false) {
     const cfgNow = getConfig();
     if (!allowed(kind, id, cfgNow)) return; // 白名单外的聊天完全不记录
@@ -919,6 +988,10 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       recordOnly: arrivedInactive || !isTimeActive(chatKey)
     });
     if (stored.duplicate) return;
+    if (media.some((item) => item?.kind === 'image')) {
+      // 不阻塞当前消息处理；缓存完成后会把 cacheFile 合并回同一条存档。
+      cacheMessageMedia(chatKey, stored).catch(() => {});
+    }
     if (!isSelf) identityPilot?.observeMessage(chatKey, stored);
     if (!isSelf) slangPilot?.observeMessage(chatKey, stored);
     if (!isSelf) {

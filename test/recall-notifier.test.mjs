@@ -43,6 +43,36 @@ describe('RecallNotifier', () => {
     assert.equal(calls.filter((item) => item[0] === 'sendText').length, 1);
   });
 
+  it('sends a recalled image by NapCat file name before trying the expired URL', async () => {
+    const stored = new Map([['group:123:78', {
+      mid: '78', ts: Date.now(), senderId: '42', senderName: '群友', text: '[图片]',
+      media: [{
+        kind: 'image',
+        file: 'ABCDEF1234567890.jpg',
+        url: 'https://gchat.qpic.cn/download?expired-rkey=1'
+      }]
+    }]]);
+    const notified = new Set();
+    const attempts = [];
+    const store = {
+      findByMid: (chatKey, mid) => stored.get(`${chatKey}:${mid}`) || null,
+      hasRecallNotification: (chatKey, mid) => notified.has(`${chatKey}:${mid}`),
+      markRecallNotification: (chatKey, mid) => notified.add(`${chatKey}:${mid}`),
+      appendSelf: () => {}
+    };
+    const onebot = {
+      sendText: async () => ({ message_id: 100 }),
+      sendSegments: async (_kind, _id, segments) => {
+        attempts.push(segments[0].data.file);
+        return { message_id: 101 };
+      }
+    };
+    const notifier = new RecallNotifier({ store, onebot, getTargetUin: () => '123456789' });
+    const result = await notifier.handle({ notice_type: 'group_recall', group_id: 123, message_id: 78 });
+    assert.equal(result.mediaSent, 1);
+    assert.deepEqual(attempts, ['ABCDEF1234567890.jpg']);
+  });
+
   it('does not send when the message was not recorded', async () => {
     let sent = false;
     const notifier = new RecallNotifier({

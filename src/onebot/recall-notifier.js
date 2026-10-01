@@ -1,4 +1,5 @@
 import { formatFullTime, safeSlice } from '../core/util.js';
+import { extractMediaFromSegments } from './onebot.js';
 
 function recallKindOf(event) {
   if (event?.notice_type === 'group_recall' && event?.group_id != null) return 'group';
@@ -6,24 +7,41 @@ function recallKindOf(event) {
   return '';
 }
 
-function mediaSegmentOf(media) {
+function mediaValuesOf(media) {
+  if (!media || typeof media !== 'object') return [];
+  // QQ 的 URL 带短期 rkey，撤回发生时很可能已经失效；file 是 NapCat 的稳定缓存名。
+  return [...new Set([
+    media.localFile,
+    media.cacheFile,
+    media.file,
+    media.url
+  ].map((value) => String(value || '').trim()).filter(Boolean))];
+}
+
+function mediaSegmentOf(media, value = '') {
   if (!media || typeof media !== 'object') return null;
   if (media.kind === 'image') {
-    const file = String(media.url || media.file || '').trim();
+    const file = String(value || mediaValuesOf(media)[0] || '').trim();
     return file ? { type: 'image', data: { file } } : null;
   }
   if (media.kind === 'audio') {
-    const file = String(media.url || media.file || '').trim();
+    const file = String(value || mediaValuesOf(media)[0] || '').trim();
     return file ? { type: 'record', data: { file } } : null;
   }
   if (media.kind === 'video') {
-    const file = String(media.url || media.file || '').trim();
+    const file = String(value || mediaValuesOf(media)[0] || '').trim();
     return file ? { type: 'video', data: { file } } : null;
   }
   if (media.kind === 'face' && String(media.faceId || '').trim()) {
     return { type: 'face', data: { id: String(media.faceId).trim() } };
   }
   return null;
+}
+
+function mediaSegmentsOf(media) {
+  return mediaValuesOf(media)
+    .map((value) => mediaSegmentOf(media, value))
+    .filter(Boolean);
 }
 
 function dedupeMedia(media = []) {
@@ -78,6 +96,43 @@ export class RecallNotifier {
     this.log = log;
   }
 
+  async #messageMedia(message) {
+    const stored = Array.isArray(message?.media) ? message.media : [];
+    if (message?.mid == null || typeof this.onebot?.getMsg !== 'function') return stored;
+    try {
+      // 撤回事件通常已经让 get_msg 变成空消息；若事件和查询并发，仍尽量拿一次新鲜 file/url。
+      const data = await Promise.race([
+        this.onebot.getMsg(message.mid),
+        new Promise((resolve) => {
+          const timer = setTimeout(() => resolve(null), 2500);
+          timer.unref?.();
+        })
+      ]);
+      const fresh = extractMediaFromSegments(Array.isArray(data?.message) ? data.message : [])
+        .filter((item) => item.kind === 'image' || item.kind === 'audio' || item.kind === 'video');
+      return fresh.length ? fresh : stored;
+    } catch {
+      return stored;
+    }
+  }
+
+  async #getImageAlternatives(file) {
+    if (!file || typeof this.onebot?.call !== 'function') return [];
+    try {
+      const data = await this.onebot.call('get_image', { file }, 8000);
+      return [...new Set([
+        data?.file,
+        data?.path,
+        data?.url,
+        data?.data?.file,
+        data?.data?.path,
+        data?.data?.url
+      ].map((value) => String(value || '').trim()).filter(Boolean))];
+    } catch {
+      return [];
+    }
+  }
+
   async handle(event) {
     const kind = recallKindOf(event);
     if (!kind || event.message_id == null) return { status: 'ignored' };
@@ -107,9 +162,43 @@ export class RecallNotifier {
     this.emit('chat-update', privateKey);
 
     let mediaSent = 0;
-    for (const segment of dedupeMedia(message.media)) {
-      try {
-        const data = await this.onebot.sendSegments('private', targetUin, [segment]);
+    const media = await this.#messageMedia(message);
+    for (const item of media) {
+      const candidates = mediaSegmentsOf(item);
+      let sent = null;
+      let lastError = null;
+      for (const segment of candidates) {
+        try {
+          const data = await this.onebot.sendSegments('private', targetUin, [segment]);
+          sent = { data, segment };
+          break;
+        } catch (error) {
+          lastError = error;
+          // 只在协议端明确拒绝（常见为 rkey 过期/下载失败）时尝试替代定位，避免未知网络错误造成重复发送。
+          const retryable = error?.outcome === 'failed'
+            || /HTTP 400|Bad Request|下载文件失败|expired|过期|找不到|not found/i.test(String(error?.message ?? error));
+          if (!retryable) break;
+        }
+      }
+      // 仍失败时，让 NapCat 根据稳定 file 名刷新本地路径或新鲜 URL，再尝试一次。
+      if (!sent && item.kind === 'image') {
+        const file = String(item.file || '').trim();
+        const alternatives = await this.#getImageAlternatives(file);
+        for (const value of alternatives) {
+          if (candidates.some((candidate) => candidate.data?.file === value)) continue;
+          const segment = mediaSegmentOf(item, value);
+          if (!segment) continue;
+          try {
+            const data = await this.onebot.sendSegments('private', targetUin, [segment]);
+            sent = { data, segment };
+            break;
+          } catch (error) {
+            lastError = error;
+          }
+        }
+      }
+      if (sent) {
+        const { data, segment } = sent;
         this.store.appendSelf(privateKey, {
           mid: data?.message_id ?? null,
           ts: Date.now(),
@@ -118,8 +207,8 @@ export class RecallNotifier {
           eventKind: 'recall-media'
         });
         mediaSent += 1;
-      } catch (error) {
-        this.log(`[recall] 原媒体发送失败（${chatKey}#${mid}/${segment.type}）：${error?.message ?? error}`);
+      } else {
+        this.log(`[recall] 原媒体发送失败（${chatKey}#${mid}/${item.kind}）：${lastError?.message ?? lastError ?? '没有可用媒体地址'}`);
       }
     }
     this.emit('chat-update', privateKey);
