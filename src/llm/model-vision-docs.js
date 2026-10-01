@@ -254,6 +254,10 @@ export const MODEL_DOCS = {
     verdict: 'no-vision',
     note: '混元 Hy4 preview 为语言模型，无原生视觉。来源：凤凰网 Hy4 preview 报道'
   },
+  'hy4-preview-f': {
+    verdict: 'no-vision',
+    note: '混元 Hy4 preview-f 为语言模型，无原生视觉；不能可靠理解图片。来源：本机 WorkBuddy 模型能力实测/同系列能力资料'
+  },
   'hy4-preview-x': {
     verdict: 'no-vision',
     note: '混元 Hy4 preview 系列为语言模型，无原生视觉。来源：凤凰网 Hy4 preview 报道'

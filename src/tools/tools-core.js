@@ -76,6 +76,7 @@ import { expandForwardNodes, extractMediaFromSegments } from '../onebot/onebot.j
 import { readForwardMessages } from '../onebot/forward-reader.js';
 import { convertGifToStillStrip, convertVideoToFrameStrip, fetchOversizedImageAsJpeg } from './image-downsample.js';
 import { transcribeMessageAudio } from './audio-transcribe.js';
+import { describeImages, visionModelOverride } from '../llm/vision-scan.js';
 
 
 /**
@@ -861,6 +862,18 @@ export function buildToolDefs() {
           const kindHint = videoCount
             ? `其中 ${videoCount} 条是视频：2×2 四宫格按时间顺序抽的 4 帧，阅读顺序左上→右上→左下→右下，黑格是填充不是画面内容。要听视频里说了什么再调 get_message_audio。`
             : '若是 2×2 四宫格：那是动图 GIF 按时间顺序抽的 4 帧，阅读顺序左上→右上→左下→右下，黑格是填充不是画面内容。先判断它想表达的情绪/态度：无语呆滞、嘲讽、卖萌、赞同、挑衅、摆烂、委屈…再针对态度回话，不要复述画面。';
+          if (visionModelOverride()) {
+            const visual = await describeImages(dataUrls, {
+              context: `${knownHint}${kindHint}`,
+              signal: ctx.signal,
+              maxTokens: 480
+            });
+            return ok({
+              messageId: entry.mid,
+              imageUnderstanding: visual || '视觉模型没有返回可用描述',
+              note: '以上是独立视觉模型根据图片整理的结果。直接据此回应，不要臆测图片中没有出现的内容。'
+            });
+          }
           return { content: imageParts(`消息 ${args.messageId} 的图片内容${note}${knownHint}（${kindHint}）：`, dataUrls) };
         } catch (error) {
           return err(error?.message ?? error);

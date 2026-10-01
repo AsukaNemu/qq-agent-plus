@@ -7,10 +7,12 @@
 import { getConfig, updateConfig } from '../core/config.js';
 import { builtinVisionResults } from './model-vision-docs.js';
 import { withTimeWindow, assertTimeAllowed } from '../core/time-gate.js';
+import { resolveApiKey, chatCompletionWithRetry } from './llm.js';
 
-// 1×1 像素 PNG（70 字节），足够让视觉模型"看到点什么"，也不会浪费 token。
+// 16×16 PNG：部分视觉网关拒绝 1×1 图片（要求最小边长 14/16），探测图不能因此把
+// 真正的视觉模型误判成 no-vision。图案很小，仍然不会浪费多少 token。
 const TINY_PNG =
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+  'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAAAAAA6mKC9AAAAEElEQVR4nGNg+E8AMowoFQDA/X+BQnmBUwAAAABJRU5ErkJggg==';
 
 function joinUrl(base, path) {
   return `${String(base).replace(/\/+$/, '')}${path}`;
@@ -47,13 +49,76 @@ export function modelImageVerdict(providerId, modelId) {
 }
 
 /**
+ * 专用视觉模型的请求覆盖项。
+ *
+ * 主模型可以是纯文本模型；这段配置让图片任务单独走一个真正支持图片的
+ * OpenAI 兼容模型。密钥仍从 providerKeys 解析，不把明文复制到 api.visionModel。
+ */
+export function visionModelOverride(cfg = getConfig()) {
+  const setting = cfg?.api?.visionModel;
+  if (!setting || setting.enabled === false) return null;
+  const providerId = String(setting.provider || '').trim();
+  const provider = (cfg?.providers || []).find((item) => String(item?.id || '') === providerId);
+  const model = String(setting.model || '').trim();
+  const baseUrl = String(setting.baseUrl || provider?.baseURL || '').trim().replace(/\/+$/, '');
+  if (!model || !baseUrl) return null;
+  const apiKey = String(setting.apiKey || '').trim() || resolveApiKey({
+    ...cfg,
+    api: { ...(cfg.api || {}), provider: providerId }
+  });
+  return {
+    baseUrl,
+    apiKey,
+    model,
+    timeoutMs: Math.max(5000, Number(setting.timeoutMs) || 90000)
+  };
+}
+
+/** 图片任务是否有可用的理解通道：主模型视觉或专用视觉模型二选一。 */
+export function imageUnderstandingEnabled(cfg = getConfig()) {
+  if (cfg?.api?.vision === false) return false;
+  if (visionModelOverride(cfg)) return true;
+  return modelImageVerdict(cfg?.api?.provider, cfg?.api?.model) !== 'no-vision';
+}
+
+/**
+ * 用专用视觉模型把图片整理成文字，供纯文本主模型继续对话。
+ * 只有配置了专用模型的调用方才使用；没有专用模型时返回 null，保留原有直传图片行为。
+ */
+export async function describeImages(dataUrls, {
+  context = '',
+  signal = null,
+  maxTokens = 320
+} = {}) {
+  const override = visionModelOverride();
+  if (!override) return null;
+  const urls = (Array.isArray(dataUrls) ? dataUrls : []).filter((url) => String(url || '').trim());
+  if (!urls.length) return '';
+  const parts = [{
+    type: 'text',
+    text: '你是 QQ 机器人的图片识别模块。只根据图片中确实看见的内容回答，不要猜测，不要套用示例。'
+      + '请用简洁中文说明：主体/物体、动作或画面文字、明显情绪或用途；看不清的部分明确说看不清。'
+      + (context ? `\n补充背景：${String(context).slice(0, 500)}` : '')
+  }];
+  for (const url of urls) parts.push({ type: 'image_url', image_url: { url } });
+  const response = await chatCompletionWithRetry({
+    messages: [{ role: 'user', content: parts }],
+    temperature: 0.1,
+    purpose: 'judge',
+    signal,
+    maxTokens,
+    overrides: override
+  }, 1);
+  return String(response?.message?.content || '').trim();
+}
+
+/**
  * 运行时"能不能看图"的**唯一口径**：开关打开 **且** 模型不是明确不支持图片。
  * 工具摘除（orchestrator）与提示词口径（prompt/stickers）都必须用它 —— 只读 api.vision 会漏掉
  * "模型自身不支持图片"那一半：工具已经摘了，提示词还在教模型调它（2026-09-26 审查 P1）。
  */
 export function visionEnabled(cfg = getConfig()) {
-  if (cfg?.api?.vision === false) return false;
-  return modelImageVerdict(cfg?.api?.provider, cfg?.api?.model) !== 'no-vision';
+  return imageUnderstandingEnabled(cfg);
 }
 
 /**

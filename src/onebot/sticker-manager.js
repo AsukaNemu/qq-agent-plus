@@ -72,7 +72,7 @@ function stickerSourceKey(url) {
 
 import { chatCompletionWithRetry } from '../llm/llm.js';
 import { safeFetchBinary, validateImageUrl } from '../llm/safe-fetch.js';
-import { visionEnabled } from '../llm/vision-scan.js';
+import { visionEnabled, visionModelOverride } from '../llm/vision-scan.js';
 import { resolveToolCalls } from '../tools/inline-tools.js';
 
 export class StickerManager {
@@ -653,6 +653,8 @@ export class StickerManager {
       temperature: 0.3,
       purpose: 'judge',   // 收不收这张表情 = 判断类任务
       signal,
+      // 主聊天模型可以是纯文本模型；表情判断固定走专用视觉模型。
+      overrides: visionModelOverride(),
       // 思考会先吃掉 80~595 个 token，200 会把它截断到一个字段都收不到
       maxTokens: 600
     });
