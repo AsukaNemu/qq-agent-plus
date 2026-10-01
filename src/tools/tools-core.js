@@ -921,7 +921,10 @@ export function buildToolDefs() {
       async execute(ctx, args) {
         const userId = String(args.userId ?? '').trim();
         if (!/^\d{1,15}$/.test(userId)) {
-          return err(`userId 必须是数字 QQ 号（收到：${JSON.stringify(args.userId)}）。${memberHint(ctx)}`);
+          return err(`userId 必须是数字 QQ 号（收到：${JSON.stringify(args.userId)}）。${memberHint(ctx)}`, {
+            reportIncident: false,
+            errorCode: 'INVALID_MEMBER_TARGET'
+          });
         }
         // 只给本会话确实出现过的人记印象：模型会编出或打错号码，那会永久生成一条挂在陌生人
         // 名下的印象（注入提示词、还会出现在控制台资产页），而这类错事后无法发现。
@@ -932,7 +935,10 @@ export function buildToolDefs() {
           // 这里原来抄了 send_message 的提示（"如需引用请改用 replyToMessageId"）——
           // 但 memory_append 根本没有 replyToMessageId 参数，那句话会把它引到另一个错上。
           return err(`${userId} 不是当前会话中出现过的成员 QQ 号`
-            + `${looksLikeMessageId ? '，它是消息 id、不是 QQ 号' : ''}。${memberHint(ctx)}`);
+            + `${looksLikeMessageId ? '，它是消息 id、不是 QQ 号' : ''}。${memberHint(ctx)}`, {
+            reportIncident: false,
+            errorCode: 'INVALID_MEMBER_TARGET'
+          });
         }
         const entry = ctx.memory.append(ctx.chatKey, 'memberImpression', String(args.content ?? ''), {
           userId,
@@ -1142,7 +1148,13 @@ export function buildToolDefs() {
             content: sanitizeUserText(body.slice(0, 20000))
           });
         } catch (error) {
-          return err(`抓取失败：${error?.message ?? error}`);
+          const message = String(error?.message ?? error);
+          // 这是 web_fetch 的主动 SSRF 防护，不是网络/服务故障；保留工具错误给模型，
+          // 但不要每次有人发内网地址就写一条 warning 到异常面板。
+          const expectedBlock = /域名解析到内网|禁止访问内网|内网\/本机地址|本机地址/i.test(message);
+          return err(`抓取失败：${message}`, expectedBlock
+            ? { reportIncident: false, errorCode: 'BLOCKED_PRIVATE_URL' }
+            : {});
         }
       }
     },

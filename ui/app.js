@@ -7868,7 +7868,8 @@ function renderIncidentFeaturePage(c, status, incidents = []) {
           <td>${esc(incident.source || '-')}</td>
           <td>${esc(incident.chatKey || '-')}</td>
           <td><details><summary>${esc(String(incident.message || incident.code || '').slice(0, 160))}${String(incident.message || '').length > 160 ? ' …（点开看全文）' : ''}</summary>
-            <div class="incident-detail"><code>${esc(incident.code)}</code>
+            <div class="incident-detail"><code>${esc(incident.errorCode || incident.code)}</code>
+              ${incident.errorNote ? `<div>中文说明：${esc(incident.errorNote)}</div>` : ''}
               ${incident.sessionId ? `<div>Session：${esc(incident.sessionId)}</div>` : ''}
               ${incident.operationId ? `<div>Operation：${esc(incident.operationId)}</div>` : ''}
               ${incident.notifyError ? `<div>告警：${esc(incident.notifyError)}</div>` : ''}

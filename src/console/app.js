@@ -39,7 +39,8 @@ import { inactiveSlangPilotStatus, SlangPilotManager } from '../pilots/slang-pil
 import {
   IncidentPilotManager,
   inactiveIncidentPilotStatus,
-  incidentDatabasePath
+  incidentDatabasePath,
+  incidentErrorAnnotation
 } from '../pilots/incident-pilot.js';
 import { safeFetchBinary } from '../llm/safe-fetch.js';
 import { integrationStatus, updateSnowLumaPassword } from './integrations.js';
@@ -493,12 +494,18 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
           warning: '警告',
           info: '信息'
         }[incident.severity] || incident.severity;
+        const error = incidentErrorAnnotation({
+          code: incident.errorCode || incident.code,
+          message: incident.message
+        });
         const text = [
           '【实验功能 · QQ Agent 异常】',
           `等级：${severity}`,
           `模块：${incident.source}`,
           ...(incident.chatKey ? [`会话：${incident.chatKey}`] : []),
-          `结果：${incident.message}`,
+          `错误代码：${error.code}`,
+          `中文说明：${error.note}`,
+          `原始结果：${incident.message}`,
           `次数：${incident.count}`,
           `编号：${incident.id}`,
           '',

@@ -6,8 +6,18 @@ import { test } from 'node:test';
 
 const {
   IncidentPilotManager,
-  incidentDatabasePath
+  incidentDatabasePath,
+  incidentErrorAnnotation
 } = await import('../src/pilots/incident-pilot.js');
+
+test('rich media transfer failed has a stable error code and Chinese administrator note', () => {
+  const annotation = incidentErrorAnnotation({
+    code: 'OneBotActionError',
+    message: 'OneBot send_private_msg 失败：errMsg=rich media transfer failed'
+  });
+  assert.equal(annotation.code, 'ONEBOT_RICH_MEDIA_TRANSFER_FAILED');
+  assert.match(annotation.note, /富媒体传输失败/);
+});
 
 function fixture(t, patch = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-incident-pilot-'));

@@ -12,6 +12,31 @@ const SEVERITY_ORDER = { info: 0, warning: 1, error: 2, critical: 3 };
 // 脱敏规则统一在 core/redact.js（orchestrator 写 journal 的工具有错行同口径）
 const cleanText = redactText;
 
+// 稳定错误码与面向管理员的中文说明。匹配消息而不是只匹配调用方 error.code，
+// 因为 NapCat 的 OneBotActionError 原本只有通用 name，具体 errMsg 嵌在响应正文里。
+const INCIDENT_ERROR_NOTES = Object.freeze({
+  ONEBOT_RICH_MEDIA_TRANSFER_FAILED:
+    'QQ/NapCat 富媒体传输失败：图片或表情的远程资源无效、已过期，或 QQ 端无法读取；本次消息未发送。',
+  STICKER_RESOURCE_UNAVAILABLE:
+    '表情资源不可用：没有有效的本地图片，或远程地址返回的不是有效图片；系统已自动停用该表情，避免重复触发发送失败。'
+});
+
+export function incidentErrorAnnotation({ code = '', message = '' } = {}) {
+  const rawCode = String(code || '').trim();
+  const rawMessage = String(message || '');
+  let stableCode = rawCode || 'UNEXPECTED_ERROR';
+  if (/rich media transfer failed/i.test(rawMessage)) {
+    stableCode = 'ONEBOT_RICH_MEDIA_TRANSFER_FAILED';
+  } else if (rawCode === 'STICKER_RESOURCE_UNAVAILABLE') {
+    stableCode = 'STICKER_RESOURCE_UNAVAILABLE';
+  }
+  return {
+    code: stableCode,
+    note: INCIDENT_ERROR_NOTES[stableCode]
+      || '暂无预置中文说明，请结合原始结果和会话上下文排查。'
+  };
+}
+
 function sanitizeDetails(value, depth = 0) {
   if (depth > 3) return '[truncated]';
   if (value == null || typeof value === 'boolean' || typeof value === 'number') return value;
@@ -33,10 +58,12 @@ function incidentView(row) {
   if (!row) return null;
   let details = {};
   try { details = JSON.parse(row.details_json || '{}'); } catch { details = {}; }
+  const error = incidentErrorAnnotation({ code: row.code, message: row.safe_message });
   return {
     id: row.id,
     fingerprint: row.fingerprint,
-    code: row.code,
+    code: error.code,
+    rawCode: row.code,
     category: row.category,
     severity: row.severity,
     source: row.source,
@@ -56,7 +83,9 @@ function incidentView(row) {
     acknowledgedAt: Number(row.acknowledged_at) || 0,
     resolvedAt: Number(row.resolved_at) || 0,
     resolution: row.resolution || '',
-    version: Number(row.version) || 1
+    version: Number(row.version) || 1,
+    errorCode: error.code,
+    errorNote: error.note
   };
 }
 
@@ -105,7 +134,8 @@ function classifyError(error, context = {}) {
     severity = 'error';
     category = context.category || 'external_write';
   }
-  return { message, outcome, severity, category, code };
+  const annotation = incidentErrorAnnotation({ code, message });
+  return { message, outcome, severity, category, code: annotation.code };
 }
 
 export function incidentDatabasePath(dataDir) {
