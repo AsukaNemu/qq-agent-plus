@@ -905,9 +905,15 @@ export class ChatStore {
     const m = this.findByMid(chatKey, mid);
     if (!m) return false;
     const media = [...m.media];
-    const seen = new Set(media.map((v) => v.url));
     for (const v of appendMedia) {
-      if (v?.url && !seen.has(v.url)) { media.push(v); seen.add(v.url); }
+      if (!v || typeof v !== 'object') continue;
+      const index = media.findIndex((existing) => (
+        (v.url && existing?.url === v.url)
+        || (v.file && existing?.file === v.file)
+        || (v.kind && existing?.kind === v.kind && !v.url && !v.file)
+      ));
+      if (index >= 0) media[index] = { ...media[index], ...v };
+      else media.push(v);
     }
     // 查找用的是归一化后的 mid，更新也必须用同一个值，
     // 否则传 "#123" 时会"找到条目、更新 0 行、却返回 true"。
