@@ -394,7 +394,7 @@ export class AssetObserver {
     };
   }
 
-  async listStickers({ query = '', offset = 0, limit = 100, refresh = false } = {}) {
+  async listStickers({ query = '', offset = 0, limit = 'all', refresh = false } = {}) {
     let sync = null;
     if (refresh) sync = await this.stickers.sync(true);
     const snapshot = this.stickerSnapshot();
@@ -410,7 +410,13 @@ export class AssetObserver {
           ].join(' ').toLowerCase().includes(q))
       : snapshot.entries;
     const start = Math.max(0, Number(offset) || 0);
-    const size = Math.min(200, Math.max(1, Number(limit) || 100));
+    // 表情库没有必要像聊天记录一样分页：观测页需要能看到完整资产，
+    // 否则新收藏落在第 200 条之后时会显示在总数里，却永远不出现在列表中。
+    // 保留数字 limit 供接口调用方按需分页；limit=all 表示本次返回全部匹配项。
+    const rawLimit = String(limit ?? '').trim().toLowerCase();
+    const size = rawLimit === 'all'
+      ? filtered.length
+      : Math.min(5000, Math.max(1, Number(limit) || 100));
     return {
       ...snapshot,
       matched: filtered.length,

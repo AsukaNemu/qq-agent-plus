@@ -1005,8 +1005,19 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     if (!isSelf) identityPilot?.observeMessage(chatKey, stored);
     if (!isSelf) slangPilot?.observeMessage(chatKey, stored);
     if (!isSelf) {
-      Promise.resolve(stickers.autoCollect?.(chatKey, stored)).catch((error) =>
-        log('[sticker] 自动收藏失败:', error?.message ?? error));
+      // 自动收藏在后台执行；成功落库后通知已打开的观测页刷新，
+      // 否则自动新增的资产只能等手动刷新才能看到。
+      Promise.resolve(stickers.autoCollect?.(chatKey, stored))
+        .then((entry) => {
+          if (!entry?.id) return;
+          emit('asset-update', {
+            kind: 'stickers',
+            action: 'create',
+            id: entry.id,
+            source: 'auto'
+          });
+        })
+        .catch((error) => log('[sticker] 自动收藏失败:', error?.message ?? error));
     }
     emit('chat-update', chatKey);
     if (
@@ -3081,7 +3092,7 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         const result = await assetObserver.listStickers({
           query: url.searchParams.get('query') || '',
           offset: url.searchParams.get('offset') || 0,
-          limit: url.searchParams.get('limit') || 100,
+          limit: url.searchParams.get('limit') || 'all',
           refresh: url.searchParams.get('refresh') === '1'
         });
         // QQ 收藏表情有上限（非会员 500）：满了之后新收藏只能进本地图库（发出去是图片），

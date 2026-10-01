@@ -4234,7 +4234,7 @@ async function loadAssetObservatory({ refreshStickers = false } = {}) {
     let detail;
     if (kind === 'stickers') {
       detail = await api(
-        `/api/assets/stickers?limit=200&query=${query}${refreshStickers ? '&refresh=1' : ''}`
+        `/api/assets/stickers?limit=all&query=${query}${refreshStickers ? '&refresh=1' : ''}`
       );
     } else if (kind === 'slang') {
       detail = await api(
