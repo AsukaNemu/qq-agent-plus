@@ -52,6 +52,18 @@
     return element ? element.checked : fallback;
   }
 
+  function branchSuggestions(status) {
+    const configured = String(status?.branch || 'main').trim() || 'main';
+    const suggestions = [
+      { value: 'main', label: '默认分支' }
+    ];
+    if (configured !== 'main') {
+      suggestions.push({ value: configured, label: '当前配置' });
+    }
+    return suggestions.map(({ value, label }) => `
+      <option value="${esc(value)}" label="${esc(`${label} · ${value}`)}"></option>`).join('');
+  }
+
   function advancedPayload() {
     const branch = String(fieldValue('auto-update-branch-advanced', 'main')).trim();
     if (!validBranch(branch)) throw new Error('部署分支名称无效');
@@ -147,7 +159,7 @@
       <div data-auto-update-network class="update-deploy-settings" style="margin-top:10px;align-items:end">
         <label><span>部署分支</span>
           <input type="text" id="auto-update-branch-advanced" list="auto-update-branch-options" value="${esc(status.branch || 'main')}" autocomplete="off" />
-          <datalist id="auto-update-branch-options"><option value="main"></option><option value="${esc(status.branch || 'main')}"></option></datalist>
+          <datalist id="auto-update-branch-options">${branchSuggestions(status)}</datalist>
         </label>
         <label><span>Git 网络重试次数</span><input type="number" id="auto-update-retries" min="0" max="10" value="${esc(status.networkRetries ?? 4)}" /></label>
         <label><span>首次重试等待（秒）</span><input type="number" id="auto-update-retry-base" min="0.1" max="30" step="0.1" value="${esc(retryBase)}" /></label>
