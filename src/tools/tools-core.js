@@ -297,7 +297,10 @@ function messageTargetError(ctx, args) {
   }
   const reply = normalizeMid(args?.replyToMessageId);
   const at = normalizeMid(args?.atUserId);
-  if (reply && at) return 'replyToMessageId 和 atUserId 只能选择一个';
+  // 只有两个都有效时才算真正冲突；无效的 @ 先丢掉，保留正文/引用继续发送。
+  if (reply && at && ctx.kind === 'group' && /^\d{1,15}$/.test(at) && hasParticipant(ctx, at)) {
+    return 'replyToMessageId 和 atUserId 只能选择一个';
+  }
   if (reply) {
     if (!/^-?[1-9]\d*$/.test(reply)) {
       return `replyToMessageId 必须是聊天记录中的消息 id。${midHint(ctx)}`;
@@ -307,14 +310,29 @@ function messageTargetError(ctx, args) {
     }
   }
   if (at) {
-    if (ctx.kind !== 'group') return '私聊不需要 atUserId';
+    if (ctx.kind !== 'group') {
+      args.atUserId = null;
+      args.__atUserDropped = true;
+      return '';
+    }
     if (!/^\d{1,15}$/.test(at)) {
-      return `atUserId 必须是当前群成员的数字 QQ 号。${memberHint(ctx)}`;
+      args.atUserId = null;
+      args.__atUserDropped = true;
+      return '';
     }
     if (!hasParticipant(ctx, at)) {
       const looksLikeMessageId = Boolean(ctx.store?.findByMid?.(ctx.chatKey, at));
-      return `${at} 不是当前群中已出现的成员 QQ 号`
-        + `${looksLikeMessageId ? '，它是消息 id；如需引用请改用 replyToMessageId' : ''}。${memberHint(ctx)}`;
+      if (looksLikeMessageId) {
+        // 这一分支通常是模型把消息 id 填进了 atUserId；无论是否已有引用，
+        // 都不把它当 QQ 号发出去。没有引用时，上面的逻辑已经自动转成引用。
+        args.atUserId = null;
+        args.__atUserDropped = true;
+        return '';
+      }
+      // 不确定的 @ 不能猜，更不能让一次无害的正文回复因为错误 QQ 号失败。
+      // 安全做法是省略 @，照常发送正文，并在工具结果里提醒模型不要重试。
+      args.atUserId = null;
+      args.__atUserDropped = true;
     }
   }
   return '';
@@ -487,7 +505,7 @@ export function buildToolDefs() {
   return [
     {
       name: 'send_message',
-      description: '发送消息到当前聊天（本工具只能发到本次会话对应的群/私聊）。messages 传字符串=发一条；传字符串数组=分多条发送（推荐，更像真人）。只有需要明确"我回的是哪条"时才传 replyToMessageId 引用；需要点名某人才传 atUserId。不要在字符串内部用空格分句。',
+      description: '发送消息到当前聊天（本工具只能发到本次会话对应的群/私聊）。messages 传字符串=发一条；传字符串数组=分多条发送（推荐，更像真人）。只有需要明确"我回的是哪条"时才传 replyToMessageId 引用；需要点名某人才传 atUserId。atUserId 只能填当前会话里已确认的真实 QQ 号，不确定就省略，绝对不要猜号或把消息 id 当 QQ 号。不要在字符串内部用空格分句。',
       parameters: {
         type: 'object',
         properties: {
@@ -522,6 +540,7 @@ export function buildToolDefs() {
           ctx.session.sent.push(...result.sent.map((s) => ({ type: 'text', text: s.text, at: s.at })));
           ctx.emit('session-update', ctx.session.id);
           const note = ['已发送。不要输出"已发送"类汇报，继续思考下一步或直接结束。'];
+          if (args.__atUserDropped) note.push('未确认的 atUserId 已安全省略；不要猜 QQ 号，也不要为此重试。');
           if (result.failed.length) note.push(`（另有 ${result.failed.length} 条发送失败：${result.failed.map((f) => f.error).join('；')}——成功的不需要重发，失败的请稍后再试或减少条数）`);
           return ok({ sent: result.sent.length, messageIds: result.sent.map((s) => s.messageId), note: note.join('') });
         } catch (error) {

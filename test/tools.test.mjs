@@ -65,8 +65,8 @@ test('send tools reject message IDs and unknown users before creating an externa
     messages: 'hello',
     atUserId: '1710457251'
   });
-  assert.equal(send.isError, true);
-  assert.match(send.content, /它是消息 id/);
+  assert.equal(send.isError, undefined, '消息 id 误填 atUserId 时应自动改成引用');
+  assert.equal(f.sends[0][3].replyToMessageId, '1710457251');
 
   const reply = await tool('send_message').execute(f.ctx, {
     messages: 'hello',
@@ -80,7 +80,19 @@ test('send tools reject message IDs and unknown users before creating an externa
   });
   assert.equal(poke.isError, true);
   assert.match(poke.content, /它是消息 id/);
-  assert.deepEqual(f.sends, []);
+  assert.equal(f.sends.length, 1);
+});
+
+test('send_message：无法确认的 QQ 号自动省略 @，正文照常发送且不报异常', async () => {
+  const f = context();
+  const result = await tool('send_message').execute(f.ctx, {
+    messages: ['不聊这个', '换话题喵'],
+    atUserId: '1952429033'
+  });
+  assert.equal(result.isError, undefined);
+  assert.equal(f.sends.length, 1);
+  assert.equal(f.sends[0][3].atUserId, null);
+  assert.match(result.content, /省略/);
 });
 
 test('send tools accept a verified current group member', async () => {

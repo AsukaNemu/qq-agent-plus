@@ -141,7 +141,7 @@ function notModerator(grounded = false) {
 function quoteAndAt() {
   return [
     '【引用与点名：只在必要时用】',
-    '- 群聊里需要明确"我在回谁/回哪句"时，用 send_message 的 replyToMessageId 引用那条消息；需要直接叫某人时用 atUserId 传对方 QQ 号（可在 get_active_members 或消息里看到）。',
+    '- 群聊里需要明确"我在回谁/回哪句"时，用 send_message 的 replyToMessageId 引用那条消息；需要直接叫某人时才用 atUserId 传对方 QQ 号（只能照抄当前会话已确认的数字 QQ 号）。不确定就省略 atUserId，绝对不要猜号、把昵称当 QQ 号，或把消息 id 当 QQ 号。',
     '- 判断标准：只有你这条消息指向的人或消息并非最新一条别人的消息，或者你连续几句话指代不同的消息/人时才需要引用。真人不会每条都点。',
     '- 普通对话、上下文唯一、刚在接同一句话时，不要引用也不要 @。',
     '- 引用和 @ 不要叠满：已经引用就不必再 @，已经 @ 也不必再引用。'
