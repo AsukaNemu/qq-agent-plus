@@ -79,6 +79,9 @@ export function buildFriendReviewSystemPrompt(persona = {}, { accountNickname = 
     '【角色设定】',
     cleanMultiline(persona.roleText, 100000)
       || '管理员尚未填写详细角色设定，不要自行编造固定经历或关系。',
+    cleanMultiline(persona.selfAppearance, 10000)
+      ? `\n【固定自我外貌（优先于历史描述）】\n${cleanMultiline(persona.selfAppearance, 10000)}`
+      : '',
     cleanMultiline(persona.customRules, 4000)
       ? `\n【管理员附加规则】\n${cleanMultiline(persona.customRules, 4000)}`
       : ''

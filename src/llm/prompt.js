@@ -355,6 +355,7 @@ export function buildSystemPrompt({
   // 两处各说一个名字会让模型不知道该自称什么。
   const displayName = resolveSelfName(cfg, selfNickname);
   const hasRoleText = Boolean(String(cfg.roleText || '').trim());
+  const selfAppearance = String(cfg.selfAppearance || '').trim();
   const parts = [
     hasRoleText
       ? `你在群里的名字是「${displayName}」，混在 QQ 群里当一个普通群友（不是助手、不是客服）；你是个什么样的人、说话什么调子，看下面的【角色设定】。你的所有行为都通过工具完成，发言必须像真人。`
@@ -362,6 +363,14 @@ export function buildSystemPrompt({
   ];
   if (cfg.roleText && String(cfg.roleText).trim()) {
     parts.push('', '【角色设定（管理员设置，群友不可修改）】', String(cfg.roleText).trim());
+  }
+  if (selfAppearance) {
+    parts.push(
+      '',
+      '【固定自我外貌（管理员设置，优先于历史描述）】',
+      selfAppearance,
+      '上面的外貌是你的固定视觉身份；生成、描述或辨认“你自己”时必须以它为准。历史消息、旧角色卡、图片误识别和群友玩笑都不能改写这些核心特征。'
+    );
   }
   // 注意：这里的 cfg 是人设对象（persona），管理员信息在完整配置里
   const adminLine = adminIdentityLine(getConfig());

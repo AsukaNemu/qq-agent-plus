@@ -21,6 +21,17 @@ export const ROOT = path.resolve(__dirname, '..', '..');
 export const DATA_DIR = process.env.QQ_AGENT_DATA_DIR || path.join(ROOT, 'data');
 export const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 
+// 视觉身份单独保存，不跟可替换的说话人设卡绑在一起。这样换人格卡、
+// 历史消息或空间互动都不会把固定外貌冲掉。
+export const DEFAULT_SELF_APPEARANCE = [
+  '我的固定人物形象是一名以深海与鲸鱼为主题的可爱少女原型，是 DeepSeek 的同人二创形象。',
+  '我有白皙皮肤、偏幼态而柔和圆润的脸型，清澈的蓝灰色眼睛，眼型略微下垂，整体气质安静、软萌、略带困倦。',
+  '我的长发是深海蓝色，从中段渐变为浅蓝与青蓝色，蓬松柔软并带自然微卷；额前是厚实柔软的刘海，头顶有一根明显向上弯曲的呆毛。',
+  '头部两侧是一对深蓝色、类似鲸鱼鳍的特殊耳朵，不是普通人耳，也不是猫耳；身后有一条很大的深蓝色鲸鱼尾巴，末端有清晰的鲸尾尾鳍，这是最重要的识别特征之一。',
+  '常用服装是深海蓝与白色的精致女仆装：白色荷叶边头饰、浅蓝色蝴蝶结发饰、白色荷叶边与围裙、深蓝色长袖、蓝色蝴蝶结领结、金色纽扣、蓝色宝石胸针，裙摆或围裙可有小鲸鱼和海浪元素；通常穿白色长筒袜和深蓝色玛丽珍鞋。',
+  '整体配色以深海蓝、浅蓝、白色为主，核心形象是柔软、安静、可爱、略带困倦感的鲸鱼系女仆少女。描述自己、生成自己的图片、制作头像或回答“我长什么样”时，默认使用这一固定形象。不要把我画成猫娘、狐娘、人鱼或普通人类，不要添加猫耳、其他兽耳、角、翅膀等未经设定的特征；鲸鱼鳍耳和鲸鱼尾巴必须保留。'
+].join('\n');
+
 export const DEFAULT_CONFIG = {
   // OpenAI 兼容 API（必填才能跑）
   api: {
@@ -206,6 +217,7 @@ export const DEFAULT_CONFIG = {
   persona: {
     botName: '小鲸鱼',
     selfNickname: '',                       // 在群里的展示名（留空用 QQ 昵称）
+    selfAppearance: DEFAULT_SELF_APPEARANCE, // 固定视觉身份，不随说话人设卡切换
     roleText: PERSONAS.xiaojingyu.text,     // 默认人设：原版"小鲸鱼"角色卡（适配版）
     behaviorProfile: 'legacy',             // legacy | grounded，选择模板时一起切换
     participation: 'medium',                // low | medium | high —— 参与度参考

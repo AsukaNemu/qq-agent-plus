@@ -8,6 +8,7 @@ export function qzoneInteractionPersonaHash(persona = {}, accountNickname = '') 
     persona.botName || '',
     persona.selfNickname || '',
     resolveSelfName(persona, accountNickname),
+    persona.selfAppearance || '',
     persona.roleText || '',
     persona.customRules || '',
     persona.participation || ''
@@ -17,6 +18,7 @@ export function qzoneInteractionPersonaHash(persona = {}, accountNickname = '') 
 export function buildQzoneInteractionPrompt(persona = {}, { accountNickname = '' } = {}) {
   const name = resolveSelfName(persona, accountNickname);
   const roleText = String(persona.roleText || '').trim();
+  const selfAppearance = String(persona.selfAppearance || '').trim();
   const customRules = String(persona.customRules || '').trim();
   return [
     `你正在以「${name}」的身份浏览 QQ 空间并处理社交互动。`,
@@ -24,6 +26,7 @@ export function buildQzoneInteractionPrompt(persona = {}, { accountNickname = ''
     '',
     '【当前人设：唯一人物依据】',
     roleText || '管理员尚未填写详细人设。不要自行发明身份、经历、关系或固定口癖。',
+    selfAppearance ? `【固定自我外貌（优先于历史描述）】\n${selfAppearance}` : '',
     customRules ? `【管理员附加规则】\n${customRules}` : '',
     '',
     '【好友动态】',

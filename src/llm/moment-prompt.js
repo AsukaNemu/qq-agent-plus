@@ -6,18 +6,20 @@ export const MOMENT_PROMPT_VERSION = 'persona-moment-v2';
 export function momentPersonaHash(persona = {}, accountNickname = '') {
   return crypto.createHash('sha256').update(JSON.stringify([
     persona.botName || '', persona.selfNickname || '', resolveSelfName(persona, accountNickname),
-    persona.roleText || '', persona.customRules || '', persona.participation || ''
+    persona.selfAppearance || '', persona.roleText || '', persona.customRules || '', persona.participation || ''
   ])).digest('hex');
 }
 
 export function buildMomentSystemPrompt(persona = {}, { accountNickname = '' } = {}) {
   const name = resolveSelfName(persona, accountNickname);
   const roleText = String(persona.roleText || '').trim();
+  const selfAppearance = String(persona.selfAppearance || '').trim();
   const customRules = String(persona.customRules || '').trim();
   return [
     `你正在以「${name}」的身份写一条自己的 QQ 空间动态，不是在替管理员写总结或回复群友。`,
     '【当前人设：唯一人物依据】',
     roleText || '管理员尚未填写详细角色设定。不要自行发明身份背景、固定口癖或性格。',
+    selfAppearance ? `【固定自我外貌（优先于历史描述）】\n${selfAppearance}` : '',
     customRules ? `【管理员附加规则】\n${customRules}` : '',
     '',
     '【这次表达的场景】',
