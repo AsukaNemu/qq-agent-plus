@@ -30,6 +30,29 @@ export function classifyTransportFailure(error) {
   return { evidence, definite, uncertain };
 }
 
+export function isGroupRemovedError(error) {
+  const message = String(error?.message ?? error);
+  return /已被移出该群|被移出该群|请重新加群/.test(message)
+    || (Number(error?.retcode) === 110 && /group/i.test(String(error?.action || '')));
+}
+
+/**
+ * NapCat 的 PacketBackend 不支持当前 QQ 架构时，拍一拍无法发送。
+ * 这是运行环境能力缺失，不应让模型反复重试，也不应每次都刷异常面板。
+ */
+export function isPacketBackendUnavailableError(error) {
+  const action = String(error?.action || '');
+  const message = `${String(error?.message ?? error)} ${String(error?.cause?.message || '')}`;
+  return (!action || /poke/i.test(action))
+    && /packet\s*backend|发包能力不可用|不支持当前.?qq版本架构/i.test(message);
+}
+
+function pokeUnavailableError() {
+  return Object.assign(new Error('当前 NapCat/QQ 版本不支持 PacketBackend，拍一拍已停用；文字和图片消息不受影响'), {
+    code: 'POKE_UNAVAILABLE'
+  });
+}
+
 /** 被禁言时报给模型的错误文案（模型当轮可见，可直接决定"先不发言"）。 */
 function muteError(untilTs) {
   if (!untilTs) return '本群全员禁言中，本轮先不发言';
@@ -87,11 +110,14 @@ function muteUntilMs(raw, nowSec) {
 }
 
 export class SendQueue {
-  constructor({ onebot, store, onSent = null, onIncident = null }) {
+  constructor({ onebot, store, onSent = null, onIncident = null, onGroupRemoved = null }) {
     this.onebot = onebot;
     this.store = store;
     this.onSent = onSent;
     this.onIncident = typeof onIncident === 'function' ? onIncident : () => {};
+    this.onGroupRemoved = typeof onGroupRemoved === 'function' ? onGroupRemoved : () => {};
+    this.disabledChats = new Set();
+    this.unsupportedActions = new Set();
     this.chains = new Map();      // chatKey -> enqueue fn
     this.minuteTimes = new Map(); // chatKey -> [ts]
     this.hourTimes = new Map();   // chatKey -> [ts]
@@ -100,6 +126,22 @@ export class SendQueue {
   #chain(chatKey) {
     if (!this.chains.has(chatKey)) this.chains.set(chatKey, createSendChain());
     return this.chains.get(chatKey);
+  }
+
+  #assertChatEnabled(chatKey) {
+    if (this.disabledChats.has(chatKey)) {
+      throw Object.assign(new Error('该群已被 QQ 判定为移出状态，会话已暂停；重新加群后在控制台继续'), {
+        code: 'CHAT_BLOCKED'
+      });
+    }
+  }
+
+  enableChat(chatKey) {
+    this.disabledChats.delete(String(chatKey || ''));
+  }
+
+  disableChat(chatKey) {
+    this.disabledChats.add(String(chatKey || ''));
   }
 
   // 群禁言前置检测：被禁言时直接把原因报给模型，而不是发出后吃协议端拒发
@@ -206,7 +248,17 @@ export class SendQueue {
         error: error?.message ?? error,
         outcome
       });
-      try {
+      const packetPokeUnavailable = payload?.type === 'poke' && isPacketBackendUnavailableError(error);
+      if (packetPokeUnavailable) {
+        this.unsupportedActions.add('group_poke');
+        if (error && typeof error === 'object') error.code = 'POKE_UNAVAILABLE';
+        console.warn('[sender] NapCat PacketBackend 不支持当前 QQ 架构，已停用拍一拍；请使用受支持的 QQ 版本恢复该功能');
+      } else if (chatKey.startsWith('group:') && isGroupRemovedError(error)) {
+        // 同一批次的后续文本已经排进 sendChain；先在内存里熔断，避免被移出群后连续撞墙。
+        this.disableChat(chatKey);
+        try { this.onGroupRemoved(chatKey, error); } catch { /* 控制台状态写失败不改变发送结果 */ }
+      }
+      if (!packetPokeUnavailable) try {
         const incident = this.onIncident(error, {
           source: 'sender',
           category: 'external_write',
@@ -252,6 +304,7 @@ export class SendQueue {
       const isLast = i === parts.length - 1;
       const gap = this.#gap(text, isLast);
       promises.push(chain(async () => {
+        this.#assertChatEnabled(chatKey);
         assertCanSend(chatKey, options.signal);
         if (options.runId && this.store.hasUncertainEffects(options.runId)) throw new Error('Previous send delivery is uncertain');
         this.#checkRate(chatKey);
@@ -313,6 +366,7 @@ export class SendQueue {
     const [kind, id] = String(chatKey).split(':');
     const chain = this.#chain(chatKey);
     return chain(async () => {
+      this.#assertChatEnabled(chatKey);
       // 与 sendTextBatch 同一道防线：上一次发送结果 unknown（超时/5xx）时停止后续发送，
       // 避免"不知道发没发出去"的消息与表情/拍一拍叠加出多笔 unknown 记账。
       if (options.runId && this.store.hasUncertainEffects(options.runId)) throw new Error('Previous send delivery is uncertain');
@@ -347,6 +401,8 @@ export class SendQueue {
     const [kind, id] = String(chatKey).split(':');
     const chain = this.#chain(chatKey);
     return chain(async () => {
+      this.#assertChatEnabled(chatKey);
+      if (this.unsupportedActions.has('group_poke')) throw pokeUnavailableError();
       // 与 sendTextBatch 同一道防线：上次发送结果 unknown 时停止后续发送。
       if (options.runId && this.store.hasUncertainEffects(options.runId)) throw new Error('Previous send delivery is uncertain');
       this.#checkRate(chatKey);
@@ -372,6 +428,7 @@ export class SendQueue {
     const [kind, id] = String(chatKey).split(':');
     const chain = this.#chain(chatKey);
     return chain(async () => {
+      this.#assertChatEnabled(chatKey);
       // 与 sendTextBatch 同一道防线：上次发送结果 unknown 时停止后续发送。
       if (options.runId && this.store.hasUncertainEffects(options.runId)) throw new Error('Previous send delivery is uncertain');
       this.#checkRate(chatKey);

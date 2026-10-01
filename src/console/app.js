@@ -439,7 +439,17 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
   const sender = new SendQueue({
     onebot, store,
     onSent: ({ chatKey, text }) => log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`),
-    onIncident: (error, context) => incidentPilot?.capture(error, context)
+    onIncident: (error, context) => incidentPilot?.capture(error, context),
+    onGroupRemoved: (chatKey, error) => {
+      if (!incidentPilot?.active) return;
+      try {
+        incidentPilot.setChatControl(chatKey, {
+          mode: 'blocked',
+          reason: `QQ 报告机器人已被移出该群：${String(error?.message ?? error).slice(0, 180)}。重新加群后在控制台选择“继续处理”。`,
+          updatedBy: 'onebot'
+        });
+      } catch { /* 异常试点未就绪时由内存熔断兜底 */ }
+    }
   });
   let identityPilot = null;
   let identityPilotError = '';
@@ -1342,6 +1352,28 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     orchestrator.onIncoming(`${isGroup ? 'group' : 'private'}:${id}`);
   }
 
+  function suspendAfterGroupDeparture(event) {
+    const groupId = String(event?.group_id ?? '').trim();
+    if (!groupId || String(event?.user_id ?? '') !== String(onebot.selfId || '')) return false;
+    const chatKey = `group:${groupId}`;
+    const reason = event?.sub_type === 'kick'
+      ? 'QQ 通知机器人已被踢出该群'
+      : 'QQ 通知机器人已退出该群';
+    sender.disableChat(chatKey);
+    try {
+      if (incidentPilot?.active) {
+        incidentPilot.setChatControl(chatKey, {
+          mode: 'blocked',
+          reason: `${reason}，已停止自我回复；重新加群后在控制台选择“继续处理”。`,
+          updatedBy: 'onebot'
+        });
+      }
+    } catch { /* 运行控制未就绪时，SendQueue 的内存熔断仍然生效 */ }
+    orchestrator.enforceChatControl(chatKey);
+    log(`[group] ${reason}：${chatKey}，已暂停自我回复`);
+    return true;
+  }
+
   const ingress = new Map();
   function handleOneBotEvent(event) {
     const key = event?.group_id ? `group:${event.group_id}` : `private:${event?.user_id}`;
@@ -1360,6 +1392,10 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       // Echoes are deduplicated by message ID; shared-protocol observe mode also records old-instance replies.
       if (event.message_type === 'group' && event.group_id != null) return ingestMessage('group', String(event.group_id), event, arrivedInactive);
       if (event.message_type === 'private' && event.user_id != null) return ingestMessage('private', String(event.user_id), event, arrivedInactive);
+      return;
+    }
+    if (event.post_type === 'notice' && event.notice_type === 'group_decrease'
+      && suspendAfterGroupDeparture(event)) {
       return;
     }
     if (
@@ -1884,6 +1920,7 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
           expectedVersion: body.expectedVersion,
           updatedBy: 'console'
         });
+        if (body.mode !== 'blocked') sender.enableChat(key);
         const decision = orchestrator.enforceChatControl(key);
         let backlog = { action: 'keep', marked: 0, kept: store.unreadCount(key) };
         if (decision.allowed && body.backlogAction === 'discard') {

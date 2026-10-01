@@ -62,3 +62,27 @@ it('结果未知的失败仍记成 unknown（持有待人工核对）', async ()
   assert.equal(store.listUnknownOperations('group:1').length, 1, '未知写入要出现在待核对清单里');
   store.close();
 });
+
+it('PacketBackend 不支持时停用拍一拍，不记发送异常且不重复撞接口', async () => {
+  const store = new ChatStore(0, { dataDir: dir });
+  let calls = 0;
+  let incidents = 0;
+  const sender = new SendQueue({
+    store,
+    onIncident: () => { incidents += 1; },
+    onebot: {
+      sendPoke: async () => {
+        calls += 1;
+        throw Object.assign(new Error('OneBot group_poke 失败: retcode=400 packetBackend 发包能力不可用；PacketBackend 不支持当前QQ版本架构：7.0.2-53644-arm64'), {
+          action: 'group_poke', outcome: 'failed', retcode: 400
+        });
+      }
+    }
+  });
+  await assert.rejects(() => sender.poke('group:1', 42), (error) => error.code === 'POKE_UNAVAILABLE');
+  await assert.rejects(() => sender.poke('group:1', 42), (error) => error.code === 'POKE_UNAVAILABLE');
+  assert.equal(calls, 1, '能力确认失败后不应再次调用 OneBot');
+  assert.equal(incidents, 0, '能力缺失不应刷异常面板');
+  assert.equal(outboxState(store, 'group:1'), 'failed');
+  store.close();
+});

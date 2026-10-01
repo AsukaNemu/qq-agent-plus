@@ -98,6 +98,18 @@ test('send tools accept a verified current group member', async () => {
   assert.equal(f.sends[1][0], 'poke');
 });
 
+test('send_poke：PacketBackend 不可用时返回跳过结果，不报工具异常', async () => {
+  const f = context({
+    sender: {
+      poke: async () => { throw Object.assign(new Error('PacketBackend 不支持当前QQ版本架构'), { code: 'POKE_UNAVAILABLE' }); }
+    }
+  });
+  const result = await tool('send_poke').execute(f.ctx, { targetUserId: '42' });
+  assert.equal(result.isError, undefined);
+  assert.match(result.content, /已跳过/);
+  assert.match(result.content, /文字和图片消息不受影响/);
+});
+
 test('get_message_images refreshes an expired stored URL from the source message', async () => {
   const png = Buffer.from('89504e470d0a1a0a00000000', 'hex').toString('base64');
   const updates = [];

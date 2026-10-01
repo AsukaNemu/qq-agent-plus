@@ -163,7 +163,9 @@ function err(message, metadata = {}) {
 function sendErr(error, metadata = {}) {
   return err(error?.message ?? error, {
     incidentCaptured: error?.incidentCaptured === true,
-    ...(error?.code === 'GROUP_MUTED' ? { reportIncident: false } : {}),
+    ...(error?.code === 'GROUP_MUTED' || error?.code === 'CHAT_BLOCKED' || error?.code === 'POKE_UNAVAILABLE'
+      ? { reportIncident: false }
+      : {}),
     ...metadata
   });
 }
@@ -711,6 +713,13 @@ export function buildToolDefs() {
           }
           return ok({ poked: true });
         } catch (error) {
+          if (error?.code === 'POKE_UNAVAILABLE') {
+            return ok({
+              poked: false,
+              skipped: true,
+              reason: '当前 QQ/NapCat 的 PacketBackend 不支持拍一拍，已跳过；文字和图片消息不受影响。'
+            });
+          }
           return sendErr(error);
         }
       }
