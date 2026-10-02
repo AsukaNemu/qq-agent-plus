@@ -4747,6 +4747,7 @@ async function loadSettings() {
   syncGraduatedFeatureNavigation(cfg);
   state.providers = provData.providers || [];
   state.visionResults = visionData.results || {};
+  state.visionModel = visionData.visionModel || null;
   state.visionScanning = !!visionData.scanning;
   state.modelPrices = priceData || { prices: [], current: null };
   state.personaTemplates = {};
@@ -10630,21 +10631,27 @@ function bindSettingsEvents(c) {
     const box = $('#cfg-vision');
     const hint = $('#vision-switch-hint');
     const vhint = $('#model-vision-hint');
+    const override = state.visionModel;
+    const delegated = !!override?.enabled;
     if (box) {
       const r = (state.visionResults || {})[`${pid || ''}|||${model || ''}`];
-      if (r && r.verdict === 'no-vision') {
+      if (r && r.verdict === 'no-vision' && !delegated) {
         box.checked = false;
         box.disabled = true;
         hint.textContent = '此模型不支持图片输入';
       } else {
         box.disabled = false;
         box.checked = state.config.api.vision !== false;
-        hint.textContent = r && r.verdict === 'vision' ? '检测结果：支持图片输入' : '';
+        hint.textContent = r && r.verdict === 'vision'
+          ? '检测结果：支持图片输入'
+          : (delegated ? `主模型不支持图片输入，已由独立视觉模型 ${override.model} 接管` : '');
       }
     }
     if (vhint) {
       const r = (state.visionResults || {})[`${pid || ''}|||${model || ''}`];
-      if (r && (r.verdict === 'vision' || r.verdict === 'no-vision')) {
+      if (delegated && r?.verdict === 'no-vision') {
+        vhint.textContent = `✅ 独立视觉模型 ${override.model} 会先识图，当前主模型负责对话`;
+      } else if (r && (r.verdict === 'vision' || r.verdict === 'no-vision')) {
         vhint.textContent = r.verdict === 'vision' ? '✅ 当前模型支持图片输入' : '🚫 当前模型不支持图片输入';
       } else {
         vhint.textContent = '';
