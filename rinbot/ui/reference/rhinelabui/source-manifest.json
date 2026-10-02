@@ -1,0 +1,40 @@
+{
+  "source": "LBEILC/RhineLabUI",
+  "commit": "ee5779741c6c0c916e416705fa634c7abf905c73",
+  "retrieved": "2026-10-02",
+  "license": "MIT",
+  "files": [
+    { "path": "src/motion.ts", "role": "wave, damping, selection timing" },
+    { "path": "src/theme-motion.ts", "role": "bounded archive wave state" },
+    { "path": "src/ui-transitions.ts", "role": "150-300ms surface/content transitions" },
+    { "path": "src/boot.ts", "role": "identity/authentication opening sequence currently used by RInBot" },
+    { "path": "src/boot-motion.ts", "role": "opening motion timeline reference" },
+    { "path": "src/archive-loop.ts", "role": "cyclic archive navigation reference" },
+    { "path": "src/decryption.ts", "role": "layered detail reveal reference" },
+    { "path": "src/document-decryption.ts", "role": "document detail state reference" },
+    { "path": "src/model-viewer.ts", "role": "resource preview interaction currently used by RInBot" },
+    { "path": "src/style.css", "role": "warm terminal layout and typography reference" },
+    { "path": "src/theme.css", "role": "light/dark surface mapping reference" },
+    { "path": "src/fonts.css", "role": "font-face and subset loading reference" },
+    { "path": "src/main.ts", "role": "direct RhineLabUI application shell currently used by RInBot" },
+    { "path": "src/scene.ts", "role": "direct Three.js archive scene currently used by RInBot" },
+    { "path": "public/fonts/misans-webfont-4.3.1/regular/0.woff2", "sha256": "b52b8f31e52594ea26ffdf0bd5f56094c5ea8672de5707e5770a94d4584124ec", "role": "runtime Latin font" },
+    { "path": "public/fonts/misans-webfont-4.3.1/demibold/0.woff2", "sha256": "c453965f2d97503c4684dccf8d4ad7c572cd506fa06f5eb5ecd8c85a3a3a4dfc", "role": "runtime Latin emphasis font" },
+    { "path": "public/fonts/misans-webfont-4.3.1/bold/0.woff2", "sha256": "a2b0b0bf4b486ae0763e452b1d8fa4d90aa3a2bacf524afaa2b86423cb103904", "role": "runtime Latin strong font" },
+    { "path": "public/fonts/NOTICE.txt", "sha256": "68056442ee9108f4898b193b18d1f6f3aa34c782901ec27ba85875627e2a02ff", "role": "font license notice" },
+    { "path": "public/assets/archive-assembly.glb", "sha256": "d411170676f55a327c286e67e462f98b446667811c725318bab85657eaee06ec", "role": "direct 3D archive assembly" },
+    { "path": "public/assets/archive-cassette.glb", "sha256": "dda42b9b3b471d11c69820a64084d254a64b27761287ab0e35dd8387ec0a0bed", "role": "direct 3D archive cassette" },
+    { "path": "public/favicon.svg", "sha256": "c495851e461b6e24687eced8e517b2dad0f93bdc3a61f9a7d575ce0e31182513", "role": "direct RhineLabUI favicon" },
+    { "path": "public/icons/app-icon.svg", "sha256": "a8f184c878802c50f7f3d07c858f66bb301567403ef97aef94260bbe1f710d8e", "role": "direct RhineLabUI app icon" },
+    { "path": "public/audio/motif.ogg", "sha256": "3503d692874e626112bcfb077d89239653eb28713182b6468b862d7f22572162", "role": "direct interaction audio" },
+    { "path": "public/audio/atmosphere.ogg", "sha256": "a7c18ef30f096cae6056ca2db284f820a925fc4e7383bd2bf57f78cd9401dbcf", "role": "direct ambient audio" },
+    { "path": "public/audio/pulse.ogg", "sha256": "fd8d82990d9eea07e83430042f1f3b772c6e07319f28561426122b49536fc012", "role": "direct system pulse audio" }
+  ],
+  "runtimeAssets": {
+    "font": "public/fonts/",
+    "icons": ["public/favicon.svg", "src/brand.ts"],
+    "models": ["public/assets/archive-assembly.glb", "public/assets/archive-cassette.glb"],
+    "audio": "public/audio/"
+  },
+  "policy": "Only files copied into this project or explicitly listed here may become runtime visual assets. No main-branch tracking."
+}

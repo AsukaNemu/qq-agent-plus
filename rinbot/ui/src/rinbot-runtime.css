@@ -1,0 +1,4 @@
+.runtime-inline { margin-top: 24px; padding-top: 14px; border-top: 1px solid color-mix(in srgb, currentColor 22%, transparent); }
+.runtime-row { display: grid; grid-template-columns: minmax(120px, .7fr) minmax(0, 1.3fr); gap: 14px; padding: 7px 0; border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent); font-size: 12px; }
+.runtime-row span { color: var(--theme-muted, #77756d); font-family: monospace; font-size: 10px; letter-spacing: .04em; }
+.runtime-row b { font-weight: 500; overflow-wrap: anywhere; }

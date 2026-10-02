@@ -1,0 +1,20 @@
+.rinbot-bridge {
+  position: static;
+  display: grid;
+  gap: 4px;
+  width: max-content;
+  margin-top: 13px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: 10px/1.35 "MiSans", "PingFang SC", sans-serif;
+  letter-spacing: .06em;
+  transition: opacity .3s, transform .3s;
+}
+.rinbot-bridge[data-state="offline"] { color: #8f5e46; }
+.rinbot-bridge[data-state="loading"] { opacity: .72; }
+.rinbot-bridge strong { font-size: 11px; letter-spacing: .12em; }
+.rinbot-bridge small { opacity: .7; }
+.rinbot-bridge i { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: currentColor; }
+.rinbot-bridge[data-state="offline"] i { background: #b96b61; }
