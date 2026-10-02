@@ -725,7 +725,7 @@ export function buildToolDefs() {
     },
     {
       name: 'collect_sticker',
-      description: '收藏聊天记录中别人刚发的图片/表情包到你的表情库（偶尔用；别瞎收）。messageId 必须是那条带 [图片]/[表情包] 的消息前的 #数字；不要传当前文字消息的 id、stickerId 或 collected_...。已经通过 get_sticker_image 看过库内表情时，直接 send_sticker，不要 collect_sticker。需要备注一句简短说明。',
+      description: '收藏聊天记录中别人刚发的图片表情包到你的表情库（偶尔用；别瞎收）。唯一硬规则：含真人/现实人物的图片一律不收；只要不是真人，动漫、3D、现实物品/风景、动物、游戏画面、聊天记录、网页截图等都可以按用途保留。messageId 必须是那条带 [图片]/[表情包] 的消息前的 #数字；不要传当前文字消息的 id、stickerId 或 collected_...。已经通过 get_sticker_image 看过库内表情时，直接 send_sticker，不要 collect_sticker。需要备注一句简短说明。',
       parameters: {
         type: 'object',
         properties: {

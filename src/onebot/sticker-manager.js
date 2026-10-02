@@ -52,6 +52,42 @@ function cleanMetadata(value, max) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
+// 表情库唯一的硬拒绝条件是图片里出现真人/现实人物；其它内容由模型判断是否值得收藏。
+// 动漫、3D、现实物品/风景、动物、游戏画面、聊天记录和网页截图，只要不含真人都可以保留。
+const REAL_PERSON_VISUAL_TYPES = new Set([
+  'real_person',
+  'live_action',
+  'real_human',
+  '真人',
+  '现实人物',
+  '真人照片',
+  'photo_person'
+]);
+
+function normalizeStickerVisualType(value) {
+  const raw = cleanMetadata(value, 40).toLowerCase().replace(/[\s-]+/g, '_');
+  const aliases = {
+    illustration: '2d_illustration',
+    anime: '2d_anime',
+    cartoon: '2d_cartoon',
+    meme: '2d_meme',
+    '梗截图': 'screenshot_meme',
+    screenshot_meme: 'screenshot_meme',
+    '二次元': '2d_illustration',
+    '动漫': '2d_anime',
+    '卡通': '2d_cartoon',
+    '真人': 'real_person',
+    '现实': 'real_world',
+    '三次元': 'real_world',
+    photo: 'real_world',
+    photograph: 'real_world',
+    '3d': '3d_render',
+    render: '3d_render',
+    screenshot: 'screenshot'
+  };
+  return aliases[raw] || raw;
+}
+
 /** 从消息的 media 里找出与这个 URL 对应的 NapCat file 名（get_image 兜底要用）。 */
 function fileForUrl(message, url) {
   const media = Array.isArray(message?.media) ? message.media : [];
@@ -758,10 +794,15 @@ export class StickerManager {
           additionalProperties: false,
           properties: {
             save: { type: 'boolean', description: 'true=值得收进表情库；false=不值得' },
+            visualType: { type: 'string', description: '画面类型，按实际内容填写，例如 anime、3d_render、real_world、screenshot、real_person。' },
+            containsRealPerson: {
+              type: 'boolean',
+              description: '图片中是否出现真人/现实人物（包括自拍、路人、演员、cosplay 实拍）。只要是 true 就必须 save=false。'
+            },
             note: { type: 'string', maxLength: 60, description: 'save=true 时写一行备注，供以后挑表情时判断贴不贴切：先写画面主体（谁/什么形象、什么表情动作），再写适合的聊天场合（用逗号分隔），20~45 字。⚠️必须描述画面本身，不要只照抄图里的文字（「S」「危」这种没用）；图里的文字有梗意就放括号里附在最后。save=false 留空' },
             reason: { type: 'string', maxLength: 40, description: '一句话说明为什么收/不收（给日志看）' }
           },
-          required: ['save']
+          required: ['save', 'containsRealPerson']
         }
       }
     };
@@ -770,9 +811,9 @@ export class StickerManager {
         role: 'system',
         content: `你是「${botName}」，一个混在 QQ 群里的普通群友，正在看群友刚发的一张图。`
           + '判断标准只有一条：以后聊天时用得上吗。'
-          + '值得收：真正的表情包——带字的梗图、猫猫狗狗、卡通形象、抽象搞笑图，能拿来表达情绪、吐槽或怼人的。'
-          + '不值得收：本人或朋友的生活照、随手拍、自拍，以及跟聊天无关的截图（游戏、聊天记录、网页）、二维码、证件、广告、纯风景照。'
-          + '拿不准就问自己一句：以后聊天时真会用上吗。会就用得上才收，不会就别收。'
+          + '唯一硬门槛：只拒绝图片中出现真人/现实人物的内容，包括自拍、路人、演员、真人综艺/影视画面和 cosplay 实拍。只要不是真人，动漫、卡通、3D、现实物品/风景、动物、游戏画面、聊天记录、网页截图、二维码、证件、广告等都可以根据聊天用途决定是否收藏。'
+          + '必须先提交 containsRealPerson：看到真人就填 true 并 save=false；没有真人就填 false。不要把动漫/卡通/3D 人物误判成真人。'
+          + '拿不准是否是真人时，按真人处理并 save=false；只要明确不是真人，才可以根据“以后聊天时是否用得上”决定 save=true。'
           // 2026-09-30：模型不支持视觉时图片会被网关**静默丢弃**，而这里是**强制工具调用**、
           // note 又必填 —— 模型只能凭空编。实测把真人 cosplay 照标成「卡通人物一脸震惊张大嘴」。
           // 视觉能力已在调用前用 visionEnabled() 拦过一层，这里再给模型一条"看不到就别编"的兜底。
@@ -814,7 +855,15 @@ export class StickerManager {
       };
       if (/<function\s*=\s*submit_sticker_pick/i.test(raw)) {
         const save = key('save');
-        return { save: /^(true|是|收|yes)$/i.test(String(save ?? '')), note: key('note') || '', reason: key('reason') || '' };
+        const real = key('containsRealPerson');
+        return {
+          save: /^(true|是|收|yes)$/i.test(String(save ?? '')),
+          visualType: key('visualType') || '',
+          containsRealPerson: /^(true|是|有|yes)$/i.test(String(real ?? '')),
+          containsRealPersonProvided: real !== undefined,
+          note: key('note') || '',
+          reason: key('reason') || ''
+        };
       }
       const jsonMatch = raw.match(/\{[\s\S]*?"save"[\s\S]*?\}/);
       if (jsonMatch) {
@@ -863,10 +912,23 @@ export class StickerManager {
       return null;
     }
     if (!args) args = {};
+    const visualType = normalizeStickerVisualType(args.visualType);
+    const realPersonByType = REAL_PERSON_VISUAL_TYPES.has(visualType);
+    const realPersonProvided = typeof args.containsRealPerson === 'boolean';
+    const containsRealPerson = realPersonByType || args.containsRealPerson === true;
+    const visualAllowed = realPersonProvided && !containsRealPerson;
     return {
-      save: args.save === true,
+      save: args.save === true && visualAllowed,
+      visualType,
+      containsRealPerson,
       note: String(args.note || '').slice(0, 24),
-      reason: String(args.reason || '').slice(0, 40)
+      reason: String(
+        containsRealPerson
+          ? '图片中有真人/现实人物，不收藏'
+          : !realPersonProvided
+            ? '模型没有确认是否含真人，不收藏'
+          : (args.reason || '')
+      ).slice(0, 40)
     };
   }
 
