@@ -303,7 +303,7 @@ export const DEFAULT_CONFIG = {
   autoUpdate: {
     enabled: false,
     ownerUin: '',
-    repository: 'https://github.com/sakurawwwxh/qq-agent-plus.git',
+    repository: 'https://github.com/AsukaNemu/qq-agent-plus.git',
     branch: 'main',
     intervalHours: 6
   },

@@ -43,7 +43,7 @@ timer 每小时唤醒一次，应用配置中的 `intervalHours` 决定是否已
   "autoUpdate": {
     "enabled": false,
     "ownerUin": "",
-    "repository": "https://github.com/sakurawwwxh/qq-agent-plus.git",
+    "repository": "https://github.com/AsukaNemu/qq-agent-plus.git",
     "branch": "main",
     "intervalHours": 6,
     "networkRetries": 4,

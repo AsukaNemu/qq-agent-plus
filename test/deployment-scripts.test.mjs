@@ -264,7 +264,7 @@ test('installed manage launcher uses the exact deployed Node runtime', (t) => {
   assert.match(updateTimer, /RandomizedDelaySec=10min/);
   const deployment = JSON.parse(fs.readFileSync(path.join(root, '.deployment.json'), 'utf8'));
   assert.equal(deployment.updateService, 'qq-agent-test-update');
-  assert.equal(deployment.repository, 'https://github.com/sakurawwwxh/qq-agent-plus.git');
+  assert.equal(deployment.repository, 'https://github.com/AsukaNemu/qq-agent-plus.git');
   assert.equal(deployment.branch, 'main');
 
   const manage = spawnSync('/bin/bash', [path.join(root, 'manage.sh'), 'health'], {
