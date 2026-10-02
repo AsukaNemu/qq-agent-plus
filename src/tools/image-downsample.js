@@ -15,6 +15,10 @@ export const OVERSIZE_LIMIT_RE = /响应体超过\s*\d+\s*字节限制/;
 const PROBE_TTL_MS = 10 * 60 * 1000;
 let probeCache = { at: 0, path: null };
 
+// 视觉网关的图片大小限制通常作用在请求里的 image_url 内容，而不是原始文件。
+// Base64 会把原图放大约 4/3，因此调用方应在此之前把原始图片控制在更低的上限内。
+export const MAX_VISION_IMAGE_BYTES = 7 * 1024 * 1024;
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** 单次探测：启动 ffmpeg -version，按退出结果返回 {code} 或 {error}。 */
@@ -54,6 +58,12 @@ export async function resolveFfmpeg() {
   }
   probeCache.path = null;
   return probeCache.path;
+}
+
+/** macOS 自带的图片转换器；服务器/Linux 没有时返回 null，仍由 ffmpeg 负责。 */
+export function resolveSips() {
+  if (process.platform !== 'darwin') return null;
+  return fs.existsSync('/usr/bin/sips') ? '/usr/bin/sips' : null;
 }
 
 async function runFfmpegOnce(ffmpegPath, buffer, vf, signal) {
@@ -128,6 +138,99 @@ async function runFfmpeg(ffmpegPath, buffer, vf, signal) {
   }
 }
 
+function imageExtension(mime) {
+  if (/^image\/png/i.test(String(mime || ''))) return '.png';
+  if (/^image\/gif/i.test(String(mime || ''))) return '.gif';
+  if (/^image\/webp/i.test(String(mime || ''))) return '.webp';
+  return '.jpg';
+}
+
+async function runSips(buffer, mime, signal) {
+  const sipsPath = resolveSips();
+  if (!sipsPath) return null;
+  signal?.throwIfAborted();
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-sips-'));
+  const inputPath = path.join(workDir, `input${imageExtension(mime)}`);
+  const outputPath = path.join(workDir, 'output.jpg');
+  const cleanup = () => { try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* 尽力清理 */ } };
+  try {
+    fs.writeFileSync(inputPath, buffer);
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      let child;
+      const timer = setTimeout(() => {
+        try { child.kill(); } catch { /* 已退出 */ }
+        settle(reject, new Error('sips 降采样超时（30 秒）'));
+      }, 30000);
+      timer.unref?.();
+      const onAbort = () => {
+        try { child.kill(); } catch { /* 已退出 */ }
+        settle(reject, new Error('已中止'));
+      };
+      const settle = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        fn(value);
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      try {
+        child = spawn(sipsPath, ['-Z', '2048', '-s', 'format', 'jpeg', inputPath, '--out', outputPath], {
+          windowsHide: true,
+          stdio: ['ignore', 'ignore', 'ignore']
+        });
+      } catch (error) {
+        settle(reject, error);
+        return;
+      }
+      child.on('error', (error) => settle(reject, error));
+      child.on('close', (code) => {
+        if (code !== 0) {
+          settle(reject, new Error(`sips 降采样失败（exit ${code}）`));
+          return;
+        }
+        try {
+          const out = fs.readFileSync(outputPath);
+          settle(resolve, out.length ? out : null);
+        } catch (error) {
+          settle(reject, error);
+        }
+      });
+    });
+    return fs.readFileSync(outputPath);
+  } finally {
+    cleanup();
+  }
+}
+
+/** 把过大的本地图片压成视觉网关更容易接受的 JPEG。 */
+export async function downsampleImageBufferAsJpeg(buffer, mime, signal) {
+  if (!buffer?.length) return null;
+  signal?.throwIfAborted();
+
+  const ffmpegPath = await resolveFfmpeg();
+  if (ffmpegPath) {
+    try {
+      const vf = /^image\/gif/i.test(String(mime || ''))
+        ? gifStripVf(await countGifFrames(ffmpegPath, buffer, signal))
+        : "scale='min(2048,iw)':-2";
+      const jpeg = await runFfmpeg(ffmpegPath, buffer, vf, signal);
+      if (jpeg?.length) return jpeg;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+    }
+  }
+
+  try {
+    const jpeg = await runSips(buffer, mime, signal);
+    if (jpeg?.length) return jpeg;
+  } catch (error) {
+    if (signal?.aborted) throw error;
+  }
+  return null;
+}
+
 /**
  * 常规上限拉取抛出"超限"时调用：放宽到 largeCap 重拉一次，确认拿到的确实是
  * 图片（content-type image/*）后交给 ffmpeg 降采样成 JPEG。
@@ -135,7 +238,7 @@ async function runFfmpeg(ffmpegPath, buffer, vf, signal) {
  * ffmpeg 缺失 → 抛带安装指引的错误；降采样失败 → 抛 ffmpeg 的具体错误。
  */
 export async function fetchOversizedImageAsJpeg(safeUrl, originalError, signal, {
-  cap = 12 * 1024 * 1024,
+  cap = MAX_VISION_IMAGE_BYTES,
   largeCap = 96 * 1024 * 1024
 } = {}) {
   if (!OVERSIZE_LIMIT_RE.test(String(originalError?.message ?? ''))) throw originalError;
@@ -153,7 +256,8 @@ export async function fetchOversizedImageAsJpeg(safeUrl, originalError, signal, 
     throw originalError; // 其他二次拉取失败：原始超限错误更贴近真相
   }
   if (!buffer?.length || !/^image\//i.test(String(contentType || ''))) throw originalError;
-  // 动图走帧条（与常规 GIF 路径同一口径，别只给模型一帧）；其他图按尺寸降采样
+  // 远程 URL 的超限重拉仍固定走 ffmpeg；macOS sips 只用于 NapCat 返回的本地文件，
+  // 这样无 ffmpeg 的服务器不会意外放宽网络体积闸门。
   let vf = "scale='min(2048,iw)':-2";
   if (/^image\/gif/i.test(String(contentType || ''))) {
     vf = gifStripVf(await countGifFrames(ffmpegPath, buffer, signal));

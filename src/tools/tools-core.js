@@ -74,7 +74,13 @@ import { validateImageUrl, safeFetchBinary } from '../llm/safe-fetch.js';
 import { webSearch, webFetch } from '../llm/web-search.js';
 import { expandForwardNodes, extractMediaFromSegments } from '../onebot/onebot.js';
 import { readForwardMessages } from '../onebot/forward-reader.js';
-import { convertGifToStillStrip, convertVideoToFrameStrip, fetchOversizedImageAsJpeg } from './image-downsample.js';
+import {
+  MAX_VISION_IMAGE_BYTES,
+  convertGifToStillStrip,
+  convertVideoToFrameStrip,
+  downsampleImageBufferAsJpeg,
+  fetchOversizedImageAsJpeg
+} from './image-downsample.js';
 import { transcribeMessageAudio } from './audio-transcribe.js';
 import { describeImages, visionModelOverride } from '../llm/vision-scan.js';
 
@@ -85,6 +91,13 @@ import { describeImages, visionModelOverride } from '../llm/vision-scan.js';
  * ffmpeg 缺失或转换失败时回退原始 GIF data URL（保持既有行为，不劣化）。
  */
 async function toVisionDataUrl(buffer, mime, signal) {
+  if (buffer.length > MAX_VISION_IMAGE_BYTES) {
+    const jpeg = await downsampleImageBufferAsJpeg(buffer, mime, signal);
+    if (!jpeg?.length) {
+      throw new Error(`图片超过 ${Math.round(MAX_VISION_IMAGE_BYTES / 1024 / 1024)} MiB，且当前环境无法自动降采样`);
+    }
+    return `data:image/jpeg;base64,${jpeg.toString('base64')}`;
+  }
   if (mime === 'image/gif') {
     try {
       const strip = await convertGifToStillStrip(buffer, signal);
@@ -98,10 +111,7 @@ export async function downloadImageAsDataUrl(url, signal) {
   signal?.throwIfAborted();
   if (String(url || '').startsWith('base64://')) {
     const buffer = Buffer.from(String(url).slice('base64://'.length), 'base64');
-    // 上限与 http(s) 路径保持一致（9 MiB）：高于视觉网关上限会直接被网关 400 掉
-    if (!buffer.length || buffer.length > 9 * 1024 * 1024) {
-      throw new Error('本地表情图片为空或超过 9 MiB');
-    }
+    if (!buffer.length) throw new Error('本地表情图片为空');
     const mime = detectMime(buffer);
     if (!mime) throw new Error('本地表情图片格式无效');
     return toVisionDataUrl(buffer, mime, signal);
@@ -110,13 +120,12 @@ export async function downloadImageAsDataUrl(url, signal) {
   let buffer;
   let contentType;
   try {
-    // 9 MiB：视觉网关的图片上限约 10 MB（实测火山方舟报 "exceeds the limit (9.9 MiB)"）。
-    // 原为 12 MiB —— 高于网关上限会在 9.9~12 MiB 形成盲区：本地放行 → 网关 400 → 整次运行失败。
-    ({ buffer, contentType } = await safeFetchBinary(safeUrl, 9 * 1024 * 1024, signal));
+    // Base64 会膨胀原图约 4/3；7 MiB 原图加上提示词后仍低于常见 9.9 MiB 图片上限。
+    ({ buffer, contentType } = await safeFetchBinary(safeUrl, MAX_VISION_IMAGE_BYTES, signal));
   } catch (error) {
     // 超过常规上限 → 放宽到 96MiB 重拉 + ffmpeg 降采样（Issue #6：群友发超大图）。
     // 非超限错误原样抛出；ffmpeg 缺失/失败时抛带指引的错误，常规路径不受影响。
-    ({ buffer, contentType } = await fetchOversizedImageAsJpeg(safeUrl, error, signal, { cap: 9 * 1024 * 1024 }));
+    ({ buffer, contentType } = await fetchOversizedImageAsJpeg(safeUrl, error, signal, { cap: MAX_VISION_IMAGE_BYTES }));
   }
   if (!buffer || !buffer.length) throw new Error('图片内容为空');
   const mime = detectMime(buffer) || String(contentType || 'image/jpeg').split(';')[0];
@@ -459,7 +468,7 @@ async function readImageViaNapCat(ctx, file, signal) {
   if (localPath && !/^https?:\/\//i.test(localPath)) {
     try {
       const buffer = await fs.promises.readFile(localPath);
-      if (buffer?.length) return { buffer };
+      if (buffer?.length) return { buffer, url: imageResponseUrl(data) };
     } catch { /* get_image 可能返回 QQ 沙箱内当前进程不可读的路径，继续用新 URL */ }
   }
   const url = imageResponseUrl(data);
@@ -474,7 +483,12 @@ async function imageItemToDataUrl(ctx, item, signal) {
     const refreshed = await readImageViaNapCat(ctx, item.file, signal).catch(() => null);
     if (refreshed?.buffer) {
       const mime = detectMime(refreshed.buffer) || 'image/jpeg';
-      return `data:${mime};base64,${refreshed.buffer.toString('base64')}`;
+      try {
+        return await toVisionDataUrl(refreshed.buffer, mime, signal);
+      } catch (error) {
+        if (refreshed.url) return downloadImageAsDataUrl(refreshed.url, signal);
+        throw error;
+      }
     }
     if (refreshed?.url) return downloadImageAsDataUrl(refreshed.url, signal);
     throw error;

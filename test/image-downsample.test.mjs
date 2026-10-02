@@ -15,7 +15,13 @@ process.env.QQ_AGENT_DATA_DIR = dataDir;
 process.on('exit', () => { try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch { /* 句柄占用就算了 */ } });
 
 const { DEFAULT_CONFIG, updateConfig } = await import('../src/core/config.js');
-const { OVERSIZE_LIMIT_RE, fetchOversizedImageAsJpeg, resolveFfmpeg } = await import('../src/tools/image-downsample.js');
+const {
+  OVERSIZE_LIMIT_RE,
+  downsampleImageBufferAsJpeg,
+  fetchOversizedImageAsJpeg,
+  resolveFfmpeg,
+  resolveSips
+} = await import('../src/tools/image-downsample.js');
 
 const cfg = structuredClone(DEFAULT_CONFIG);
 // safe-fetch 默认拒绝内网地址；测试服务就起在 127.0.0.1，显式放行（仅本测试进程的临时配置）
@@ -132,4 +138,13 @@ test('resolveFfmpeg 探测结果在进程内保持一致（缓存语义）', asy
   const second = await resolveFfmpeg();
   assert.equal(first, second);
   assert.ok(first === null || typeof first === 'string');
+});
+
+test('macOS 无 ffmpeg 时，本地图片仍可用 sips 压成 JPEG', async () => {
+  if (process.platform !== 'darwin' || !resolveSips()) return;
+  const gif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+  const jpeg = await downsampleImageBufferAsJpeg(gif, 'image/gif');
+  assert.ok(jpeg?.length);
+  assert.equal(jpeg[0], 0xff);
+  assert.equal(jpeg[1], 0xd8);
 });
