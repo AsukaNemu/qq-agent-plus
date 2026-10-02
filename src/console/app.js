@@ -482,7 +482,10 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     setProactiveSuppressed: (suppressed) =>
       orchestrator.setProactiveSuppressed('qzone-interactions', suppressed),
     emit,
-    log: moduleLog('qzone-interactions')
+    log: moduleLog('qzone-interactions'),
+    // 预期的只读降级（例如 NapCat 没有 SnowLuma 的 Qzone 查询接口）只记录运行日志，
+    // 不应被 Incident Pilot 当成错误告警；真正的连续失败仍走上面的 moduleLog。
+    logInfo: (...args) => log(...args)
   });
   function createIncidentPilot() {
     return new IncidentPilotManager({

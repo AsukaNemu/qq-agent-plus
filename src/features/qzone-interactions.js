@@ -71,6 +71,15 @@ export function isNonFailureRunError(error) {
   return /Qzone interaction task stopped/i.test(String(error?.message ?? error));
 }
 
+function isUnsupportedQzoneAction(error, action) {
+  const reportedAction = String(error?.action || '');
+  if (reportedAction && reportedAction !== action) return false;
+  if (Number(error?.retcode) === 200) return true;
+  return /不支持的\s*Api|unsupported\s+(?:api|action)|api\s+.*not\s+supported/i.test(
+    String(error?.message ?? error)
+  );
+}
+
 // ── 活跃时段（本功能专用）：窗口外不阅览动态，也不影响聊天回复 ──
 
 function activeHoursMinute(value) {
@@ -324,6 +333,7 @@ export class QzoneInteractionManager {
     now = () => Date.now(),
     random = Math.random,
     log = console.log,
+    logInfo = log,
     stateFile = STATE_FILE
   }) {
     this.onebot = onebot;
@@ -336,6 +346,7 @@ export class QzoneInteractionManager {
     this.now = now;
     this.random = random;
     this.log = log;
+    this.logInfo = logInfo;
     this.stateFile = stateFile;
     this.state = normalizeState(readJson(stateFile, defaultState()));
     this.timer = null;
@@ -615,12 +626,20 @@ export class QzoneInteractionManager {
 
   /** 取一页好友动态；接口失败与返回结构异常都算失败，由 #discoverFeeds 决定是否重试。 */
   async #fetchFeeds(cfg, signal) {
-    const data = await this.onebot.call(
-      'get_qzone_feeds',
-      { page_num: 1, count: cfg.feedFetchCount },
-      30000,
-      signal
-    );
+    let data;
+    try {
+      data = await this.onebot.call(
+        'get_qzone_feeds',
+        { page_num: 1, count: cfg.feedFetchCount },
+        30000,
+        signal
+      );
+    } catch (error) {
+      if (!isUnsupportedQzoneAction(error, 'get_qzone_feeds')
+        || typeof this.qzoneWeb?.getQzoneFeeds !== 'function') throw error;
+      this.logInfo('[qzone-interactions] NapCat 不支持 get_qzone_feeds，改用 Qzone 网页只读接口');
+      data = await this.qzoneWeb.getQzoneFeeds({ pageNum: 1, count: cfg.feedFetchCount }, signal);
+    }
     if (!Array.isArray(data?.feeds)) throw new Error('好友动态接口返回格式无效');
     return data;
   }
@@ -692,12 +711,24 @@ export class QzoneInteractionManager {
     // Cookie 详情接口"的兜底节奏即可，不再让整轮回复检查失败、触发退避。
     let countsReliable = false;
     try {
-      const own = await this.onebot.call(
-        'get_qzone_msg_list',
-        { target_uin: Number(selfId), pos: 0, num: cfg.ownPostCount },
-        30000,
-        signal
-      );
+      let own;
+      try {
+        own = await this.onebot.call(
+          'get_qzone_msg_list',
+          { target_uin: Number(selfId), pos: 0, num: cfg.ownPostCount },
+          30000,
+          signal
+        );
+      } catch (error) {
+        if (!isUnsupportedQzoneAction(error, 'get_qzone_msg_list')
+          || typeof this.qzoneWeb?.getQzoneMsgList !== 'function') throw error;
+        this.logInfo('[qzone-interactions] NapCat 不支持 get_qzone_msg_list，改用 Qzone 网页只读接口');
+        own = await this.qzoneWeb.getQzoneMsgList({
+          targetUin: selfId,
+          pos: 0,
+          num: cfg.ownPostCount
+        }, signal);
+      }
       if (!Array.isArray(own?.msglist)) throw new Error('自己的动态列表返回格式无效');
       countsReliable = true;
       for (const item of own.msglist) {
@@ -718,7 +749,7 @@ export class QzoneInteractionManager {
         }
       }
     } catch (error) {
-      this.log(`[qzone-interactions] 自己的动态列表不可用，本轮改用已关注动态兜底（${cleanText(error?.message ?? error, 120)}）`);
+      this.logInfo(`[qzone-interactions] 自己的动态列表不可用，本轮改用已关注动态兜底（${cleanText(error?.message ?? error, 120)}）`);
     }
     for (const watched of this.state.watchedPosts) {
       if (!watched.tid || !watched.uin) continue;
@@ -1087,13 +1118,26 @@ export class QzoneInteractionManager {
       if (wantsComment) {
         await this.#pauseBetweenActions(cfg, writes++);
         try {
-          const result = await this.onebot.call('comment_qzone', {
-            tid: item.post.tid,
-            target_uin: Number(item.post.uin),
-            content: action.content
-          }, 30000, signal);
+          let result;
+          try {
+            result = await this.onebot.call('comment_qzone', {
+              tid: item.post.tid,
+              target_uin: Number(item.post.uin),
+              content: action.content
+            }, 30000, signal);
+          } catch (error) {
+            if (!isUnsupportedQzoneAction(error, 'comment_qzone')
+              || typeof this.qzoneWeb?.commentPost !== 'function') throw error;
+            this.logInfo('[qzone-interactions] NapCat 不支持 comment_qzone，改用 Qzone 网页写入接口');
+            result = await this.qzoneWeb.commentPost({
+              ownerUin: item.post.uin,
+              tid: item.post.tid,
+              content: action.content,
+              signal
+            });
+          }
           item.commentStatus = 'done';
-          item.commentId = String(result?.comment_id || '');
+          item.commentId = String(result?.comment_id || result?.commentId || '');
           this.#watchPost(item.post, { ownComment: action.content });
           run.actions.push({ type: 'comment', key: item.key, status: 'done' });
         } catch (error) {
@@ -1119,11 +1163,23 @@ export class QzoneInteractionManager {
       if (wantsLike && !item.post.isLiked) {
         await this.#pauseBetweenActions(cfg, writes++);
         try {
-          await this.onebot.call('like_qzone', {
-            tid: item.post.tid,
-            target_uin: Number(item.post.uin),
-            abstime: Number(item.post.time) || 0
-          }, 30000, signal);
+          try {
+            await this.onebot.call('like_qzone', {
+              tid: item.post.tid,
+              target_uin: Number(item.post.uin),
+              abstime: Number(item.post.time) || 0
+            }, 30000, signal);
+          } catch (error) {
+            if (!isUnsupportedQzoneAction(error, 'like_qzone')
+              || typeof this.qzoneWeb?.likePost !== 'function') throw error;
+            this.logInfo('[qzone-interactions] NapCat 不支持 like_qzone，改用 Qzone 网页写入接口');
+            await this.qzoneWeb.likePost({
+              ownerUin: item.post.uin,
+              tid: item.post.tid,
+              time: item.post.time,
+              signal
+            });
+          }
           item.likeStatus = 'done';
           run.actions.push({ type: 'like', key: item.key, status: 'done' });
         } catch (error) {

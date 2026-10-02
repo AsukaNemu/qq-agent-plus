@@ -5,6 +5,14 @@ const DETAIL_URL =
   'https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msgdetail_v6';
 const REPLY_URL =
   'https://h5.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_re_feeds';
+const LIKE_URL =
+  'https://h5.qzone.qq.com/proxy/domain/w.qzone.qq.com/cgi-bin/likes/internal_dolike_app';
+const MSG_LIST_URL =
+  'https://h5.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_msglist_v6';
+const MSG_LIST_FALLBACK_URL =
+  'https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6';
+const FEEDS_URL =
+  'https://h5.qzone.qq.com/proxy/domain/ic2.qzone.qq.com/cgi-bin/feeds/feeds3_html_more';
 
 function compact(value, max = 1000) {
   // Qzone 内容与普通群消息一样是不可信外部文本：说说/评论里完全可以写
@@ -59,6 +67,150 @@ function parseJsonp(text) {
     }
   }
   throw new Error('Qzone 返回内容不是有效 JSON/JSONP');
+}
+
+// feeds3_html_more 返回的是 JavaScript object literal，不是 JSON：字段名可能不加引号，
+// 字符串可能使用单引号/\\xNN，列表还会包含 undefined。这里把它当作数据递归解析，
+// 绝不能对远端返回值使用 eval 或 vm 执行。
+function parseJsLiteral(text) {
+  const source = String(text || '').slice(String(text || '').indexOf('{'));
+  if (!source || source[0] !== '{') throw new Error('Qzone 好友动态返回内容无对象体');
+  let index = 0;
+  const length = source.length;
+  const whitespace = (char) => /[\s]/.test(char || '');
+  const skipWhitespace = () => {
+    while (index < length && whitespace(source[index])) index += 1;
+  };
+  const parseString = (quote) => {
+    index += 1;
+    let value = '';
+    while (index < length) {
+      const char = source[index];
+      if (char === quote) {
+        index += 1;
+        return value;
+      }
+      if (char !== '\\') {
+        value += char;
+        index += 1;
+        continue;
+      }
+      const escaped = source[index + 1];
+      if (escaped === 'x' || escaped === 'u') {
+        const size = escaped === 'x' ? 2 : 4;
+        const hex = source.slice(index + 2, index + 2 + size);
+        if (!new RegExp(`^[0-9a-fA-F]{${size}}$`).test(hex)) {
+          throw new Error('Qzone 好友动态字符串转义无效');
+        }
+        value += String.fromCodePoint(Number.parseInt(hex, 16));
+        index += 2 + size;
+        continue;
+      }
+      const simple = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', v: '\v', '0': '\0' };
+      value += simple[escaped] ?? escaped ?? '';
+      index += 2;
+    }
+    throw new Error('Qzone 好友动态字符串未闭合');
+  };
+  const parseKey = () => {
+    skipWhitespace();
+    const char = source[index];
+    if (char === '"' || char === "'") return parseString(char);
+    const start = index;
+    while (index < length && /[A-Za-z0-9_$]/.test(source[index])) index += 1;
+    if (start === index) throw new Error('Qzone 好友动态对象键无效');
+    return source.slice(start, index);
+  };
+  const parseValue = () => {
+    skipWhitespace();
+    const char = source[index];
+    if (char === '{') return parseObject();
+    if (char === '[') return parseArray();
+    if (char === '"' || char === "'") return parseString(char);
+    const start = index;
+    while (index < length && !/[\s,}\]:]/.test(source[index])) index += 1;
+    const token = source.slice(start, index);
+    if (token === 'true') return true;
+    if (token === 'false') return false;
+    if (token === 'null') return null;
+    if (token === 'undefined') return undefined;
+    if (token && !Number.isNaN(Number(token))) return Number(token);
+    throw new Error(`Qzone 好友动态值无效: ${token.slice(0, 30)}`);
+  };
+  const parseArray = () => {
+    index += 1;
+    const value = [];
+    skipWhitespace();
+    if (source[index] === ']') {
+      index += 1;
+      return value;
+    }
+    while (index < length) {
+      // 兼容 [undefined] 以及偶发的数组空洞。
+      if (source[index] === ',') value.push(undefined);
+      else value.push(parseValue());
+      skipWhitespace();
+      if (source[index] === ',') {
+        index += 1;
+        skipWhitespace();
+        if (source[index] === ']') {
+          index += 1;
+          return value;
+        }
+        continue;
+      }
+      if (source[index] === ']') {
+        index += 1;
+        return value;
+      }
+      throw new Error('Qzone 好友动态数组格式无效');
+    }
+    throw new Error('Qzone 好友动态数组未闭合');
+  };
+  const parseObject = () => {
+    index += 1;
+    const value = {};
+    skipWhitespace();
+    if (source[index] === '}') {
+      index += 1;
+      return value;
+    }
+    while (index < length) {
+      const key = parseKey();
+      skipWhitespace();
+      if (source[index] !== ':') throw new Error('Qzone 好友动态对象缺少冒号');
+      index += 1;
+      const child = parseValue();
+      if (key !== '__proto__') value[key] = child;
+      skipWhitespace();
+      if (source[index] === ',') {
+        index += 1;
+        skipWhitespace();
+        if (source[index] === '}') {
+          index += 1;
+          return value;
+        }
+        continue;
+      }
+      if (source[index] === '}') {
+        index += 1;
+        return value;
+      }
+      throw new Error('Qzone 好友动态对象格式无效');
+    }
+    throw new Error('Qzone 好友动态对象未闭合');
+  };
+  return parseValue();
+}
+
+function qzoneApiError(data, label) {
+  for (const key of ['code', 'subcode', 'ret']) {
+    if (data?.[key] == null || Number(data[key]) === 0) continue;
+    return new Error(
+      `Qzone ${label} ${key}=${data[key]}: ${compact(data.message || data.msg || '', 300)}`
+    );
+  }
+  return null;
 }
 
 function removeNativeMention(value) {
@@ -209,7 +361,7 @@ export class QzoneWebClient {
     };
   }
 
-  async #request(url, options = {}) {
+  async #requestData(url, options = {}, parser = parseJsonp) {
     const response = await this.fetch(url, {
       ...options,
       redirect: 'error',
@@ -218,14 +370,191 @@ export class QzoneWebClient {
         : AbortSignal.timeout(20000)
     });
     if (!response.ok) throw new Error(`Qzone HTTP ${response.status}`);
-    const data = parseJsonp(await response.text());
-    for (const key of ['subcode', 'code', 'ret']) {
-      if (data[key] == null || Number(data[key]) === 0) continue;
-      throw new Error(
-        `Qzone API ${key}=${data[key]}: ${compact(data.message || data.msg || '', 300)}`
-      );
-    }
+    return parser(await response.text());
+  }
+
+  async #request(url, options = {}) {
+    const data = await this.#requestData(url, options);
+    const error = qzoneApiError(data, 'API');
+    if (error) throw error;
     return data;
+  }
+
+  async getQzoneMsgList({ targetUin = this.onebot.selfId, pos = 0, num = 20 } = {}, signal) {
+    const ctx = await this.#context();
+    const target = String(targetUin || '');
+    const offset = Math.max(0, Number(pos) || 0);
+    const count = Math.min(50, Math.max(1, Number(num) || 20));
+    if (!/^\d+$/.test(target)) throw new Error('Qzone 说说列表作者无效');
+    const legacyUrl = `${MSG_LIST_URL}?${new URLSearchParams({
+      uin: target,
+      ftype: '0',
+      sort: '0',
+      pos: String(offset),
+      num: String(count),
+      replynum: '100',
+      g_tk: ctx.gtk,
+      callback: '_preloadCallback',
+      code_version: '1',
+      format: 'jsonp',
+      need_private_comment: '1'
+    })}`;
+    const headers = {
+      cookie: ctx.cookies,
+      referer: `https://user.qzone.qq.com/${target}`,
+      'user-agent': 'Mozilla/5.0'
+    };
+    let data = await this.#requestData(legacyUrl, { headers, signal });
+    // 旧 h5 路由偶发返回 -10000（使用人数过多），同一请求改走 user.qzone 路由。
+    if (Number(data?.code) === -10000) {
+      const fallbackUrl = `${MSG_LIST_FALLBACK_URL}?${new URLSearchParams({
+        uin: target,
+        ftype: '0',
+        sort: '0',
+        pos: String(offset),
+        num: String(count),
+        g_tk: ctx.gtk,
+        code_version: '1',
+        format: 'json'
+      })}`;
+      data = await this.#requestData(fallbackUrl, { headers, signal });
+    }
+    const error = qzoneApiError(data, '说说列表');
+    if (error) throw error;
+    if (!Array.isArray(data?.msglist)) throw new Error('Qzone 说说列表返回格式无效');
+    return {
+      total: Number(data.total) || data.msglist.length,
+      msglist: data.msglist.map((item) => ({
+        tid: String(item?.tid || ''),
+        content: compact(item?.content || '', 1200),
+        time: Number(item?.created_time ?? item?.time ?? 0) || 0,
+        comment_num: Number(item?.cmtnum ?? item?.comment_num ?? 0) || 0
+      }))
+    };
+  }
+
+  async getQzoneFeeds({ selfUin = this.onebot.selfId, pageNum = 1, count = 30 } = {}, signal) {
+    const ctx = await this.#context();
+    const target = String(selfUin || '');
+    const page = Math.max(1, Number(pageNum) || 1);
+    const limit = Math.min(50, Math.max(1, Number(count) || 30));
+    if (!/^\d+$/.test(target)) throw new Error('Qzone 好友动态作者无效');
+    const url = `${FEEDS_URL}?${new URLSearchParams({
+      uin: target,
+      scope: '0',
+      view: '1',
+      filter: 'all',
+      flag: '1',
+      applist: 'all',
+      pagenum: String(page),
+      count: String(limit),
+      aisortEndTime: '0',
+      aisortOffset: '0',
+      aisortBeginTime: '0',
+      begintime: '0',
+      g_tk: ctx.gtk,
+      callback: '_preloadCallback',
+      format: 'jsonp',
+      useutf8: '1',
+      outputhtmlfeed: '1'
+    })}`;
+    const data = await this.#requestData(url, {
+      headers: {
+        cookie: ctx.cookies,
+        referer: `https://user.qzone.qq.com/${target}`,
+        'user-agent': 'Mozilla/5.0'
+      },
+      signal
+    }, parseJsLiteral);
+    const error = qzoneApiError(data, '好友动态');
+    if (error) throw error;
+    if (!Array.isArray(data?.data?.data)) throw new Error('Qzone 好友动态返回格式无效');
+    return {
+      feeds: data.data.data.filter(Boolean).map((item) => ({
+        uin: String(item?.uin || ''),
+        nickname: compact(item?.nickname || '', 80),
+        time: Number(item?.abstime ?? item?.time ?? 0) || 0,
+        appid: Number(item?.appid) || 0,
+        key: String(item?.key || item?.feedskey || ''),
+        html: String(item?.html || '')
+      })),
+      has_more: Number(data.data.hasmore) !== 0
+    };
+  }
+
+  async commentPost({ ownerUin, tid, content, signal }) {
+    const ctx = await this.#context();
+    const owner = String(ownerUin || '');
+    const postId = String(tid || '');
+    const text = compact(content, 200);
+    if (!/^\d+$/.test(owner) || !postId || !text) throw new Error('Qzone 评论参数不完整');
+    const raw = await this.#request(`${REPLY_URL}?${new URLSearchParams({ g_tk: ctx.gtk })}`, {
+      method: 'POST',
+      headers: {
+        cookie: ctx.cookies,
+        'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
+        referer: `https://user.qzone.qq.com/${owner}`,
+        origin: 'https://user.qzone.qq.com',
+        'user-agent': 'Mozilla/5.0'
+      },
+      body: new URLSearchParams({
+        qzreferrer: `https://user.qzone.qq.com/${ctx.selfUin}`,
+        inCharset: 'utf-8',
+        outCharset: 'utf-8',
+        hostUin: owner,
+        format: 'json',
+        ref: 'feeds',
+        topicId: `${owner}_${postId}__1`,
+        feedsType: '100',
+        private: '0',
+        paramstr: '1',
+        richtype: '',
+        richval: '',
+        isSignIn: '',
+        uin: ctx.selfUin,
+        content: text,
+        plat: 'qzone',
+        source: 'ic',
+        platformid: '52'
+      }).toString(),
+      signal
+    });
+    const commentId = raw.commentid ?? raw.commentId;
+    return { commentId: commentId == null ? '' : String(commentId) };
+  }
+
+  async likePost({ ownerUin, tid, time = 0, signal }) {
+    const ctx = await this.#context();
+    const owner = String(ownerUin || '');
+    const postId = String(tid || '');
+    if (!/^\d+$/.test(owner) || !postId) throw new Error('Qzone 点赞参数不完整');
+    const unikey = `http://user.qzone.qq.com/${owner}/mood/${postId}`;
+    await this.#request(`${LIKE_URL}?${new URLSearchParams({ g_tk: ctx.gtk })}`, {
+      method: 'POST',
+      headers: {
+        cookie: ctx.cookies,
+        'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
+        referer: `https://user.qzone.qq.com/${owner}`,
+        origin: 'https://user.qzone.qq.com',
+        'user-agent': 'Mozilla/5.0'
+      },
+      body: new URLSearchParams({
+        qzreferrer: `https://user.qzone.qq.com/${ctx.selfUin}`,
+        opuin: ctx.selfUin,
+        unikey,
+        curkey: unikey,
+        appid: '311',
+        typeid: '0',
+        abstime: String(Number(time) || 0),
+        fid: postId,
+        from: '1',
+        active: '0',
+        fupdate: '1',
+        format: 'json'
+      }).toString(),
+      signal
+    });
+    return { ok: true };
   }
 
   async getPostDetail(ownerUin, tid, signal) {
