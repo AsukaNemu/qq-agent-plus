@@ -1,0 +1,10 @@
+{
+  "post_type": "message",
+  "message_type": "private",
+  "message_id": 1001,
+  "user_id": 2001,
+  "time": 1700000000,
+  "message": [
+    {"type": "text", "data": {"text": "hello RInBot"}}
+  ]
+}

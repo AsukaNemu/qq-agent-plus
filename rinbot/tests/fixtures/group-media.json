@@ -1,0 +1,13 @@
+{
+  "post_type": "message",
+  "message_type": "group",
+  "message_id": 1002,
+  "group_id": 3001,
+  "user_id": 2002,
+  "time": 1700000001,
+  "message": [
+    {"type": "at", "data": {"qq": "12345"}},
+    {"type": "image", "data": {"file": "cache/asset.jpg", "url": "https://example.invalid/asset.jpg"}},
+    {"type": "record", "data": {"file": "cache/voice.amr"}}
+  ]
+}
