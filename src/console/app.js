@@ -1168,13 +1168,60 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     return true;
   }
 
+  // 群邀请和直接入群通知都需要群名；拉不到群名不影响白名单决策。
+  async function groupLabelOf(groupId) {
+    let groupName = '';
+    try {
+      const info = await onebot.call('get_group_info', { group_id: Number(groupId) }, 15000, null);
+      groupName = String(info?.group_name || info?.groupName || '').trim();
+    } catch { /* 拉不到群名不影响主流程 */ }
+    return `${groupName || '（未取到群名）'}（${groupId}）`;
+  }
+
+  function ensureGroupWhitelist(groupId, { clearDeny = false } = {}) {
+    const id = String(groupId || '').trim();
+    if (!/^\d{1,15}$/.test(id)) return { applied: false, reason: 'invalid-group' };
+    const cur = getConfig();
+    const opt = cur.groupInvite || {};
+    const groups = [...new Set((cur.allow?.groups || []).map(String))];
+    if (opt.autoWhitelist === false) return { applied: false, reason: 'disabled' };
+    const already = groups.includes(id);
+    const store = cur.store || {};
+    const groupSliderPos = { ...(store.groupSliderPos || {}) };
+    if (already) {
+      return { applied: true, already: true, responseProbability: groupSliderPos[id] };
+    }
+    if (!already && groupSliderPos[id] === undefined) groupSliderPos[id] = 15;
+    const denyGroups = (cur.deny?.groups || []).map(String);
+    updateConfig({
+      allow: { ...(cur.allow || {}), groups: already ? groups : [...groups, id] },
+      store: {
+        ...store,
+        // 分群概率只有在关闭统一档位后才生效；关闭后未单独设置的群仍跟随全局概率。
+        unifiedTier: false,
+        groupSliderPos
+      },
+      ...(clearDeny
+        ? { deny: { ...(cur.deny || {}), groups: denyGroups.filter((g) => g !== id) } }
+        : {})
+    });
+    return { applied: true, already: false, responseProbability: groupSliderPos[id] ?? 15 };
+  }
+
+  function groupWhitelistResultText(result) {
+    if (result?.applied && result.already) return '该群原已在聊天白名单中。';
+    if (result?.applied) return `已加入聊天白名单，普通消息按 ${result.responseProbability}% 概率回复。`;
+    if (result?.reason === 'disabled') return '自动加入聊天白名单已关闭。';
+    return '未加入聊天白名单。';
+  }
+
   /**
    * 群邀请 / 群申请的统一处理（OneBot request_type=group）。
    *
    * 批准口径（2026-09-30 用户确认）：
    *   开关开启 + 邀请人在私聊白名单里（≈ 好友）+ 群不在拒绝名单。
    * 其余情况一律**不自动同意**，只私聊告诉管理员"有这么回事、为什么没同意"。
-   * 批准后按配置把群加进 allow.groups（bot 才会在那个群说话），并通知管理员。
+   * 批准后把群加进 allow.groups，并把该群普通消息的回复概率设为 15%，并通知管理员。
    *
    * 为什么不无条件同意：任何人都能拉 bot 进群，进群后它就会参与聊天、烧 token，
    * 还可能被引到不适合的语境里。所以默认关、且默认只认自己人。
@@ -1198,12 +1245,7 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
           ? `邀请人 ${inviterId || '未知'} 不在私聊白名单（不是自己人）`
           : '';
 
-    let groupName = '';
-    try {
-      const info = await onebot.call('get_group_info', { group_id: Number(groupId) }, 15000, null);
-      groupName = String(info?.group_name || info?.groupName || '').trim();
-    } catch { /* 拉不到群名不影响主流程 */ }
-    const groupLabel = `${groupName || '（未取到群名）'}（${groupId}）`;
+    const groupLabel = await groupLabelOf(groupId);
 
     if (why) {
       log(`[group-invite] 不自动同意 ${groupId}：${why}`);
@@ -1238,28 +1280,56 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       return;
     }
 
-    if (opt.autoWhitelist !== false) {
-      const cur = getConfig();
-      const groups = [...new Set([...(cur.allow?.groups || []).map(String), groupId])];
-      const denyGroups = (cur.deny?.groups || []).map(String).filter((g) => g !== groupId);
-      updateConfig({
-        allow: { ...(cur.allow || {}), groups },
-        deny: { ...(cur.deny || {}), groups: denyGroups }
-      });
-    }
+    const whitelistResult = ensureGroupWhitelist(groupId, { clearDeny: true });
 
-    log(`[group-invite] 已同意入群 ${groupId}（邀请人 ${inviterId}，${wayLabel}）`);
+    log(`[group-invite] 已同意入群 ${groupId}（邀请人 ${inviterId}，${wayLabel}）：${groupWhitelistResultText(whitelistResult)}`);
     if (opt.notifyOwner !== false && ownerUin) {
       try {
         await sendIdentityAdminText(ownerUin,
           `【群邀请 · 已自动同意】\n群：${groupLabel}\n邀请人：${inviterId || '未知'}（自己人）\n方式：${wayLabel}\n`
-          + (opt.autoWhitelist !== false
-            ? '已加入白名单，bot 会在群里正常说话。'
-            : '未加白名单，bot 在群里只会看不会说。'));
+          + groupWhitelistResultText(whitelistResult));
       } catch (error) {
         log(`[group-invite] 通知失败：${error?.message ?? error}`);
       }
     }
+  }
+
+  // 某些小群的邀请会被 QQ/NapCat 直接落成 group_increase，根本没有
+  // request_type=group 的 flag 可供 set_group_add_request 处理；机器人已经进群后，
+  // 必须在这里补一次白名单决策，否则会出现“人在群里、聊天白名单没有这个群”。
+  async function handleDirectGroupIncrease(event) {
+    const groupId = String(event?.group_id ?? '').trim();
+    if (!groupId || String(event?.user_id ?? '') !== String(onebot.selfId || '')) return false;
+    const cfg = getConfig();
+    const opt = cfg.groupInvite || {};
+    const ownerUin = String(cfg.admin?.ownerUin || '').trim();
+    const groupLabel = await groupLabelOf(groupId);
+    if (opt.enabled !== true) {
+      log(`[group-increase] bot 已进入 ${groupId}，但群邀请自动处理未开启`);
+      return true;
+    }
+    if ((cfg.deny?.groups || []).map(String).includes(groupId)) {
+      log(`[group-increase] bot 已进入拒绝名单群 ${groupId}，不加入聊天白名单`);
+      return true;
+    }
+    let whitelistResult;
+    try {
+      whitelistResult = ensureGroupWhitelist(groupId);
+    } catch (error) {
+      log(`[group-increase] 加入聊天白名单失败 ${groupId}：${error?.message ?? error}`);
+      return true;
+    }
+    log(`[group-increase] bot 直接进入 ${groupId}：${groupWhitelistResultText(whitelistResult)}`);
+    if (opt.notifyOwner !== false && ownerUin) {
+      try {
+        await sendIdentityAdminText(ownerUin,
+          `【群邀请 · 已直接入群】\n群：${groupLabel}\n方式：QQ/NapCat 直接入群\n`
+          + groupWhitelistResultText(whitelistResult));
+      } catch (error) {
+        log(`[group-increase] 通知失败：${error?.message ?? error}`);
+      }
+    }
+    return true;
   }
 
   async function handleSlangPilotAdminCommand(kind, id, text) {
@@ -1407,6 +1477,10 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     }
     if (event.post_type === 'notice' && event.notice_type === 'group_decrease'
       && suspendAfterGroupDeparture(event)) {
+      return;
+    }
+    if (event.post_type === 'notice' && event.notice_type === 'group_increase') {
+      await handleDirectGroupIncrease(event);
       return;
     }
     if (

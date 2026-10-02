@@ -1047,6 +1047,15 @@ export function updateConfig(patch) {
   );
   const clampInteger = (value, min, max, fallback) =>
     Math.round(clampNumber(value, min, max, fallback));
+  const groupInvite = next.groupInvite || {};
+  const { autoWhitelistProbability: _legacyWhitelistProbability, ...groupInviteOptions } = groupInvite;
+  next.groupInvite = {
+    ...groupInviteOptions,
+    enabled: groupInvite.enabled === true,
+    friendsOnly: groupInvite.friendsOnly !== false,
+    autoWhitelist: groupInvite.autoWhitelist !== false,
+    notifyOwner: groupInvite.notifyOwner !== false
+  };
   const weights = {
     quality: clampInteger(rawWeights.quality, 0, 100, 40),
     interest: clampInteger(rawWeights.interest, 0, 100, 30),
