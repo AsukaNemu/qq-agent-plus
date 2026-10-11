@@ -47,6 +47,8 @@ export const DEFAULT_CONFIG = {
       enabled: false,
       provider: '',
       model: '',
+      models: [],                             // 同一提供商的额外视觉模型，按请求次数轮流使用
+      balanceFrom: '',                         // 可选 ISO 时间，到点后才启用额外模型
       baseUrl: '',
       timeoutMs: 90000
     },

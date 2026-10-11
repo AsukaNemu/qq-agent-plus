@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { assertTimeAllowed, watchTimeWindow } from '../core/time-gate.js';
 import fs from 'node:fs';
 import nodePath from 'node:path';
+import { selectVisionModel } from './vision-model-pool.js';
 
 // ── 全量用量记账（本地新增）────────────────────────────────────────────
 // 目的：把「所有」LLM 调用的 token 汇总到一处。
@@ -33,6 +34,7 @@ function recordAllUsage(args, response) {
       ts: Date.now(),
       purpose: String(args?.purpose || ''),
       model: String(response?.model || ''),
+      requestedModel: String(response?.requestedModel || ''),
       prompt,
       completion,
       total: Number(u.total_tokens) || (prompt + completion),
@@ -209,7 +211,9 @@ function thinkingFor(purpose, overrides = null) {
       // 专用模型/兜底这类 overrides 调用按 overrides 自己的地址取每供应商设置与渠道形状，
       // 不串用主渠道的（审查 2026-09-28：主渠道 Command Code、专用 DeepSeek 时，
       // 旧逻辑会把 reasoning_effort 发给 DeepSeek——"换家不串味"正是这套预设的设计目标）。
-      raw = effectiveThinkingRaw(cfg?.api, hostOf(overrides.baseUrl));
+      raw = overrides.thinkingOverride !== undefined
+        ? overrides.thinkingOverride
+        : effectiveThinkingRaw(cfg?.api, hostOf(overrides.baseUrl));
       const svc = modelServiceOfBaseUrl(overrides.baseUrl);
       serviceId = svc ? svc.id : '';
     } else {
@@ -373,7 +377,8 @@ export async function chatCompletion({
   purpose = ''
 }) {
   assertTimeAllowed();
-  const api = overrides || effectiveApi();
+  signal?.throwIfAborted();
+  const api = selectVisionModel(overrides || effectiveApi());
   // 聊天这类"随口回一句"的任务关掉思考：省一半输出 token、少 1~3 秒；
   // 判断/写作类（表情包要不要收、说说、空间互动、身份评估）不传 purpose，继续思考。
   const thinking = thinkingFor(purpose, overrides);
@@ -495,7 +500,8 @@ export async function chatCompletion({
     if (!choice) throw new Error('模型 API 响应缺少 choices');
     return {
       message: choice.message ?? {}, finishReason: choice.finish_reason ?? null,
-      usage: data.usage ?? null, model: data.model ?? api.model, raw: data
+      usage: data.usage ?? null, model: data.model ?? api.model,
+      requestedModel: String(body.model || api.model), raw: data
     };
   } catch (error) {
     if (controller.signal.reason?.code === 'TIME_CONTROL_INACTIVE') throw controller.signal.reason;

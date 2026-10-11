@@ -27,6 +27,7 @@ import { probeChannelPrices, capPrices } from '../pricing/price-probe.js';
 import { initChannelPrices, refreshChannelFeed, removeChannelFeed, channelPriceStatus, maybeAutoProbeChannel } from '../pricing/channel-prices.js';
 import { currentProviders, setProviderKey, testAllProviders, testOneProvider, testModelChat, probeThinking, fetchModelsFrom, upsertProvider, addModelsToProvider, removeModelFromProvider } from '../core/providers.js';
 import { scanModelsVision, visionResults, modelImageVerdict, visionModelOverride } from '../llm/vision-scan.js';
+import { activeVisionModels } from '../llm/vision-model-pool.js';
 import { builtinVisionResults } from '../llm/model-vision-docs.js';
 import { createEventBus, todayKey, shanghaiDayStart, isSelfSender, safeSlice, sanitizeUserText, textWithQuote } from '../core/util.js';
 import { assertCanSend } from '../core/access.js';
@@ -2630,13 +2631,20 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       if (pathname === '/api/vision/results' && method === 'GET') {
         const visionOverride = visionModelOverride();
         const setting = getConfig().api?.visionModel || {};
+        const activeModels = visionOverride ? activeVisionModels(visionOverride) : [];
         return json(res, 200, {
           results: { ...builtinVisionResults(currentProviders()), ...visionResults() },
           scanning: visionScan.running,
           visionModel: visionOverride ? {
             enabled: true,
             providerId: String(setting.provider || ''),
-            model: visionOverride.model
+            model: visionOverride.model,
+            models: visionOverride.visionModels || [visionOverride.model],
+            activeModels,
+            distribution: activeModels.length > 1 ? 'round-robin'
+              : (visionOverride.visionModels ? 'scheduled' : 'single'),
+            balanceFrom: visionOverride.visionBalanceFrom || null,
+            thinking: setting.thinking ?? null
           } : null
         });
       }

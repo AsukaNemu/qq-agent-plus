@@ -8,6 +8,7 @@ import { getConfig, updateConfig } from '../core/config.js';
 import { builtinVisionResults } from './model-vision-docs.js';
 import { withTimeWindow, assertTimeAllowed } from '../core/time-gate.js';
 import { resolveApiKey, chatCompletionWithRetry } from './llm.js';
+import { visionModelsOf } from './vision-model-pool.js';
 
 // 16×16 PNG：部分视觉网关拒绝 1×1 图片（要求最小边长 14/16），探测图不能因此把
 // 真正的视觉模型误判成 no-vision。图案很小，仍然不会浪费多少 token。
@@ -59,7 +60,8 @@ export function visionModelOverride(cfg = getConfig()) {
   if (!setting || setting.enabled === false) return null;
   const providerId = String(setting.provider || '').trim();
   const provider = (cfg?.providers || []).find((item) => String(item?.id || '') === providerId);
-  const model = String(setting.model || '').trim();
+  const models = visionModelsOf(setting);
+  const model = models[0] || '';
   const baseUrl = String(setting.baseUrl || provider?.baseURL || '').trim().replace(/\/+$/, '');
   if (!model || !baseUrl) return null;
   const apiKey = String(setting.apiKey || '').trim() || resolveApiKey({
@@ -70,6 +72,9 @@ export function visionModelOverride(cfg = getConfig()) {
     baseUrl,
     apiKey,
     model,
+    ...(models.length > 1 ? { visionModels: models } : {}),
+    ...(setting.balanceFrom ? { visionBalanceFrom: String(setting.balanceFrom) } : {}),
+    ...(setting.thinking !== undefined ? { thinkingOverride: setting.thinking } : {}),
     timeoutMs: Math.max(5000, Number(setting.timeoutMs) || 90000)
   };
 }

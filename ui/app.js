@@ -10633,6 +10633,12 @@ function bindSettingsEvents(c) {
     const vhint = $('#model-vision-hint');
     const override = state.visionModel;
     const delegated = !!override?.enabled;
+    const activeVisionModels = override?.activeModels || override?.models;
+    const visionLabel = activeVisionModels?.length > 1
+      ? `独立视觉模型池（${activeVisionModels.length} 个模型轮流识图）`
+      : `独立视觉模型 ${override?.model || ''}`;
+    const scheduleHint = override?.distribution === 'scheduled'
+      ? '；双模型轮换已预约' : '';
     if (box) {
       const r = (state.visionResults || {})[`${pid || ''}|||${model || ''}`];
       if (r && r.verdict === 'no-vision' && !delegated) {
@@ -10644,13 +10650,13 @@ function bindSettingsEvents(c) {
         box.checked = state.config.api.vision !== false;
         hint.textContent = r && r.verdict === 'vision'
           ? '检测结果：支持图片输入'
-          : (delegated ? `主模型不支持图片输入，已由独立视觉模型 ${override.model} 接管` : '');
+          : (delegated ? `已由${visionLabel}接管图片识别${scheduleHint}` : '');
       }
     }
     if (vhint) {
       const r = (state.visionResults || {})[`${pid || ''}|||${model || ''}`];
       if (delegated && r?.verdict === 'no-vision') {
-        vhint.textContent = `✅ 独立视觉模型 ${override.model} 会先识图，当前主模型负责对话`;
+        vhint.textContent = `✅ ${visionLabel}会先识图，当前主模型负责对话${scheduleHint}`;
       } else if (r && (r.verdict === 'vision' || r.verdict === 'no-vision')) {
         vhint.textContent = r.verdict === 'vision' ? '✅ 当前模型支持图片输入' : '🚫 当前模型不支持图片输入';
       } else {
