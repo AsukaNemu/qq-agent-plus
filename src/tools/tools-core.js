@@ -5,6 +5,7 @@
 // 工具命名去掉了 qq_ 前缀（更短，省 token）。
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { getConfig } from '../core/config.js';
 
 // 消息 id 归一化：模型常把聊天记录里的 "#123" 连 # 一起传进来，而 OneBot 只认纯数字 id。
@@ -139,8 +140,25 @@ export async function downloadImageAsDataUrl(url, signal) {
  */
 export async function downloadVideoAsFrameStrip(url, signal) {
   signal?.throwIfAborted();
-  const safeUrl = await validateImageUrl(url);
-  const { buffer } = await safeFetchBinary(safeUrl, 96 * 1024 * 1024, signal);
+  let buffer = null;
+  let localError = null;
+  const localCandidates = [url].filter(Boolean);
+  for (const candidate of localCandidates) {
+    try {
+      const local = await readLocalMediaBuffer(candidate, 96 * 1024 * 1024);
+      if (local) {
+        buffer = local;
+        break;
+      }
+    } catch (error) {
+      localError = error;
+    }
+  }
+  if (!buffer) {
+    if (localError?.code === 'MEDIA_UNAVAILABLE') throw localError;
+    const safeUrl = await validateImageUrl(url);
+    ({ buffer } = await safeFetchBinary(safeUrl, 96 * 1024 * 1024, signal));
+  }
   if (!buffer?.length) throw new Error('视频内容为空');
   const strip = await convertVideoToFrameStrip(buffer, signal);
   if (!strip?.length) throw new Error('视频抽帧失败（服务器上需要可用的 ffmpeg/ffprobe）');
@@ -156,8 +174,49 @@ function detectMime(buf) {
   return null;
 }
 
-function ok(payload) {
-  return { content: typeof payload === 'string' ? payload : JSON.stringify(payload, null, 1) };
+function localMediaPath(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  let candidate = raw;
+  if (/^file:\/\//i.test(candidate)) {
+    try { candidate = fileURLToPath(candidate); } catch { return ''; }
+  }
+  if (!path.isAbsolute(candidate)) return '';
+  const resolved = path.resolve(candidate);
+  const dataRoot = path.resolve(process.env.QQ_AGENT_DATA_DIR || path.join(process.cwd(), 'data'));
+  const qqRoot = process.env.HOME
+    ? path.resolve(process.env.HOME, 'Library/Containers/com.tencent.qq/Data')
+    : '';
+  const allowed = [dataRoot, qqRoot].filter(Boolean);
+  return allowed.some((root) => {
+    const relative = path.relative(root, resolved);
+    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  }) ? resolved : '';
+}
+
+/** 读取 OneBot/NapCat 事件里带回的本地媒体；只允许 QQ 容器和 Agent 数据目录。 */
+async function readLocalMediaBuffer(value, maxBytes) {
+  const local = localMediaPath(value);
+  if (!local) return null;
+  try {
+    const stat = await fs.promises.stat(local);
+    if (!stat.isFile()) throw new Error('不是普通文件');
+    if (stat.size > maxBytes) throw new Error(`本地媒体超过 ${maxBytes} 字节限制`);
+    const buffer = await fs.promises.readFile(local);
+    if (!buffer.length) throw new Error('文件为空');
+    return buffer;
+  } catch (error) {
+    const unavailable = new Error('视频本地缓存已过期或当前进程无法读取，请让对方重新发送', { cause: error });
+    unavailable.code = 'MEDIA_UNAVAILABLE';
+    throw unavailable;
+  }
+}
+
+function ok(payload, metadata = {}) {
+  return {
+    content: typeof payload === 'string' ? payload : JSON.stringify(payload, null, 1),
+    ...metadata
+  };
 }
 
 function err(message, metadata = {}) {
@@ -478,6 +537,12 @@ async function readImageViaNapCat(ctx, file, signal) {
 /** 取一张图 → data URL。先走 URL；URL 失败（多半是 rkey 过期）再用 NapCat 本地文件兜底。 */
 async function imageItemToDataUrl(ctx, item, signal) {
   try {
+    const local = await readLocalMediaBuffer(item.url, 9 * 1024 * 1024);
+    if (local) {
+      const mime = detectMime(local);
+      if (!mime) throw new Error('本地图片格式无效');
+      return toVisionDataUrl(local, mime, signal);
+    }
     return await downloadImageAsDataUrl(item.url, signal);
   } catch (error) {
     const refreshed = await readImageViaNapCat(ctx, item.file, signal).catch(() => null);
@@ -1025,9 +1090,20 @@ export function buildToolDefs() {
               } else {
                 dataUrls.push(await imageItemToDataUrl(ctx, item, ctx.signal));
               }
-            } catch (e) { failed.push(String(e?.message ?? e)); }
+            } catch (e) {
+              failed.push(String(e?.message ?? e));
+            }
           }
-          if (!dataUrls.length) return err(`图片获取失败：${failed.join('；')}`);
+          if (!dataUrls.length) {
+            const onlyUnavailable = failed.length > 0
+              && failed.every((message) => /本地缓存已过期|重新发送/.test(message));
+            if (onlyUnavailable) {
+              return ok('这条视频的本地缓存已过期或不可读，当前无法查看画面；请让对方重新发送。', {
+                reportIncident: false
+              });
+            }
+            return err(`图片获取失败：${failed.join('；')}`);
+          }
           const note = failed.length ? `（另有 ${failed.length} 张获取失败）` : '';
           // 这张图它之前收藏时已经理解过（库里有备注）→ 直接给出当时的理解，别让它重新描述画面
           const known = [];

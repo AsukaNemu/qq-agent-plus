@@ -1,5 +1,7 @@
 import { formatFullTime, safeSlice } from '../core/util.js';
 import { extractMediaFromSegments } from './onebot.js';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 function recallKindOf(event) {
   if (event?.notice_type === 'group_recall' && event?.group_id != null) return 'group';
@@ -10,26 +12,46 @@ function recallKindOf(event) {
 function mediaValuesOf(media) {
   if (!media || typeof media !== 'object') return [];
   // QQ 的 URL 带短期 rkey，撤回发生时很可能已经失效；file 是 NapCat 的稳定缓存名。
-  return [...new Set([
+  const values = [
+    media.file,
     media.localFile,
     media.cacheFile,
-    media.file,
     media.url
-  ].map((value) => String(value || '').trim()).filter(Boolean))];
+  ];
+  const out = [];
+  for (const value of values) {
+    const raw = String(value || '').trim();
+    if (!raw) continue;
+    if (/^https?:\/\//i.test(raw) || /^base64:\/\//i.test(raw) || /^file:\/\//i.test(raw)) {
+      out.push(raw);
+      continue;
+    }
+    if (path.isAbsolute(raw)) {
+      try { out.push(pathToFileURL(raw).toString()); } catch { /* 继续尝试稳定文件名 */ }
+      const basename = path.basename(raw);
+      if (basename && basename !== raw) out.push(basename);
+      continue;
+    }
+    out.push(raw);
+  }
+  return [...new Set(out)];
 }
 
 function mediaSegmentOf(media, value = '') {
   if (!media || typeof media !== 'object') return null;
   if (media.kind === 'image') {
-    const file = String(value || mediaValuesOf(media)[0] || '').trim();
+    const raw = String(value || mediaValuesOf(media)[0] || '').trim();
+    const file = path.isAbsolute(raw) ? pathToFileURL(raw).toString() : raw;
     return file ? { type: 'image', data: { file } } : null;
   }
   if (media.kind === 'audio') {
-    const file = String(value || mediaValuesOf(media)[0] || '').trim();
+    const raw = String(value || mediaValuesOf(media)[0] || '').trim();
+    const file = path.isAbsolute(raw) ? pathToFileURL(raw).toString() : raw;
     return file ? { type: 'record', data: { file } } : null;
   }
   if (media.kind === 'video') {
-    const file = String(value || mediaValuesOf(media)[0] || '').trim();
+    const raw = String(value || mediaValuesOf(media)[0] || '').trim();
+    const file = path.isAbsolute(raw) ? pathToFileURL(raw).toString() : raw;
     return file ? { type: 'video', data: { file } } : null;
   }
   if (media.kind === 'face' && String(media.faceId || '').trim()) {

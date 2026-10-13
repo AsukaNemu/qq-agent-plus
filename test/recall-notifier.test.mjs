@@ -73,6 +73,41 @@ describe('RecallNotifier', () => {
     assert.deepEqual(attempts, ['ABCDEF1234567890.jpg']);
   });
 
+  it('never sends a bare local path to OneBot when recalling a video', async () => {
+    const stored = new Map([['group:123:79', {
+      mid: '79', ts: Date.now(), senderId: '42', senderName: '群友', text: '[视频]',
+      media: [{
+        kind: 'video',
+        file: '/Users/example/QQ/clip.mp4',
+        url: '/Users/example/QQ/clip.mp4'
+      }]
+    }]]);
+    const notified = new Set();
+    const attempts = [];
+    const store = {
+      findByMid: (chatKey, mid) => stored.get(`${chatKey}:${mid}`) || null,
+      hasRecallNotification: (chatKey, mid) => notified.has(`${chatKey}:${mid}`),
+      markRecallNotification: (chatKey, mid) => notified.add(`${chatKey}:${mid}`),
+      appendSelf: () => {}
+    };
+    const onebot = {
+      sendText: async () => ({ message_id: 100 }),
+      sendSegments: async (_kind, _id, segments) => {
+        const file = segments[0].data.file;
+        attempts.push(file);
+        if (file.startsWith('file://')) {
+          throw Object.assign(new Error('本地文件不可读'), { outcome: 'failed' });
+        }
+        return { message_id: 101 };
+      }
+    };
+    const notifier = new RecallNotifier({ store, onebot, getTargetUin: () => '123456789' });
+    const result = await notifier.handle({ notice_type: 'group_recall', group_id: 123, message_id: 79 });
+    assert.equal(result.mediaSent, 1);
+    assert.deepEqual(attempts, ['file:///Users/example/QQ/clip.mp4', 'clip.mp4']);
+    assert.equal(attempts.some((value) => value.startsWith('/')), false);
+  });
+
   it('does not send when the message was not recorded', async () => {
     let sent = false;
     const notifier = new RecallNotifier({

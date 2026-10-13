@@ -161,6 +161,21 @@ test('get_message_images refreshes an expired stored URL from the source message
   assert.equal(updates[0][2].appendMedia[0].url, `base64://${png}`);
 });
 
+test('get_message_images treats an expired local-only video cache as a normal unavailable result', async () => {
+  const localPath = path.join(process.env.QQ_AGENT_DATA_DIR, 'missing-video.mp4');
+  const f = context({
+    store: {
+      findByMid: (_chatKey, mid) => String(mid) === '80'
+        ? { mid: '80', media: [{ kind: 'video', file: 'missing-video.mp4', url: localPath }], text: '[视频]' }
+        : null
+    }
+  });
+  const result = await tool('get_message_images').execute(f.ctx, { messageId: '80' });
+  assert.equal(result.isError, undefined);
+  assert.equal(result.reportIncident, false);
+  assert.match(result.content, /本地缓存已过期|重新发送/);
+});
+
 test('collect_sticker refreshes an expired stored URL and passes the file fallback', async () => {
   const seen = { judge: null, collect: null };
   const entry = {
