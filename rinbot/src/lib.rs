@@ -1,6 +1,18 @@
 pub mod adapters;
 pub mod api;
 pub mod application;
+pub mod daily_moments;
+pub mod daily_moments_schedule;
 pub mod domain;
+pub mod group_invite;
+pub mod identity;
+pub mod incident;
+pub mod memory_consolidation;
+pub mod migration_audit;
+pub mod migration_import;
+mod migration_json;
 pub mod ports;
+pub mod qzone_interactions;
+pub mod relationship;
 pub mod runtime;
+pub mod stickers;

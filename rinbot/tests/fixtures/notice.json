@@ -2,5 +2,6 @@
   "post_type": "notice",
   "notice_type": "group_recall",
   "group_id": 3001,
-  "operator_id": 2002
+  "operator_id": 2002,
+  "message_id": 5001
 }

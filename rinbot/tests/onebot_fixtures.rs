@@ -41,14 +41,16 @@ fn group_fixture_preserves_media_kinds_without_raw_onebot_fields() {
 }
 
 #[test]
-fn notice_fixture_is_retained_as_traceable_unknown_event() {
-    let DomainEvent::Unknown {
-        post_type,
-        event_type,
+fn group_recall_notice_maps_to_a_validated_recall_event() {
+    let DomainEvent::MessageRecalled {
+        conversation_id,
+        message_id,
+        operator_id,
     } = normalize_event(&fixture("notice")).expect("event")
     else {
-        panic!("not an unknown event")
+        panic!("not a recall event")
     };
-    assert_eq!(post_type, "notice");
-    assert_eq!(event_type, "group_recall");
+    assert_eq!(conversation_id, "group:3001");
+    assert_eq!(message_id, "5001");
+    assert_eq!(operator_id, "2002");
 }

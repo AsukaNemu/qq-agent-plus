@@ -1,0 +1,1 @@
+ALTER TABLE conversation_wakes ADD COLUMN max_wait_ms INTEGER NOT NULL DEFAULT 20000;

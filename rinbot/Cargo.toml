@@ -10,26 +10,43 @@ description = "RInBot Rust business core"
 name = "RInBot"
 path = "src/main.rs"
 
+[[bin]]
+name = "rinbot-migrate"
+path = "src/bin/rinbot-migrate.rs"
+
+[[bin]]
+name = "qqbotctl"
+path = "src/bin/qqbotctl.rs"
+
 [dependencies]
 async-stream = "0.3"
 async-trait = "0.1"
 axum = "0.8"
+base64 = "0.22"
 clap = { version = "4.5", features = ["derive", "env"] }
 futures-util = "0.3"
 http = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+libc = "0.2"
+plist = "=1.7.0"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "rustls-tls-native-roots"] }
+regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
+scraper = "0.24"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+silk-rs = "0.2"
 subtle = "2"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+time = { version = "=0.3.36", features = ["formatting", "parsing"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-tungstenite = "0.26"
 tower-http = { version = "0.6", features = ["fs", "set-header"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4"] }
+url = "2.5.4"
 
 [dev-dependencies]
 tempfile = "3"

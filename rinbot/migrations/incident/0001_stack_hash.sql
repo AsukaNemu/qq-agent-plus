@@ -1,0 +1,1 @@
+ALTER TABLE incidents ADD COLUMN stack_hash TEXT NOT NULL DEFAULT '';

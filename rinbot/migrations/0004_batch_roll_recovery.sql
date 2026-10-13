@@ -1,0 +1,1 @@
+ALTER TABLE inbox_batches ADD COLUMN roll_percent REAL NOT NULL DEFAULT 0;
