@@ -66,6 +66,10 @@ For the current modules:
 | Feature | Runtime switch | Graduation switch | Owned page |
 | --- | --- | --- | --- |
 | Person impressions | `identityPilot.enabled` | `identityPilot.graduated` | `identity` / 旧印象 |
+| Relationship Pilot | `relationshipPilot.enabled` | `relationshipPilot.graduated` | `relationship` / 关系档案 |
+| Sticker library and sending | `stickers.enabled` | `stickers.graduated` | 贴纸管理页 |
+| Sticker collection | `stickerCollect.enabled` | `stickerCollect.graduated` | 贴纸管理页的收藏操作区 |
+| Memory consolidation | `memoryConsolidate.enabled` | `memoryConsolidate.graduated` | `记忆整理` / 人物记忆整理 |
 | Automatic friend handling | retired 2026-09-25（整体退役，见 docs/KNOWN-ISSUES.md） | retired | `friends` / 好友管理（仅入站审批） |
 | Slang research | retired | retired | 黑话资产并入观测页 |
 

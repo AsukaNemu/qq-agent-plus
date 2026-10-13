@@ -539,6 +539,7 @@ POST   /api/outbox/:id/reconcile
 | 现有领域或入口 | Rust 目标模块 | 最低对照用例 |
 |---|---|---|
 | `core/access`、`orchestrator`、OneBot 收发 | policy、router、napcat adapter | 私聊/群聊白名单、@、关键词、概率、限频、撤回和重连 |
+| pacing、工具调度、slang pilot | scheduler、tool executor、slang feature | 自主节奏延迟/被 @ 即时处理；只读并行波次、动作顺序及 finish 失败屏障；若 slang 仍启用则核对资产和提示行为 |
 | `core/store`、`sessions`、会话线程 | inbox、outbox、session store | 租约恢复、会话接续、去重、发送结果未知后的人工核对 |
 | `llm`、providers、prompt、persona | llm adapter、prompt service | 当前启用供应商、模型选择、密钥绑定、上下文和工具调用 |
 | `memory`、全局人物记忆 | memory feature、memory store | 会话记忆读取、写入、摘要与禁用后数据保留 |
@@ -560,7 +561,7 @@ POST   /api/outbox/:id/reconcile
 |---|---|
 | `messages.sqlite` 及 WAL/SHM | 使用 SQLite 一致性备份；核对消息、租约、线程、outbox 及未知发送状态 |
 | `identity-pilot.sqlite`、`relationship-pilot.sqlite`、`incident-pilot.sqlite` | 分库盘点 schema、主键和关联关系；导入后逐表核对数量和抽样记录 |
-| `config.json`、供应商密钥、各类 JSON 状态 | 映射配置键，确认默认值、功能开关和凭据来源；迁移日志不打印密钥 |
+| `config.json`、供应商密钥、各类 JSON 状态 | 映射配置键，确认默认值、功能开关和凭据来源；迁移日志不打印密钥。主动消息的 Node `scheduledWakes` / `followUpAt` 是内存态，停写前必须把其脱离 timer 句柄的投影写入 `proactive-state.json.runtimeSnapshot`，并与 Rust 唤醒账本逐项对账；没有该快照时主动消息相关功能必须保持数据门禁关闭。 |
 | `memory/`、`sessions/` | 保留原始文件，建立索引或转换记录；验证典型会话能够读取旧记忆 |
 | 贴纸和媒体目录、QZone/定时任务/价格缓存 | 核对引用路径和失效资源，保留任务下一次触发时间及媒体可访问性 |
 
