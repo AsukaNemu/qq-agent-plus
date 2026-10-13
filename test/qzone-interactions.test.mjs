@@ -322,6 +322,42 @@ test('malformed tool JSON is corrected without consuming unread feeds', async ()
   assert.equal(f.manager.status().unreadFeeds, 0);
 });
 
+test('native Qzone reply marker validation ignores marker letter case', async () => {
+  const feed = [{
+    uin: 111,
+    nickname: 'Friend',
+    time: nowSec,
+    appid: 311,
+    key: 'case-insensitive-native-marker',
+    html: htmlPost('specific post')
+  }];
+  let calls = 0;
+  const f = fixture({
+    feed,
+    complete: async ({ messages }) => {
+      calls += 1;
+      if (calls === 1) {
+        return response({
+          feedActions: idsFromMessages(messages, 'feed').map((id) => ({
+            id, action: 'comment', content: '@{UIN:333}hello', reason: 'reply'
+          })),
+          replyActions: []
+        });
+      }
+      assert.match(String(messages.at(-1)?.content || ''), /原生回复标记/);
+      return response({
+        feedActions: idsFromMessages(messages, 'feed').map((id) => ({
+          id, action: 'skip', content: '', reason: '不互动'
+        })),
+        replyActions: []
+      });
+    }
+  });
+  const result = await f.manager.runNow('feed');
+  assert.equal(result.run.status, 'done');
+  assert.equal(calls, 2);
+});
+
 test('uncertain comment dispatch is never retried automatically', async () => {
   const feed = [{
     uin: 111,

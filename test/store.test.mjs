@@ -26,6 +26,24 @@ describe('ChatStore', () => {
     assert.deepEqual(store.recent('group:1', { limit: 1, offset: 1 }).map((m) => m.mid), ['1']);
   });
 
+  it('selects the memory activity window by insertion order when message timestamps arrive late', (t) => {
+    const { store } = fixture(t);
+    for (const [mid, ts] of [[1, 3000], [2, 1000], [3, 2000]]) {
+      store.appendIncoming('group:1', {
+        mid,
+        ts,
+        senderId: '42',
+        senderName: 'member',
+        text: `message-${mid}`
+      });
+    }
+
+    assert.deepEqual(
+      store.recent('group:1', { limit: 2 }).map((message) => message.mid),
+      ['2', '3']
+    );
+  });
+
   it('claims a snapshot without acknowledging it and keeps later messages pending', (t) => {
     const { store } = fixture(t);
     append(store, 1);
