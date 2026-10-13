@@ -109,6 +109,8 @@ import { currentProviders } from './providers.js';
 import { buildSlangContextForChat } from '../console/asset-observer.js';
 import { parseInlineToolCalls } from '../tools/inline-tools.js';
 
+const EMPTY_MODEL_ACTION_REPAIR = '【系统修复】上一轮只返回了内部思考，没有产生最终动作。请现在完成本轮：要回复就必须调用 send_message；决定不回复就调用 finish。不要只输出普通文本、空白响应或内部思考。';
+
 function handoffParticipantIds(triggerEntries) {
   return [...new Set((triggerEntries || [])
     .filter((m) => !m?.self && m?.senderId !== null && m?.senderId !== undefined)
@@ -1540,6 +1542,7 @@ export class Orchestrator {
     let finish = false;
     let completed = false;
     let roundBudgetExceeded = false;   // 轮次用尽（见下方收尾逻辑，写进 session.roundBudgetStopped）
+    let emptyActionRepairCount = 0;
     let webSearchCount = 0;
     session.activity = '';
     session.webSearchCount = 0;
@@ -1670,6 +1673,32 @@ export class Orchestrator {
         }
         this.sessions.update(session.id);
         this.emit('session-update', session.id);
+      }
+      const hasFinalText = typeof finalContent === 'string'
+        ? finalContent.trim().length > 0
+        : Boolean(finalContent);
+      if (!toolCalls.length && !hasFinalText) {
+        // 工具已经产生并确认发送副作用时，空的终结轮不应把整批输入重新挂起；
+        // 只有尚未产生外部回复的空动作才需要一次受限修复请求。
+        if (session.sent.length > 0) {
+          completed = true;
+          session.finishReason ||= '已确认发送，模型未追加文本';
+          break;
+        }
+        if (emptyActionRepairCount < 1 && round + 1 < maxRounds) {
+          emptyActionRepairCount += 1;
+          session.emptyActionRepairCount = emptyActionRepairCount;
+          // 不把供应商的半成品 assistant 消息带进修复请求；它既没有正文，也没有工具调用，
+          // 某些思考网关会把它当成未闭合的 assistant turn，继续返回同样的半成品。
+          if (messages.at(-1)?.role === 'assistant') messages.pop();
+          messages.push({ role: 'user', content: EMPTY_MODEL_ACTION_REPAIR });
+          session.messages.push({ role: 'user', content: EMPTY_MODEL_ACTION_REPAIR });
+          markActivity('模型空响应，正在重新请求…');
+          continue;
+        }
+        const error = new Error('模型返回空动作：没有回复文本或工具调用');
+        error.code = 'EMPTY_MODEL_ACTION';
+        throw error;
       }
       if (!toolCalls.length) {
         // 没有工具调用 = 模型结束思考（文本不会发给 QQ）

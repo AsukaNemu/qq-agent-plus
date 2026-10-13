@@ -138,6 +138,61 @@ describe('Orchestrator', () => {
     assert.equal(store.findByMid('group:1', 2).read, false);
   });
 
+  it('repairs a reasoning-only empty response before acknowledging the message', async (t) => {
+    const { runner, sessions, append } = fixture(t);
+    const requests = [];
+    let calls = 0;
+    globalThis.fetch = async (_url, options) => {
+      calls += 1;
+      const body = JSON.parse(options.body);
+      requests.push(body);
+      if (calls === 1) {
+        return Response.json({
+          choices: [{
+            message: {
+              content: '',
+              reasoning_content: '已经想好要回复，但这次没有提交发送动作。'
+            },
+            finish_reason: 'stop'
+          }],
+          usage: { total_tokens: 10 }
+        });
+      }
+      if (calls === 2) {
+        return Response.json({
+          choices: [{
+            message: {
+              tool_calls: [{
+                id: 'send-repaired',
+                type: 'function',
+                function: {
+                  name: 'send_message',
+                  arguments: JSON.stringify({ messages: ['修复后回复'] })
+                }
+              }]
+            },
+            finish_reason: 'tool_calls'
+          }],
+          usage: { total_tokens: 10 }
+        });
+      }
+      return Response.json({
+        choices: [{ message: { content: 'done' }, finish_reason: 'stop' }],
+        usage: { total_tokens: 10 }
+      });
+    };
+
+    append(1, '触发空响应修复');
+    await runner.wake('group:1');
+
+    assert.equal(calls, 3);
+    assert.match(String(requests[1].messages.at(-1)?.content || ''), /上一轮只返回了内部思考/);
+    const session = sessions.get(sessions.listSummaries(1)[0].id);
+    assert.equal(session.emptyActionRepairCount, 1);
+    assert.equal(session.sent.length, 1);
+    assert.equal(session.sent[0].text, '修复后回复');
+  });
+
   it('preserves failed input and recorded token usage without clearing a run', async (t) => {
     const { runner, store, sessions, append } = fixture(t);
     append(1);

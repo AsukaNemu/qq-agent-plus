@@ -2,6 +2,7 @@
 // 支持工具调用、usage 统计和可选模型。
 import { getConfig } from '../core/config.js';
 import { stripLoneSurrogates } from '../core/util.js';
+import { repairJsonObject, repairUnescapedStringQuotes } from '../core/json-repair.js';
 import { normalizeThinkingIntent, thinkingPatchFor, resolveThinkingPatch, modelServiceById, modelServiceOfBaseUrl, effectiveThinkingRaw, hostOf } from '../core/provider-presets.js';
 import { resolveOfficialPrice, resolveModelPrice, priceAt } from '../pricing/model-prices.js';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -114,6 +115,7 @@ function effectiveApi() {
  */
 export function isRetryableError(error) {
   if (error?.code === 'TIME_CONTROL_INACTIVE') return false;
+  if (error?.code === 'EMPTY_MODEL_ACTION') return true;
   const msg = String(error?.message ?? error ?? '');
 
   // 主动中止（用户/系统取消）：重试没有意义
@@ -393,6 +395,48 @@ function cleanContentForRequest(content) {
   return content;
 }
 
+/**
+ * 工具调用参数是模型输出的原始字符串，不能直接相信它一定是 JSON。
+ * 本地执行器会把坏参数转成 tool error，但如果把同一段坏字符串原样放回
+ * assistant.tool_calls，下一次请求会被严格的 OpenAI 兼容网关以 400 拒绝。
+ *
+ * 这里仅清洗“发给供应商的 transcript”；本地会话仍保留原始 tool call，
+ * 便于审计和诊断。能修就保留修复结果，不能修则用空对象占位，让模型能
+ * 看到上一轮工具失败并重新调用，而不是让整轮会话被坏 transcript 卡死。
+ */
+export function sanitizeToolCallsForRequest(toolCalls) {
+  if (!Array.isArray(toolCalls)) return toolCalls;
+  return toolCalls.map((call) => {
+    const fn = call?.function;
+    const raw = fn?.arguments;
+    if (!fn || typeof raw !== 'string') return call;
+
+    const validObject = (text) => {
+      try {
+        const value = JSON.parse(text);
+        return value && typeof value === 'object' && !Array.isArray(value) ? text : null;
+      } catch {
+        return null;
+      }
+    };
+    const valid = validObject(raw);
+    if (valid) return call;
+
+    const quoted = repairUnescapedStringQuotes(raw);
+    const repairedQuoted = quoted ? validObject(quoted) : null;
+    if (repairedQuoted) {
+      return { ...call, function: { ...fn, arguments: repairedQuoted } };
+    }
+
+    const repairedObject = repairJsonObject(raw);
+    if (repairedObject && typeof repairedObject === 'object' && !Array.isArray(repairedObject)) {
+      return { ...call, function: { ...fn, arguments: JSON.stringify(repairedObject) } };
+    }
+
+    return { ...call, function: { ...fn, arguments: '{}' } };
+  });
+}
+
 export async function chatCompletion({
   messages,
   tools = null,
@@ -419,7 +463,7 @@ export async function chatCompletion({
       // 整次调用会被模型网关判成 400 Bad Request（2026-09-27 实测：记忆"新建印象"因此永远失败）。
       // 统一在这里清掉，别指望每个拼提示词的地方都记得用 safeSlice。
       content: cleanContentForRequest(content),
-      ...(tool_calls ? { tool_calls } : {}),
+      ...(tool_calls ? { tool_calls: sanitizeToolCallsForRequest(tool_calls) } : {}),
       ...(tool_call_id ? { tool_call_id } : {}), ...(name ? { name } : {}),
       // 关思考时不能把上一轮的 reasoning_content 带回去（有的网关会 400）
       ...(!thinkingOff && reasoning_content ? { reasoning_content } : {})
