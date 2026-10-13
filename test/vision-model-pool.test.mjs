@@ -45,6 +45,122 @@ function mockRequests(t, respond = () => Response.json({
   return models;
 }
 
+function configurePriority() {
+  const cfg = configure(['vision-a', 'vision-b']);
+  cfg.api.visionModel.strategy = 'priority';
+  cfg.api.visionModel.queueTimeoutMs = 25;
+  cfg.api.visionModel.timeoutMs = 5000;
+  cfg.api.visionModel.fallbackTimeoutMs = 5000;
+  setRuntimeConfig(cfg);
+  return cfg;
+}
+
+test('priority vision keeps choosing the primary when both routes are idle', async (t) => {
+  configurePriority();
+  const seen = mockRequests(t);
+  for (let i = 0; i < 4; i++) await chatCompletionWithRetry({ messages: [], overrides: visionModelOverride() });
+  assert.deepEqual(seen, ['vision-a', 'vision-a', 'vision-a', 'vision-a']);
+});
+
+test('priority queue timeout uses backup without interrupting the active primary, then returns to primary', async (t) => {
+  configurePriority();
+  let release, started;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  const firstStarted = new Promise((resolve) => { started = resolve; });
+  t.after(() => release());
+  let primaryCalls = 0;
+  const seen = mockRequests(t, async (body) => {
+    if (body.model === 'vision-a' && ++primaryCalls === 1) { started(); await blocked; }
+    return Response.json({ choices: [{ message: { content: 'recognized' } }] });
+  });
+  const first = chatCompletion({ messages: [], overrides: visionModelOverride() });
+  await firstStarted;
+  assert.equal(await describeImages(['data:image/png;base64,test']), 'recognized');
+  assert.deepEqual(seen, ['vision-a', 'vision-b'], 'queued primary must not be sent');
+  release();
+  await first;
+  await chatCompletionWithRetry({ messages: [], overrides: visionModelOverride() });
+  assert.deepEqual(seen, ['vision-a', 'vision-b', 'vision-a']);
+});
+
+test('priority 429 skips its cooldown and does not alternate back to the limited model', async (t) => {
+  configurePriority();
+  const seen = mockRequests(t, (body) => body.model === 'vision-a'
+    ? new Response('limited', { status: 429, headers: { 'Retry-After': '3600' } })
+    : Response.json({ choices: [{ message: { content: 'recognized' } }] }));
+  await describeImages(['data:image/png;base64,test']);
+  await describeImages(['data:image/png;base64,test']);
+  assert.deepEqual(seen, ['vision-a', 'vision-b', 'vision-b']);
+});
+
+test('priority failures try each model only once even with a larger retry budget', async (t) => {
+  configurePriority();
+  const seen = mockRequests(t, () => new Response('unavailable', { status: 503 }));
+  await assert.rejects(chatCompletionWithRetry({ messages: [], overrides: visionModelOverride() }, 5), /503/);
+  assert.deepEqual(seen, ['vision-a', 'vision-b']);
+});
+
+test('cancelling a priority request never starts its backup', async (t) => {
+  configurePriority();
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  let started;
+  const firstStarted = new Promise((resolve) => { started = resolve; });
+  const seen = [];
+  globalThis.fetch = async (_url, options) => {
+    seen.push(JSON.parse(options.body).model);
+    started();
+    return new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }));
+  };
+  const controller = new AbortController();
+  const request = chatCompletionWithRetry({ messages: [], overrides: visionModelOverride(), signal: controller.signal });
+  const rejected = assert.rejects(request, /cancelled/);
+  await firstStarted;
+  controller.abort(new Error('cancelled'));
+  await rejected;
+  assert.deepEqual(seen, ['vision-a']);
+});
+
+test('a main-chat 429 uses its configured fallback before the cooldown wait', async (t) => {
+  const cfg = configurePriority();
+  cfg.api.baseUrl = cfg.providers[0].baseURL;
+  cfg.api.provider = 'vision-provider';
+  cfg.api.model = 'vision-a';
+  cfg.api.fallback = { enabled: true, model: 'vision-b' };
+  setRuntimeConfig(cfg);
+  const seen = mockRequests(t, (body) => body.model === 'vision-a'
+    ? new Response('limited', { status: 429, headers: { 'Retry-After': '60' } })
+    : Response.json({ choices: [{ message: { content: 'recognized' } }] }));
+  const response = await chatCompletionWithRetry({ messages: [] });
+  assert.equal(response.requestedModel, 'vision-b');
+  assert.deepEqual(seen, ['vision-a', 'vision-b']);
+});
+
+test('request timeout moves from priority vision and main chat to their backups', async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  const seen = [];
+  globalThis.fetch = async (_url, options) => {
+    const model = JSON.parse(options.body).model;
+    seen.push(model);
+    if (model === 'vision-b') return Response.json({ choices: [{ message: { content: 'recognized' } }] });
+    return new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }));
+  };
+  configurePriority();
+  const image = await chatCompletionWithRetry({ messages: [], overrides: visionModelOverride() });
+  assert.equal(image.requestedModel, 'vision-b');
+  const cfg = configurePriority();
+  cfg.api.baseUrl = cfg.providers[0].baseURL;
+  cfg.api.provider = 'vision-provider';
+  cfg.api.model = 'vision-a';
+  cfg.api.timeoutMs = 5000;
+  cfg.api.fallback = { enabled: true, model: 'vision-b' };
+  setRuntimeConfig(cfg);
+  const chat = await chatCompletionWithRetry({ messages: [] });
+  assert.equal(chat.requestedModel, 'vision-b');
+  assert.deepEqual(seen, ['vision-a', 'vision-b', 'vision-a', 'vision-b']);
+});
+
 test('legacy single-model configuration keeps its existing routing', async (t) => {
   configure([]);
   const seen = mockRequests(t);

@@ -10635,7 +10635,9 @@ function bindSettingsEvents(c) {
     const delegated = !!override?.enabled;
     const activeVisionModels = override?.activeModels || override?.models;
     const visionLabel = activeVisionModels?.length > 1
-      ? `独立视觉模型池（${activeVisionModels.length} 个模型轮流识图）`
+      ? (override?.distribution === 'priority'
+        ? `独立视觉模型 ${activeVisionModels[0]}（备用：${activeVisionModels.slice(1).join('、')}）`
+        : `独立视觉模型池（${activeVisionModels.length} 个模型轮流识图）`)
       : `独立视觉模型 ${override?.model || ''}`;
     const scheduleHint = override?.distribution === 'scheduled'
       ? '；双模型轮换已预约' : '';

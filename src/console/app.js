@@ -2641,10 +2641,13 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
             model: visionOverride.model,
             models: visionOverride.visionModels || [visionOverride.model],
             activeModels,
-            distribution: activeModels.length > 1 ? 'round-robin'
+            distribution: activeModels.length > 1 ? visionOverride.visionStrategy
               : (visionOverride.visionModels ? 'scheduled' : 'single'),
             balanceFrom: visionOverride.visionBalanceFrom || null,
-            thinking: setting.thinking ?? null
+            thinking: setting.thinking ?? null,
+            timeoutMs: visionOverride.timeoutMs,
+            queueTimeoutMs: visionOverride.queueTimeoutMs || null,
+            fallbackTimeoutMs: visionOverride.visionFallbackTimeoutMs || null
           } : null
         });
       }

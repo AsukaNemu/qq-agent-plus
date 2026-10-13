@@ -283,6 +283,20 @@ async function runCompletionWithRetries(args, retries) {
     } catch (error) {
       lastError = error;
       if (args.signal?.aborted || attempt >= retries || !isRetryableError(error)) throw error;
+      const timeout = error?.code === 'MODEL_QUEUE_TIMEOUT' || error?.code === 'MODEL_REQUEST_TIMEOUT'
+        || /超时|timeout|timed out/i.test(String(error?.message || ''));
+      // The configured chat fallback must get a chance before repeated
+      // primary timeouts consume the whole orchestration budget.
+      if (pickFallback(args) && (timeout || isRateLimitError(error))) throw error;
+      if (args.overrides?.visionStrategy === 'priority') {
+        const models = activeVisionModels(args.overrides);
+        const failed = new Set(args.overrides.visionFailedModels || []);
+        failed.add(error.requestedModel || args.overrides.model);
+        if (models.every((model) => failed.has(model))) throw error;
+        args = { ...args, overrides: { ...args.overrides, visionFailedModels: [...failed] } };
+        console.warn('[llm] 优先识图通道不可用，切换备用通道');
+        continue;
+      }
       if (isRateLimitError(error)) {
         const api = args.overrides || effectiveApi();
         const hasVisionAlternatives = activeVisionModels(api).length > 1;
@@ -483,6 +497,7 @@ export async function chatCompletion({
       signal: controller.signal,
       serialize: api.visionRequest === true,
       intervalMs: api.requestIntervalMs || 0,
+      queueTimeoutMs: api.queueTimeoutMs || 0,
       deadline: Date.now() + timeoutMs
     }, async () => {
       assertTimeAllowed();
@@ -528,9 +543,15 @@ export async function chatCompletion({
   } catch (error) {
     if (controller.signal.reason?.code === 'TIME_CONTROL_INACTIVE') throw controller.signal.reason;
     if (signal?.aborted) throw signal.reason ?? new Error('Run cancelled');
-    if (controller.signal.aborted) throw new Error(`模型请求超时（${timeoutMs}ms）`);
-    if (/模型 API HTTP/.test(String(error.message))) throw error;
-    throw new Error(`模型请求失败：${error?.cause?.message ?? error?.message ?? error}`);
+    let failure = error;
+    if (controller.signal.aborted) {
+      failure = new Error(`模型请求超时（${timeoutMs}ms）`);
+      failure.code = 'MODEL_REQUEST_TIMEOUT';
+    } else if (error?.code !== 'MODEL_QUEUE_TIMEOUT' && !/模型 API HTTP/.test(String(error?.message))) {
+      failure = new Error(`模型请求失败：${error?.cause?.message ?? error?.message ?? error}`);
+    }
+    failure.requestedModel = String(body.model || api.model);
+    throw failure;
   } finally {
     releaseTimeGuard();
     clearTimeout(timer);

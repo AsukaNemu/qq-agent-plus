@@ -63,11 +63,12 @@ export class RequestScheduler {
     const now = this.now();
     return {
       pending: state?.pending || 0,
+      cooldownMs: Math.max(0, (state?.cooldownUntil || 0) - now),
       waitMs: Math.max(0, (state?.cooldownUntil || 0) - now, (state?.nextStartAt || 0) - now)
     };
   }
 
-  async run(api, { signal, serialize = false, intervalMs = 0, deadline = Infinity } = {}, task) {
+  async run(api, { signal, serialize = false, intervalMs = 0, deadline = Infinity, queueTimeoutMs = 0 } = {}, task) {
     signal?.throwIfAborted();
     const key = this.stateKey(api);
     let state = this.states.get(key);
@@ -83,10 +84,17 @@ export class RequestScheduler {
       // Resolving a cancelled queued turn must not bypass its predecessor.
       state.tail = previous.then(() => turn);
     }
+    const queueController = new AbortController();
+    const queueSignal = signal ? AbortSignal.any([signal, queueController.signal]) : queueController.signal;
+    const queueTimer = queueTimeoutMs > 0 ? setTimeout(() => {
+      const error = new Error(`模型排队超时（${queueTimeoutMs}ms）`);
+      error.code = 'MODEL_QUEUE_TIMEOUT';
+      queueController.abort(error);
+    }, queueTimeoutMs) : null;
     try {
-      if (serialize) await waitForTurn(previous, signal);
+      if (serialize) await waitForTurn(previous, queueSignal);
       while (true) {
-        signal?.throwIfAborted();
+        queueSignal.throwIfAborted();
         const now = this.now();
         const remaining = Math.max(state.cooldownUntil, serialize ? state.nextStartAt : 0) - now;
         if (remaining <= 0) break;
@@ -99,18 +107,21 @@ export class RequestScheduler {
           error.retryAfterMs = state.cooldownUntil - now;
           throw error;
         }
-        await this.sleep(Math.min(remaining, 2147483647), signal);
+        await this.sleep(Math.min(remaining, 2147483647), queueSignal);
       }
+      clearTimeout(queueTimer);
       signal?.throwIfAborted();
       if (serialize) state.nextStartAt = this.now() + intervalMs;
       return await task();
     } catch (error) {
+      if (queueController.signal.aborted && !signal?.aborted) error = queueController.signal.reason;
       if (isRateLimitError(error)) {
         state.cooldownUntil = Math.max(state.cooldownUntil,
           error.retryAt || this.now() + (error.retryAfterMs ?? 60000));
       }
       throw error;
     } finally {
+      clearTimeout(queueTimer);
       state.pending--;
       release();
     }

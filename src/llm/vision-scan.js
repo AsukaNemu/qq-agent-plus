@@ -73,6 +73,11 @@ export function visionModelOverride(cfg = getConfig()) {
     apiKey,
     model,
     visionRequest: true,
+    visionStrategy: setting.strategy === 'priority' ? 'priority' : 'round-robin',
+    ...(setting.strategy === 'priority' ? {
+      queueTimeoutMs: Math.max(1, Number(setting.queueTimeoutMs) || 10000),
+      visionFallbackTimeoutMs: Math.max(5000, Number(setting.fallbackTimeoutMs) || 60000)
+    } : {}),
     requestIntervalMs: Math.max(0, Math.min(60000, Number(setting.requestIntervalMs ?? 2000) || 0)),
     ...(models.length > 1 ? { visionModels: models } : {}),
     ...(setting.balanceFrom ? { visionBalanceFrom: String(setting.balanceFrom) } : {}),

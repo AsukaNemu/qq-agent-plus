@@ -48,6 +48,7 @@ export const DEFAULT_CONFIG = {
       provider: '',
       model: '',
       models: [],                             // 同一提供商的额外视觉模型，按请求次数轮流使用
+      strategy: 'round-robin',                  // priority = 优先主模型，失败/等待超时才用备用
       balanceFrom: '',                         // 可选 ISO 时间，到点后才启用额外模型
       baseUrl: '',
       requestIntervalMs: 2000,                  // 同一识图模型串行，至少间隔 2 秒启动请求

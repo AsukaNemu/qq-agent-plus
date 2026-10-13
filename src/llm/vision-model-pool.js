@@ -25,6 +25,23 @@ export function selectVisionModel(api, availability = () => ({ pending: 0, waitM
   if (!Array.isArray(api?.visionModels)) return api;
   const models = activeVisionModels(api);
   if (models.length < 2) return api;
+  if (api.visionStrategy === 'priority') {
+    const failed = new Set(api.visionFailedModels || []);
+    const candidates = models.filter((model) => !failed.has(model));
+    let selected = null;
+    for (const model of candidates) {
+      const candidate = { ...api, model };
+      const state = availability(candidate);
+      if (!selected || state.cooldownMs < selected.cooldownMs) selected = { api: candidate, ...state };
+      // A busy primary still gets its bounded queue wait. Only a known
+      // provider cooldown or a failed attempt makes us skip it immediately.
+      if (!state.cooldownMs) { selected = { api: candidate, ...state }; break; }
+    }
+    const result = selected?.api || api;
+    return result.model === models[0] ? result : {
+      ...result, timeoutMs: api.visionFallbackTimeoutMs || api.timeoutMs
+    };
+  }
   const key = JSON.stringify([api.baseUrl, models]);
   const cursor = cursors.get(key) || 0;
   let selected = null;
