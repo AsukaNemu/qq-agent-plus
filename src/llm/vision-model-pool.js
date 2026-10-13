@@ -21,12 +21,27 @@ export function activeVisionModels(api, now = Date.now()) {
   return models;
 }
 
-export function selectVisionModel(api) {
+export function selectVisionModel(api, availability = () => ({ pending: 0, waitMs: 0 })) {
   if (!Array.isArray(api?.visionModels)) return api;
   const models = activeVisionModels(api);
   if (models.length < 2) return api;
   const key = JSON.stringify([api.baseUrl, models]);
   const cursor = cursors.get(key) || 0;
-  cursors.set(key, (cursor + 1) % models.length);
-  return { ...api, model: models[cursor] };
+  let selected = null;
+  for (let offset = 0; offset < models.length; offset++) {
+    const index = (cursor + offset) % models.length;
+    const candidate = { ...api, model: models[index] };
+    const state = availability(candidate);
+    const choice = { index, api: candidate, ...state };
+    if (!choice.pending && !choice.waitMs) {
+      selected = choice;
+      break;
+    }
+    // If every route is occupied, wait on the earliest cooldown and shortest
+    // queue. Ties keep round-robin order rather than favouring the primary.
+    if (!selected || choice.waitMs < selected.waitMs
+      || (choice.waitMs === selected.waitMs && choice.pending < selected.pending)) selected = choice;
+  }
+  cursors.set(key, (selected.index + 1) % models.length);
+  return selected.api;
 }

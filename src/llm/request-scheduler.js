@@ -53,15 +53,29 @@ export class RequestScheduler {
     this.states = new Map();
   }
 
+  stateKey(api) {
+    const credential = createHash('sha256').update(String(api.apiKey || '')).digest('hex');
+    return JSON.stringify([String(api.baseUrl || '').replace(/\/+$/, ''), credential, api.model]);
+  }
+
+  availability(api) {
+    const state = this.states.get(this.stateKey(api));
+    const now = this.now();
+    return {
+      pending: state?.pending || 0,
+      waitMs: Math.max(0, (state?.cooldownUntil || 0) - now, (state?.nextStartAt || 0) - now)
+    };
+  }
+
   async run(api, { signal, serialize = false, intervalMs = 0, deadline = Infinity } = {}, task) {
     signal?.throwIfAborted();
-    const credential = createHash('sha256').update(String(api.apiKey || '')).digest('hex');
-    const key = JSON.stringify([String(api.baseUrl || '').replace(/\/+$/, ''), credential, api.model]);
+    const key = this.stateKey(api);
     let state = this.states.get(key);
     if (!state) {
-      state = { tail: Promise.resolve(), cooldownUntil: 0, nextStartAt: 0 };
+      state = { tail: Promise.resolve(), cooldownUntil: 0, nextStartAt: 0, pending: 0 };
       this.states.set(key, state);
     }
+    state.pending++;
     let release = () => {};
     const previous = state.tail;
     if (serialize) {
@@ -97,6 +111,7 @@ export class RequestScheduler {
       }
       throw error;
     } finally {
+      state.pending--;
       release();
     }
   }

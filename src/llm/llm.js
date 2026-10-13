@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { assertTimeAllowed, watchTimeWindow } from '../core/time-gate.js';
 import fs from 'node:fs';
 import nodePath from 'node:path';
-import { selectVisionModel } from './vision-model-pool.js';
+import { activeVisionModels, selectVisionModel } from './vision-model-pool.js';
 import { isRateLimitError, modelHttpError, requestScheduler } from './request-scheduler.js';
 
 // ── 全量用量记账（本地新增）────────────────────────────────────────────
@@ -285,8 +285,11 @@ async function runCompletionWithRetries(args, retries) {
       if (args.signal?.aborted || attempt >= retries || !isRetryableError(error)) throw error;
       if (isRateLimitError(error)) {
         const api = args.overrides || effectiveApi();
-        if (error.retryAfterMs >= Math.max(5000, Number(api.timeoutMs) || 180000)) throw error;
-        console.warn(`[llm] 模型限流，按共享冷却时间排队后重试：${Math.ceil(error.retryAfterMs / 1000)} 秒`);
+        const hasVisionAlternatives = activeVisionModels(api).length > 1;
+        if (!hasVisionAlternatives && error.retryAfterMs >= Math.max(5000, Number(api.timeoutMs) || 180000)) throw error;
+        console.warn(hasVisionAlternatives
+          ? '[llm] 识图通道限流，轮询其他可用通道'
+          : `[llm] 模型限流，按共享冷却时间排队后重试：${Math.ceil(error.retryAfterMs / 1000)} 秒`);
         continue;
       }
       const wait = 1000 * Math.pow(2, attempt);   // 1s, 2s
@@ -331,7 +334,11 @@ export async function chatCompletionWithRetry(args, retries = 2) {
   let response = null;
   let primaryError = null;
   try {
-    response = await runCompletionWithRetries(args, retries);
+    // Image descriptions historically retry once; a larger pool should still
+    // get one opportunity per route within the caller's cancellation budget.
+    const poolRetries = args.overrides?.visionRequest
+      ? Math.max(retries, activeVisionModels(args.overrides).length - 1) : retries;
+    response = await runCompletionWithRetries(args, poolRetries);
   } catch (error) {
     primaryError = error;
   }
@@ -385,7 +392,7 @@ export async function chatCompletion({
 }) {
   assertTimeAllowed();
   signal?.throwIfAborted();
-  const api = selectVisionModel(overrides || effectiveApi());
+  const api = selectVisionModel(overrides || effectiveApi(), (candidate) => requestScheduler.availability(candidate));
   // 聊天这类"随口回一句"的任务关掉思考：省一半输出 token、少 1~3 秒；
   // 判断/写作类（表情包要不要收、说说、空间互动、身份评估）不传 purpose，继续思考。
   const thinking = thinkingFor(purpose, overrides);

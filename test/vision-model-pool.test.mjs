@@ -11,6 +11,7 @@ after(() => fs.rmSync(dir, { recursive: true, force: true }));
 const { DEFAULT_CONFIG, setRuntimeConfig } = await import('../src/core/config.js');
 const { chatCompletion, chatCompletionWithRetry } = await import('../src/llm/llm.js');
 const { describeImages, imageUnderstandingEnabled, visionModelOverride } = await import('../src/llm/vision-scan.js');
+const { selectVisionModel } = await import('../src/llm/vision-model-pool.js');
 
 let sequence = 0;
 function configure(models = ['vision-a', 'vision-b']) {
@@ -52,6 +53,83 @@ test('legacy single-model configuration keeps its existing routing', async (t) =
   await chatCompletion({ messages: [], overrides: override });
   await chatCompletion({ messages: [], overrides: override });
   assert.deepEqual(seen, ['vision-a', 'vision-a']);
+});
+
+test('three idle vision routes are used in round-robin order', async (t) => {
+  configure(['vision-a', 'vision-b', 'vision-c']);
+  const seen = mockRequests(t);
+  for (let i = 0; i < 6; i++) await chatCompletion({ messages: [], overrides: visionModelOverride() });
+  assert.deepEqual(seen, ['vision-a', 'vision-b', 'vision-c', 'vision-a', 'vision-b', 'vision-c']);
+});
+
+test('a busy primary is skipped instead of making idle vision routes wait', async (t) => {
+  configure(['vision-a', 'vision-b', 'vision-c']);
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  let started;
+  const firstStarted = new Promise((resolve) => { started = resolve; });
+  const seen = mockRequests(t, async (body) => {
+    if (body.model === 'vision-a') { started(); await blocked; }
+    return Response.json({ choices: [{ message: { content: 'ok' } }] });
+  });
+  const first = chatCompletion({ messages: [], overrides: visionModelOverride() });
+  await firstStarted;
+  for (let i = 0; i < 3; i++) await chatCompletion({ messages: [], overrides: visionModelOverride() });
+  assert.deepEqual(seen, ['vision-a', 'vision-b', 'vision-c', 'vision-b']);
+  release();
+  await first;
+});
+
+test('image descriptions can try all three routes and skip even hour-long cooldowns', async (t) => {
+  configure(['vision-a', 'vision-b', 'vision-c']);
+  const seen = mockRequests(t, (body) => body.model === 'vision-c'
+    ? Response.json({ choices: [{ message: { content: 'recognized' } }] })
+    : new Response('throttled', { status: 429, headers: { 'Retry-After': '3600' } }));
+  assert.equal(await describeImages(['data:image/png;base64,test']), 'recognized');
+  await chatCompletion({ messages: [], overrides: visionModelOverride() });
+  await chatCompletion({ messages: [], overrides: visionModelOverride() });
+  assert.deepEqual(seen, ['vision-a', 'vision-b', 'vision-c', 'vision-c', 'vision-c']);
+});
+
+test('in-flight main chat using a pool model makes vision choose another model', async (t) => {
+  const cfg = configure(['vision-a', 'vision-b', 'vision-c']);
+  cfg.api.baseUrl = cfg.providers[0].baseURL;
+  cfg.api.provider = 'vision-provider';
+  cfg.api.model = 'vision-a';
+  setRuntimeConfig(cfg);
+  let release, started;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  const firstStarted = new Promise((resolve) => { started = resolve; });
+  t.after(() => release());
+  const seen = mockRequests(t, async (body) => {
+    if (body.model === 'vision-a') { started(); await blocked; }
+    return Response.json({ choices: [{ message: { content: 'ok' } }] });
+  });
+  const chat = chatCompletion({ messages: [] });
+  await firstStarted;
+  await chatCompletion({ messages: [], overrides: visionModelOverride() });
+  assert.deepEqual(seen, ['vision-a', 'vision-b']);
+  release();
+  await chat;
+});
+
+test('when every route is occupied, the shortest cooldown then shortest queue wins', () => {
+  const api = { baseUrl: 'https://all-busy.test/v1', model: 'a', visionModels: ['a', 'b', 'c'] };
+  const busy = { a: { pending: 0, waitMs: 60000 }, b: { pending: 2, waitMs: 0 }, c: { pending: 1, waitMs: 0 } };
+  assert.equal(selectVisionModel(api, (candidate) => busy[candidate.model]).model, 'c');
+  busy.b = { pending: 0, waitMs: 20000 };
+  busy.c = { pending: 0, waitMs: 10000 };
+  assert.equal(selectVisionModel(api, (candidate) => busy[candidate.model]).model, 'c');
+});
+
+test('a scheduled pool cannot bypass the schedule when its primary is throttled', async (t) => {
+  const cfg = configure(['vision-a', 'vision-b', 'vision-c']);
+  cfg.api.visionModel.balanceFrom = new Date(Date.now() + 86400000).toISOString();
+  setRuntimeConfig(cfg);
+  const seen = mockRequests(t, () => new Response('throttled', { status: 429, headers: { 'Retry-After': '3600' } }));
+  await assert.rejects(chatCompletionWithRetry({ messages: [], overrides: visionModelOverride() }), /429/);
+  assert.deepEqual(seen, ['vision-a']);
 });
 
 test('status checks do not allocate, while chat images and sticker judgments share allocation', async (t) => {
