@@ -72,6 +72,8 @@ export function visionModelOverride(cfg = getConfig()) {
     baseUrl,
     apiKey,
     model,
+    visionRequest: true,
+    requestIntervalMs: Math.max(0, Math.min(60000, Number(setting.requestIntervalMs ?? 2000) || 0)),
     ...(models.length > 1 ? { visionModels: models } : {}),
     ...(setting.balanceFrom ? { visionBalanceFrom: String(setting.balanceFrom) } : {}),
     ...(setting.thinking !== undefined ? { thinkingOverride: setting.thinking } : {}),

@@ -521,26 +521,14 @@ export class StickerManager {
     this.judgeTimes.push(now);
 
     let pick = null;
-    let usedUrl = media.url;
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      // 图片链接是一次性的：每次重新取一条新链接再下载，失败就再来一次
-      const url = await this.#refreshImageUrl(message, media.url);
-      usedUrl = url;
-      try {
-        pick = await this.#judgeSticker({ ...media, url }, message);
-        break;
-      } catch (error) {
-        if (attempt < 3) {
-          await new Promise((resolve) => {
-            const timer = setTimeout(resolve, 800 * attempt);
-            timer.unref?.();
-          });
-          continue;
-        }
-        // 三次都拿不到图就安静放弃，不要打扰群聊
-        console.log('[sticker] 取图或判断失败（已重试 3 次），这次跳过：' + (error?.message ?? error));
-        return null;
-      }
+    const usedUrl = await this.#refreshImageUrl(message, media.url);
+    try {
+      // #judgeSticker already refreshes failed image downloads and retries the
+      // model with its shared cooldown. An outer retry restarts both budgets.
+      pick = await this.#judgeSticker({ ...media, url: usedUrl }, message);
+    } catch (error) {
+      console.log('[sticker] 取图或判断失败，这次跳过：' + (error?.message ?? error));
+      return null;
     }
     if (!pick) {
       console.log('[sticker] 判断没有返回结果，这次跳过');

@@ -50,6 +50,7 @@ export const DEFAULT_CONFIG = {
       models: [],                             // 同一提供商的额外视觉模型，按请求次数轮流使用
       balanceFrom: '',                         // 可选 ISO 时间，到点后才启用额外模型
       baseUrl: '',
+      requestIntervalMs: 2000,                  // 同一识图模型串行，至少间隔 2 秒启动请求
       timeoutMs: 90000
     },
     // 思考控制（语义层，见 src/core/provider-presets.js 的渠道形状翻译）：

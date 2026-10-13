@@ -9,6 +9,7 @@ import { assertTimeAllowed, watchTimeWindow } from '../core/time-gate.js';
 import fs from 'node:fs';
 import nodePath from 'node:path';
 import { selectVisionModel } from './vision-model-pool.js';
+import { isRateLimitError, modelHttpError, requestScheduler } from './request-scheduler.js';
 
 // ── 全量用量记账（本地新增）────────────────────────────────────────────
 // 目的：把「所有」LLM 调用的 token 汇总到一处。
@@ -144,7 +145,7 @@ export function isRetryableError(error) {
  *
  * 只在**可重试**的错误上重试（网络抖动、5xx、429），
  * 4xx（密钥错、参数错）直接抛出 —— 重试不会让它变好。
- * 退避策略：1s → 2s（指数退避，避免雪崩）。
+ * 网络/5xx 退避 1s → 2s；429 由所有同模型请求共享 Retry-After 冷却。
  *
  * 注意：这里重试的是**同一轮**请求，messages 不变，所以是幂等的，
  * 不会造成重复发言。会话级的整体重试在 orchestrator 里做。
@@ -282,6 +283,12 @@ async function runCompletionWithRetries(args, retries) {
     } catch (error) {
       lastError = error;
       if (args.signal?.aborted || attempt >= retries || !isRetryableError(error)) throw error;
+      if (isRateLimitError(error)) {
+        const api = args.overrides || effectiveApi();
+        if (error.retryAfterMs >= Math.max(5000, Number(api.timeoutMs) || 180000)) throw error;
+        console.warn(`[llm] 模型限流，按共享冷却时间排队后重试：${Math.ceil(error.retryAfterMs / 1000)} 秒`);
+        continue;
+      }
       const wait = 1000 * Math.pow(2, attempt);   // 1s, 2s
       console.warn(`[llm] 请求失败（第 ${attempt + 1} 次尝试），${wait}ms 后重试：${error?.message ?? error}`);
       await delay(wait, undefined, { signal: args.signal });
@@ -465,44 +472,52 @@ export async function chatCompletion({
   try {
     controller.signal.throwIfAborted();
     assertTimeAllowed();
-    const send = (payload) => fetch(joinUrl(api.baseUrl, '/chat/completions'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', ...authHeaders(api.apiKey, api.baseUrl, api.model) },
-      body: JSON.stringify(payload),
-      signal: controller.signal
-    });
-    let res = await send(body);
-    if (!res.ok) {
-      let text = await res.text();
-      // 模型级差异：个别模型/网关不认识思考参数会整次 400 —— 一个可选参数不该让消息发不出去。
-      // 去掉"我们自己加的"思考参数重试一次（extraBody 是用户显式填的，不动）。
-      const patchKeys = thinking.patch ? Object.keys(thinking.patch) : [];
-      // 400 且错误文本提到我们发的思考参数词面（thinking/reasoning 覆盖 thinking.type、
-      // reasoning_effort、enable_thinking 三个族，结构化错误的 error.param 值也在响应体里）。
-      // 别用 invalid/unknown/unexpected 这类泛词：上下文超长等无关 400 的错误体几乎都带
-      // "invalid_request_error"，会误判成参数被拒——白重试一次还打误导日志（审查 2026-09-28）。
-      const paramRejected = res.status === 400 && patchKeys.length
-        && /thinking|reasoning/i.test(text);
-      if (paramRejected) {
-        const retryBody = { ...body };
-        for (const k of patchKeys) delete retryBody[k];
-        if (!thinkingParamRejectedWarned.has(api.model)) {
-          thinkingParamRejectedWarned.add(api.model);
-          console.warn('[llm] 模型拒绝思考参数，已去掉后重试（每个模型提示一次）：', api.model, '|', text.slice(0, 160));
+    return await requestScheduler.run({ ...api, model: body.model }, {
+      signal: controller.signal,
+      serialize: api.visionRequest === true,
+      intervalMs: api.requestIntervalMs || 0,
+      deadline: Date.now() + timeoutMs
+    }, async () => {
+      assertTimeAllowed();
+      const send = (payload) => fetch(joinUrl(api.baseUrl, '/chat/completions'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...authHeaders(api.apiKey, api.baseUrl, api.model) },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+      let res = await send(body);
+      if (!res.ok) {
+        let text = await res.text();
+        // 模型级差异：个别模型/网关不认识思考参数会整次 400 —— 一个可选参数不该让消息发不出去。
+        // 去掉"我们自己加的"思考参数重试一次（extraBody 是用户显式填的，不动）。
+        const patchKeys = thinking.patch ? Object.keys(thinking.patch) : [];
+        // 400 且错误文本提到我们发的思考参数词面（thinking/reasoning 覆盖 thinking.type、
+        // reasoning_effort、enable_thinking 三个族，结构化错误的 error.param 值也在响应体里）。
+        // 别用 invalid/unknown/unexpected 这类泛词：上下文超长等无关 400 的错误体几乎都带
+        // "invalid_request_error"，会误判成参数被拒——白重试一次还打误导日志（审查 2026-09-28）。
+        const paramRejected = res.status === 400 && patchKeys.length
+          && /thinking|reasoning/i.test(text);
+        if (paramRejected) {
+          const retryBody = { ...body };
+          for (const k of patchKeys) delete retryBody[k];
+          if (!thinkingParamRejectedWarned.has(api.model)) {
+            thinkingParamRejectedWarned.add(api.model);
+            console.warn('[llm] 模型拒绝思考参数，已去掉后重试（每个模型提示一次）：', api.model, '|', text.slice(0, 160));
+          }
+          res = await send(retryBody);
+          if (!res.ok) text = await res.text();
         }
-        res = await send(retryBody);
-        if (!res.ok) text = await res.text();
+        if (!res.ok) throw modelHttpError(res, text);
       }
-      if (!res.ok) throw new Error(`模型 API HTTP ${res.status}：${text.slice(0, 500)}`);
-    }
-    const data = await res.json();
-    const choice = data?.choices?.[0];
-    if (!choice) throw new Error('模型 API 响应缺少 choices');
-    return {
-      message: choice.message ?? {}, finishReason: choice.finish_reason ?? null,
-      usage: data.usage ?? null, model: data.model ?? api.model,
-      requestedModel: String(body.model || api.model), raw: data
-    };
+      const data = await res.json();
+      const choice = data?.choices?.[0];
+      if (!choice) throw new Error('模型 API 响应缺少 choices');
+      return {
+        message: choice.message ?? {}, finishReason: choice.finish_reason ?? null,
+        usage: data.usage ?? null, model: data.model ?? api.model,
+        requestedModel: String(body.model || api.model), raw: data
+      };
+    });
   } catch (error) {
     if (controller.signal.reason?.code === 'TIME_CONTROL_INACTIVE') throw controller.signal.reason;
     if (signal?.aborted) throw signal.reason ?? new Error('Run cancelled');

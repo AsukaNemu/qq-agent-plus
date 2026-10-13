@@ -19,7 +19,7 @@ function configure(models = ['vision-a', 'vision-b']) {
   cfg.api.model = 'text-main';
   cfg.api.thinking = 'off';
   cfg.api.visionModel = {
-    enabled: true, provider: 'vision-provider', model: 'vision-a', models
+    enabled: true, provider: 'vision-provider', model: 'vision-a', models, requestIntervalMs: 0
   };
   cfg.providers = [{ id: 'vision-provider', baseURL: `https://vision-${++sequence}.example.test/v1` }];
   cfg.providerKeys = { 'vision-provider': 'test-key' };
