@@ -470,9 +470,11 @@ if [[ -n "${QQ_AGENT_IMAGE_MIRROR:-}" ]]; then
   IFS=',' read -r -a IMAGE_MIRRORS <<<"$QQ_AGENT_IMAGE_MIRROR"
 fi
 [[ -z "$IMAGE_MIRROR_ARG" ]] || IMAGE_MIRRORS+=("$IMAGE_MIRROR_ARG")
-for mirror in "${IMAGE_MIRRORS[@]}"; do
-  [[ "$mirror" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || die "Invalid image mirror host: $mirror"
-done
+if [[ -n "${QQ_AGENT_IMAGE_MIRROR:-}" || -n "$IMAGE_MIRROR_ARG" ]]; then
+  for mirror in "${IMAGE_MIRRORS[@]}"; do
+    [[ "$mirror" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || die "Invalid image mirror host: $mirror"
+  done
+fi
 
 if [[ "$ASSUME_YES" != true ]]; then
   AGENT_PORT="$(prompt_value 'QQ Agent console port' "$AGENT_PORT")"
