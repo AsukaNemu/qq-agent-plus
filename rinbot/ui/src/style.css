@@ -56,7 +56,9 @@ button {
   top: 50%;
   width: 1920px;
   height: 1080px;
-  overflow: hidden;
+  /* A hidden overflow container can still scroll when a form is focused.
+     Only the document pane should scroll, never the calibrated 3D stage. */
+  overflow: clip;
   transform-origin: center;
   isolation: isolate;
   background: #e8e5e1;
@@ -369,6 +371,54 @@ button {
 .system-nav button:hover {
   color: #9b7247;
 }
+.management-navigation {
+  position: absolute;
+  z-index: 7;
+  top: 174px;
+  left: 59px;
+  right: 59px;
+  display: grid;
+  gap: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .45s;
+}
+.management-primary,
+.management-secondary {
+  display: flex;
+  align-items: center;
+  gap: clamp(12px, 2.1vw, 40px);
+  min-height: 34px;
+}
+.management-primary { border-bottom: 1px solid rgba(88, 84, 73, .34); }
+.management-navigation button {
+  min-height: 36px;
+  padding: 0 5px;
+  color: #77756d;
+  font-size: 13px;
+  letter-spacing: .8px;
+  white-space: nowrap;
+  border-bottom: 1px solid transparent;
+}
+.management-navigation button:hover,
+.management-navigation button[aria-current="page"] {
+  color: #24251f;
+  border-bottom-color: #292a23;
+}
+.management-secondary { padding-left: 12px; }
+.management-secondary button { font-size: 12px; min-height: 30px; }
+.management-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 18px;
+  padding-left: 12px;
+  color: #77756d;
+  font-size: 10px;
+  letter-spacing: .3px;
+  opacity: .78;
+}
+.management-breadcrumb strong { color: #292a23; font-weight: 500; }
 .nav-glyph {
   width: 23px;
   height: 23px;
@@ -826,7 +876,7 @@ button {
   background: #25281e;
   transform-origin: left center;
   pointer-events: none;
-  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: transform var(--navigation-tab-duration, 180ms) cubic-bezier(0.22, 1, 0.36, 1);
 }
 .reduce-surfaces .tab-indicator {
   transition: none;
@@ -1646,6 +1696,8 @@ button {
 }
 [data-mode="archive"] .system-nav,
 [data-mode="detail"] .system-nav,
+[data-mode="archive"] .management-navigation,
+[data-mode="detail"] .management-navigation,
 [data-mode="archive"] .system-footer,
 [data-mode="detail"] .system-footer {
   opacity: 1;
@@ -1867,248 +1919,6 @@ button {
       transparent 35%,
       rgba(234, 229, 225, 0.38) 85%
     );
-}
-
-/* Independent object study, using the archive's typography and warm field. */
-.viewer-open {
-  pointer-events: auto;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  margin-top: 25px;
-  padding: 12px 0 8px;
-  border-bottom: 1px solid #8e897b;
-  font-size: 14px;
-  letter-spacing: 0.3px;
-}
-.viewer-open span {
-  font-size: 20px;
-}
-.viewer-open:hover {
-  color: #946b3c;
-  border-color: currentColor;
-}
-.model-viewer {
-  position: absolute;
-  inset: 0;
-  z-index: 30;
-  overflow: hidden;
-  background: #e8e5e1;
-  color: #20221c;
-}
-.model-viewer[hidden] {
-  display: none;
-}
-.model-viewer .viewer-atmosphere {
-  opacity: 1;
-  transition: none;
-}
-.viewer-canvas {
-  position: absolute;
-  inset: 0;
-}
-.viewer-canvas canvas {
-  display: block;
-  width: 100%;
-  height: 100%;
-  touch-action: none;
-  outline-offset: -8px;
-}
-.viewer-header {
-  position: absolute;
-  top: 58px;
-  left: 60px;
-  right: 60px;
-  display: flex;
-  align-items: flex-start;
-  pointer-events: none;
-}
-.viewer-back {
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  font-size: 22px;
-  pointer-events: auto;
-  padding: 12px 0;
-}
-.viewer-back span {
-  font-size: 15px;
-}
-.viewer-back kbd {
-  font-family: inherit;
-  font-size: 10px;
-  border: 1px solid #b8b3a9;
-  padding: 4px;
-  color: #817b70;
-  margin-left: 8px;
-}
-.viewer-heading {
-  margin-left: 74px;
-  padding-top: 12px;
-}
-.viewer-heading > span {
-  font-size: 11px;
-  letter-spacing: 1.8px;
-  color: #79766a;
-}
-.viewer-heading h2 {
-  margin: 10px 0 8px;
-  font-size: 31px;
-  font-weight: 600;
-}
-.viewer-heading p {
-  margin: 0;
-  font-size: 11px;
-  letter-spacing: 1px;
-  color: #858073;
-}
-.viewer-index {
-  margin-left: auto;
-  font-size: 58px;
-  line-height: 1;
-  font-weight: 300;
-  color: #6a6b5d;
-}
-.viewer-index > span {
-  font-size: 32px;
-  vertical-align: top;
-}
-.viewer-parts {
-  position: absolute;
-  top: 300px;
-  right: 70px;
-  width: 230px;
-  pointer-events: none;
-  opacity: 0;
-  transform: translateX(12px);
-  transition:
-    opacity 0.4s,
-    transform 0.4s;
-}
-.model-viewer[data-exploded="true"] .viewer-parts {
-  opacity: 1;
-  transform: translateX(0);
-}
-.viewer-parts > div {
-  font-size: 11px;
-  letter-spacing: 1px;
-  margin-bottom: 24px;
-  color: #7e7a6d;
-}
-.viewer-parts p {
-  position: relative;
-  padding: 0 0 18px 38px;
-  margin: 0 0 20px;
-  border-bottom: 1px solid #cec9bc;
-}
-.viewer-parts p > span {
-  position: absolute;
-  left: 0;
-  top: 2px;
-  font-size: 11px;
-  color: #9b947f;
-}
-.viewer-parts strong {
-  font-size: 16px;
-  font-weight: 400;
-}
-.viewer-parts small {
-  display: block;
-  font-size: 9px;
-  letter-spacing: 1px;
-  margin-top: 6px;
-  color: #827b6c;
-}
-.viewer-footer {
-  position: absolute;
-  bottom: 68px;
-  left: 60px;
-  right: 60px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  pointer-events: none;
-}
-.viewer-help {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 18px;
-  width: 400px;
-  font-size: 12px;
-  color: #787568;
-}
-.viewer-actions {
-  display: flex;
-  pointer-events: auto;
-  border: 1px solid #a4a08f;
-  background: #e8e5e1;
-}
-.viewer-actions button {
-  min-width: 166px;
-  padding: 19px 24px;
-  font-size: 15px;
-  transition:
-    background 0.2s,
-    color 0.2s;
-}
-.viewer-actions button span {
-  margin-right: 10px;
-}
-.viewer-actions button[aria-pressed="true"] {
-  background: #292d24;
-  color: #eeeade;
-}
-.viewer-actions button:hover {
-  background: #c9c8b6;
-  color: #20221c;
-}
-.viewer-reset {
-  width: 400px;
-  text-align: right;
-  pointer-events: auto;
-  font-size: 14px;
-}
-.viewer-reset span {
-  margin-left: 18px;
-}
-.viewer-state {
-  position: absolute;
-  left: 50%;
-  bottom: 37px;
-  transform: translateX(-50%);
-  color: #85806f;
-  font-size: 11px;
-  letter-spacing: 1px;
-  pointer-events: none;
-}
-.viewer-loading {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  text-align: center;
-  font-size: 15px;
-  color: #7c7565;
-}
-.viewer-loading[hidden] {
-  display: none;
-}
-.viewer-loading button {
-  display: block;
-  margin: 20px auto 0;
-  border-bottom: 1px solid;
-  padding: 8px;
-}
-.viewer-loading button[hidden] {
-  display: none;
-}
-.model-viewer button:disabled {
-  opacity: 0.35;
-  cursor: wait;
-}
-.model-viewer[data-motion-model="reduced"] .viewer-parts,
-.model-viewer[data-motion-model="reduced"] .viewer-actions button {
-  transition: none;
 }
 
 /* Use the same rolling engine as archive numbers, with quieter text blur. */

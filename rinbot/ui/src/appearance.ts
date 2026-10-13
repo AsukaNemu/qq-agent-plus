@@ -92,7 +92,7 @@ export class CardAppearance {
 
   setClarity(group: THREE.Group, value: number) {
     const clarity = THREE.MathUtils.clamp(value, 0, 1);
-    // Traversal still works after the viewer reparents meshes into part groups.
+    // Traverse all surfaces, including nested optical groups.
     group.traverse((child) => {
       if (!(child instanceof THREE.Mesh) || !child.userData.glassClarity)
         return;

@@ -10,9 +10,7 @@ export type MotionKey =
   | "documentReveal"
   | "rollingText"
   | "rollingNumbers"
-  | "surfaceTransitions"
-  | "viewerNavigation"
-  | "viewerModelTransition";
+  | "surfaceTransitions";
 
 export type MotionPreferences = Record<MotionKey, boolean>;
 export type MotionPreset = "full" | "reduced" | "custom";
@@ -85,16 +83,6 @@ export const MOTION_LABELS: Record<
     description: "详情、检索、收藏与设置窗口过渡",
     group: "界面",
   },
-  viewerNavigation: {
-    title: "查看器操作",
-    description: "360° 旋转、平移、缩放与复位阻尼",
-    group: "360° 查看器",
-  },
-  viewerModelTransition: {
-    title: "模型过渡",
-    description: "拆解、重组与清晰度变化",
-    group: "360° 查看器",
-  },
 };
 
 const FULL: MotionPreferences = {
@@ -110,8 +98,6 @@ const FULL: MotionPreferences = {
   rollingText: true,
   rollingNumbers: true,
   surfaceTransitions: true,
-  viewerNavigation: true,
-  viewerModelTransition: true,
 };
 
 const REDUCED: MotionPreferences = {
@@ -127,8 +113,6 @@ const REDUCED: MotionPreferences = {
   rollingText: false,
   rollingNumbers: false,
   surfaceTransitions: false,
-  viewerNavigation: false,
-  viewerModelTransition: false,
 };
 
 export function fullMotion(): MotionPreferences {
@@ -194,7 +178,7 @@ export function motionSettingsMarkup(
   const selected = preset ?? motionPresetFor(motion);
   const presetButton = (value: "full" | "reduced" | "custom", label: string) =>
     `<button type="button" data-action="motion-preset" data-preset="${value}" aria-pressed="${selected === value}"${value === "custom" ? " disabled" : ""}>${label}</button>`;
-  return `<section id="motion-settings" class="motion-settings" aria-label="动效设置"><div class="motion-settings-head"><div><strong>动效控制</strong><span>完整、减少或按分项自定义；关闭后会立即收束当前动画（开场设置下次重播生效）</span></div>${presetButton("full", "完整")}${presetButton("reduced", "减少")}${presetButton("custom", "自定义")}</div><details class="motion-advanced"><summary>精细设置 <span>开场 / 阵列 / 详情 / 界面 / 360° 查看器</span></summary><div class="motion-groups">${groups
+  return `<section id="motion-settings" class="motion-settings" aria-label="动效设置"><div class="motion-settings-head"><div><strong>动效控制</strong><span>完整、减少或按分项自定义；关闭后会立即收束当前动画（开场设置下次重播生效）</span></div>${presetButton("full", "完整")}${presetButton("reduced", "减少")}${presetButton("custom", "自定义")}</div><details class="motion-advanced"><summary>精细设置 <span>开场 / 阵列 / 详情 / 界面</span></summary><div class="motion-groups">${groups
     .map(
       (group) =>
         `<fieldset><legend>${group}</legend>${(

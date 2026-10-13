@@ -7,4 +7,4 @@ export const logo = `<svg viewBox="0 0 310 185" aria-label="RInBot" role="img">$
 export const bootMarkContour =
   "M295 73C295 41 273 15 240 15C221 15 207 23 192 38C186 43 181 47 176 52C127 96 103 128 70 128C38 128 15 101 15 70C15 39 37 15 70 15C103 15 127 48 156 75C182 99 208 128 240 128C273 128 295 105 295 73Z";
 
-export const brandHeading = `<h1>RInBot</h1><div>QQ 机器人框架</div><p><span>本地运行与管理</span></p>`;
+export const brandHeading = `<h1>RInBot</h1><div>QQ 机器人管理终端</div>`;

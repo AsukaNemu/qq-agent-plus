@@ -1,4 +1,4 @@
-/** SourceGraphic includes WebGL, DOM controls, frosted surfaces and the viewer. */
+/** SourceGraphic includes WebGL, DOM controls and frosted surfaces. */
 export class ScreenFinish {
   private svg: SVGSVGElement;
   private filter: SVGFilterElement;

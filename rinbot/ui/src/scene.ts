@@ -19,7 +19,8 @@ import { applyTextureQuality, resizeQuality } from "./quality-renderer";
 import { CardAppearance } from "./appearance";
 import { configureInternalOptics } from "./internal-optics";
 import { DecryptionController } from "./decryption";
-import { fileAtSlot, fileLocation } from "./data";
+import { animationNow, navigationDelta } from "./animation-speed";
+import { fileAtSlot, fileLocation, records } from "./data";
 import {
   cellKey,
   sameCell,
@@ -79,8 +80,6 @@ export class ArchiveScene {
     this.model.clear();
     this.outgoing = [];
     this.instances = [];
-    this.assemblyTemplate?.then(disposeThreeTree).catch(() => {});
-    this.assemblyTemplate = undefined;
     this.light.shadow.map?.dispose();
     for (const pass of this.composer.passes) pass.dispose();
     this.composer.dispose();
@@ -115,8 +114,8 @@ export class ArchiveScene {
   }
   setSelectedIndexAccent(onlySelected: boolean) { this.selectedIndexOnly = onlySelected; }
   private themeAttribute?: THREE.InstancedBufferAttribute;
-  get themeAmount() { return this.theme.background(performance.now() / 1000); }
-  setTheme(dark: boolean, immediate = false) { this.theme.set(dark, performance.now() / 1000, this.selectedCell, immediate); }
+  get themeAmount() { return this.theme.background(animationNow()); }
+  setTheme(dark: boolean, immediate = false) { this.theme.set(dark, animationNow(), this.selectedCell, immediate); }
   private playfield = { enabled: false, bands: quietBands(), strength: 1, flatten: 0, target: null as string | null, breathing: true };
   private flatMix = 0;
   private rhythm = new RhythmMotion();
@@ -493,74 +492,6 @@ export class ArchiveScene {
     this.loaded = true;
   }
 
-  private assemblyTemplate?: Promise<THREE.Group>;
-  async createAssemblyModel() {
-    this.assemblyTemplate ??= new GLTFLoader()
-      .loadAsync(publicAsset("assets/archive-assembly.glb"))
-      .then((gltf) => {
-        gltf.scene.updateMatrixWorld(true);
-        return gltf.scene;
-      })
-      .catch((error) => {
-        this.assemblyTemplate = undefined;
-        throw error;
-      });
-    const template = await this.assemblyTemplate;
-    const model = new THREE.Group();
-    const meshes: THREE.Mesh[] = [];
-    template.traverse((object) => {
-      if (!(object instanceof THREE.Mesh)) return;
-      const name = (object.material as THREE.Material).name.replace(
-        /\.\d+$/,
-        "",
-      );
-      const mesh = new THREE.Mesh(
-        object.geometry.clone().applyMatrix4(object.matrixWorld),
-        object.material,
-      );
-      mesh.userData.surface = name;
-      mesh.userData.assemblyPart = object.userData.assemblyPart;
-      model.add(mesh);
-      meshes.push(mesh);
-    });
-    this.appearance.prepare(model);
-    this.appearance.apply(model, 1);
-    this.appearance.setClarity(model, this.modelClarity());
-    this.appearance.setTheme(model, this.themeAmount);
-    const canvas = document.createElement("canvas");
-    canvas.width = this.labelCanvas.width;
-    canvas.height = this.labelCanvas.height;
-    canvas.getContext("2d")!.drawImage(this.labelCanvas, 0, 0);
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    texture.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
-    const label = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.99, 0.46),
-      new THREE.MeshBasicMaterial({
-        map: texture,
-        toneMapped: false,
-        transparent: true,
-        depthWrite: false,
-      }),
-    );
-    label.position.set(-1.36, 3.04, 0.255);
-    label.userData.assemblyPart = "cover";
-    label.userData.themeAmount = themeMaterial(label.material, "Printed_Canvas");
-    label.userData.themeAmount.value = this.themeAmount;
-    model.add(label);
-    meshes.push(label);
-    return {
-      model,
-      setClarity: (value: number) => this.appearance.setClarity(model, value),
-      dispose: () => {
-        for (const mesh of meshes) {
-          mesh.geometry.dispose();
-          (mesh.material as THREE.Material).dispose();
-        }
-        texture.dispose();
-      },
-    };
-  }
   setMode(mode: "hidden" | "archive" | "detail") {
     this.cancelPointer();
     this.setHover(null);
@@ -782,7 +713,7 @@ export class ArchiveScene {
     c.fillText("QQ 机器人管理终端", 25, 174);
     c.fillStyle = "#171713";
     c.font = "bold 130px MiSans";
-    c.fillText("NO." + String(index + 1).padStart(3, "0"), 22, 360);
+    c.fillText(records[index].id, 22, 360);
     c.fillRect(782, 32, 221, 39);
     c.fillStyle = "#eee9de";
     c.font = "24px MiSans";
@@ -1096,7 +1027,7 @@ export class ArchiveScene {
         if (this.archiveDrag.active) {
           if (this.motion.dragMomentum) {
             this.archiveMomentum = {
-              time: performance.now() / 1000,
+              time: animationNow(),
               motion: new ArchivePlaneMomentum(
                 { lane: this.trackCoordinate("lane", this.columnCamera.value), row: this.trackCoordinate("row", this.rail.value) },
                 this.archiveDrag.releaseVelocity(e.timeStamp, false),
@@ -1186,6 +1117,7 @@ export class ArchiveScene {
   ) {
     const elapsed = Math.max(0, time - this.last || 0.016);
     const dt = Math.min(elapsed, 0.05);
+    const transitionDt = navigationDelta(dt, Boolean(cinematic));
     this.last = time;
     this.clock = time;
     if (!this.loaded) return;
@@ -1194,14 +1126,14 @@ export class ArchiveScene {
     this.renderer.domElement.style.opacity = String(THREE.MathUtils.clamp(this.presence / .16, 0, 1));
     this.theme.beginFrame();
     themeEnvironment(this.scene, this.renderer, this.themeAmount);
-    const blend = 1 - Math.exp(-dt * (this.motion.selectionTransition ? 2.8 : 35));
-    const detailBlend = 1 - Math.exp(-dt * (this.motion.detailTransition ? 2.8 : 35));
+    const blend = 1 - Math.exp(-transitionDt * (this.motion.selectionTransition ? 2.8 : 35));
+    const detailBlend = 1 - Math.exp(-transitionDt * (this.motion.detailTransition ? 2.8 : 35));
     this.reveal = cinematic
       ? cinematic.reveal
       : THREE.MathUtils.lerp(this.reveal, this.targetReveal, blend);
     this.rotation = this.targetDetail
       ? THREE.MathUtils.lerp(this.rotation, this.targetRotation, detailBlend)
-      : returnStep(this.rotation, dt, !this.motion.detailTransition);
+      : returnStep(this.rotation, transitionDt, !this.motion.detailTransition);
     const shot = cinematic?.time ?? 29.1;
     if (cinematic) {
       this.scanTime = shot;
@@ -1234,12 +1166,12 @@ export class ArchiveScene {
     const chosen = this.cellPosition(this.selectedCell);
     const selectedRow = this.selectedCell.row;
     const selectedLane = this.selectedCell.lane;
-    damp(this.shoulder, selectedRow, this.motion.selectionTransition ? 5 : 35, dt);
-    damp(this.laneFocus, selectedLane, this.motion.selectionTransition ? 4 : 35, dt);
+    damp(this.shoulder, selectedRow, this.motion.selectionTransition ? 5 : 35, transitionDt);
+    damp(this.laneFocus, selectedLane, this.motion.selectionTransition ? 4 : 35, transitionDt);
     // A held or freely coasting plane owns both tracks; selection cannot pull it.
     if (!this.holdingArchive && !momentum) {
-      damp(this.columnCamera, chosen.x, this.motion.selectionTransition ? 3.7 : 35, dt);
-      damp(this.rail, cinematic ? 0 : -2.17 - chosen.z, this.motion.selectionTransition ? 3.7 : 35, dt);
+      damp(this.columnCamera, chosen.x, this.motion.selectionTransition ? 3.7 : 35, transitionDt);
+      damp(this.rail, cinematic ? 0 : -2.17 - chosen.z, this.motion.selectionTransition ? 3.7 : 35, transitionDt);
     }
     if (momentum) {
       this.columnCamera.value = this.trackPosition("lane", momentum.motion.lane.value);
@@ -1378,7 +1310,7 @@ export class ArchiveScene {
                 this.lift.value < 0.4
               ? 7.6
               : 4.2,
-          dt,
+          transitionDt,
         );
       }
     }
@@ -1393,7 +1325,7 @@ export class ArchiveScene {
     const detail = this.detail;
     // Keep the physical decryption timeline alive even when its model visuals
     // are disabled; the document mask uses the same timeline independently.
-    this.decryption.update(dt, detail > .78 && this.lift.value > 3.3, false,
+    this.decryption.update(transitionDt, detail > .78 && this.lift.value > 3.3, false,
       cinematic ? shot + 5 : undefined);
     this.appearance.apply(this.model, ease(this.lift.value / 0.4));
     this.appearance.setClarity(this.model, this.modelClarity());
@@ -1407,12 +1339,12 @@ export class ArchiveScene {
       const o = this.outgoing[i];
       const p = this.cellPosition(o.cell);
       const baseY = p.y + field(o.cell.row, o.cell.lane);
-      o.group.rotation.y = returnStep(o.group.rotation.y, dt, !this.motion.detailTransition);
+      o.group.rotation.y = returnStep(o.group.rotation.y, transitionDt, !this.motion.detailTransition);
       if (o.returnY !== null) {
         o.lift.value = o.returnY - baseY;
         o.lift.velocity = 0;
         if (o.group.rotation.y === 0) o.returnY = null;
-      } else damp(o.lift, 0, this.motion.detailTransition ? 4.5 : 35, dt);
+      } else damp(o.lift, 0, this.motion.detailTransition ? 4.5 : 35, transitionDt);
       o.group.position.set(
         p.x - trackX,
         baseY + o.lift.value + hoverLift(o.cell) - this.presentationDrop(o.cell),
@@ -1421,7 +1353,7 @@ export class ArchiveScene {
       const quality = ease(o.lift.value / 0.4);
       this.appearance.apply(o.group, quality);
       this.appearance.setTheme(o.group, this.theme.sample(o.cell, time), indexDim(o.lift.value));
-      o.clarity = this.motion.modelDecryption ? o.clarity * Math.exp(-dt * 9) : 0;
+      o.clarity = this.motion.modelDecryption ? o.clarity * Math.exp(-transitionDt * 9) : 0;
       this.appearance.setClarity(o.group, o.clarity);
       const { row, lane } = o.cell;
       o.group.rotation.x =
@@ -1617,7 +1549,7 @@ export class ArchiveScene {
     const cameraTransition = this.targetDetail || this.detail > 0.01
       ? this.motion.detailTransition
       : this.motion.selectionTransition;
-    const cameraBlend = cinematic ? 1 : cameraTransition ? 1 - Math.exp(-dt * 5) : 1;
+    const cameraBlend = cinematic ? 1 : cameraTransition ? 1 - Math.exp(-transitionDt * 5) : 1;
     this.camera.position.lerp(cameraPosition, cameraBlend);
     this.cameraAim.lerp(cameraAim, cameraBlend);
     this.camera.lookAt(this.cameraAim);
@@ -1768,7 +1700,6 @@ export class ArchiveScene {
     return [(p.x + 1) * this.container.clientWidth / 2, (1 - p.y) * this.container.clientHeight / 2];
   }
   get decryptionFrame() { return this.decryption.frame; }
-  finishDecryption() { this.decryption.finish(); }
   get detailVisibility() {
     return ease((this.detail - 0.25) / 0.55);
   }

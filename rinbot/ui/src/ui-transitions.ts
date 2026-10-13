@@ -84,6 +84,8 @@ export class SurfaceTransition {
 export class ContentTransition {
   private animation?: Animation;
 
+  constructor(private duration = 150) {}
+
   reveal(element: HTMLElement, reduced: boolean) {
     const opacity =
       this.animation?.playState === "running"
@@ -92,7 +94,7 @@ export class ContentTransition {
     this.cancel();
     if (!reduced)
       this.animation = element.animate([{ opacity }, { opacity: 1 }], {
-        duration: 150,
+        duration: this.duration,
         easing: enterEase,
       });
   }

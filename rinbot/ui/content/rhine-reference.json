@@ -681,6 +681,58 @@
         "后续资料可以补充旧记录，但不应抹去最初的疑问。"
       ],
       "source": "https://arknights.wiki.gg/wiki/Lone_Trail/Investigation_Reports"
+    },
+    {
+      "id": "X-041",
+      "title": "会话交接",
+      "en": "CONVERSATION HANDOFF",
+      "department": "RInBot 记忆模块",
+      "category": "会话档案",
+      "date": "运行时记录",
+      "lead": "RInBot / memory",
+      "clearance": "独立模块页",
+      "abstract": "按会话保存的延续状态，供下一轮恢复话题。交接内容仅供对应会话查看，支持过期清理与管理员显式清除。",
+      "findings": [
+        "运行开关关闭时保留数据，不注入提示词。",
+        "发送结果未知时不记录为已回复。",
+        "读取和清除需要管理员令牌；清除必须显式确认。"
+      ],
+      "source": "RInBot / memory"
+    },
+    {
+      "id": "X-042",
+      "title": "群邀请管理",
+      "en": "GROUP INVITATIONS",
+      "department": "RInBot 群邀请模块",
+      "category": "能力档案",
+      "date": "运行时记录",
+      "lead": "RInBot / group-invite",
+      "clearance": "独立模块页",
+      "abstract": "查看群邀请审批、机器人入群记录、群白名单同步与管理员通知状态。未知外部写入不会自动重试。",
+      "findings": [
+        "审批凭据不写入档案，仅以摘要用于重复事件去重。",
+        "群白名单和默认响应概率只在 QQ 明确批准后更新。",
+        "只有明确失败的管理员通知允许管理员确认后重试。"
+      ],
+      "source": "RInBot / group-invite"
+    },
+    {
+      "id": "X-043",
+      "title": "记忆整理",
+      "en": "MEMORY CONSOLIDATION",
+      "department": "RInBot 人物记忆模块",
+      "category": "会话档案",
+      "date": "运行时记录",
+      "lead": "RInBot / memory-consolidation",
+      "clearance": "独立模块页",
+      "abstract": "以指定会话中的本人近期消息作为证据，维护 QQ 身份对应的跨会话人物印象。每次成功会追加完整全局版本，并为印象保留来源会话。",
+      "findings": [
+        "只纳入指定 QQ 号本人发言，机器人和其他成员的消息不会进入提示词。",
+        "模型输出须通过 JSON 结构、内容条数和增长护栏；失败不改写原印象。",
+        "版本历史与恢复作用于该人物的跨会话全局印象，不局限于触发操作的会话。",
+        "自动新人发现、触发阈值、冷却、后台调度与恢复验收仍受服务端门槛控制。"
+      ],
+      "source": "RInBot / memory-consolidation"
     }
   ]
 }

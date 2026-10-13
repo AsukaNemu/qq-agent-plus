@@ -19,7 +19,7 @@ export type Sound =
   | "inspect"
   | "explode"
   | "assemble";
-export type SoundScene = "boot" | "archive" | "detail" | "viewer";
+export type SoundScene = "boot" | "archive" | "detail";
 export type AudioPreferences = {
   sound: boolean;
   music: boolean;
@@ -562,7 +562,6 @@ export class TerminalAudio {
       boot: [0.48, 0.32, 0.18],
       archive: [0.9, 0.72, 0.65],
       detail: [0.72, 0.36, 0.12],
-      viewer: [0.8, 0.24, 0.28],
     }[this.scene];
     this.stemGains.forEach((g, i) =>
       level(g.gain, gains[i], this.context!.currentTime, 1.1),

@@ -12,7 +12,6 @@
     { "path": "src/archive-loop.ts", "role": "cyclic archive navigation reference" },
     { "path": "src/decryption.ts", "role": "layered detail reveal reference" },
     { "path": "src/document-decryption.ts", "role": "document detail state reference" },
-    { "path": "src/model-viewer.ts", "role": "resource preview interaction currently used by RInBot" },
     { "path": "src/style.css", "role": "warm terminal layout and typography reference" },
     { "path": "src/theme.css", "role": "light/dark surface mapping reference" },
     { "path": "src/fonts.css", "role": "font-face and subset loading reference" },
@@ -22,7 +21,6 @@
     { "path": "public/fonts/misans-webfont-4.3.1/demibold/0.woff2", "sha256": "c453965f2d97503c4684dccf8d4ad7c572cd506fa06f5eb5ecd8c85a3a3a4dfc", "role": "runtime Latin emphasis font" },
     { "path": "public/fonts/misans-webfont-4.3.1/bold/0.woff2", "sha256": "a2b0b0bf4b486ae0763e452b1d8fa4d90aa3a2bacf524afaa2b86423cb103904", "role": "runtime Latin strong font" },
     { "path": "public/fonts/NOTICE.txt", "sha256": "68056442ee9108f4898b193b18d1f6f3aa34c782901ec27ba85875627e2a02ff", "role": "font license notice" },
-    { "path": "public/assets/archive-assembly.glb", "sha256": "d411170676f55a327c286e67e462f98b446667811c725318bab85657eaee06ec", "role": "direct 3D archive assembly" },
     { "path": "public/assets/archive-cassette.glb", "sha256": "dda42b9b3b471d11c69820a64084d254a64b27761287ab0e35dd8387ec0a0bed", "role": "direct 3D archive cassette" },
     { "path": "public/favicon.svg", "sha256": "c495851e461b6e24687eced8e517b2dad0f93bdc3a61f9a7d575ce0e31182513", "role": "direct RhineLabUI favicon" },
     { "path": "public/icons/app-icon.svg", "sha256": "a8f184c878802c50f7f3d07c858f66bb301567403ef97aef94260bbe1f710d8e", "role": "direct RhineLabUI app icon" },
@@ -33,8 +31,11 @@
   "runtimeAssets": {
     "font": "public/fonts/",
     "icons": ["public/favicon.svg", "src/brand.ts"],
-    "models": ["public/assets/archive-assembly.glb", "public/assets/archive-cassette.glb"],
+    "models": ["public/assets/archive-cassette.glb"],
     "audio": "public/audio/"
   },
-  "policy": "Only files copied into this project or explicitly listed here may become runtime visual assets. No main-branch tracking."
+  "retiredAssets": [
+    { "path": "reference/rhinelabui/retired-assets/archive-assembly.glb", "sha256": "d411170676f55a327c286e67e462f98b446667811c725318bab85657eaee06ec", "role": "retired standalone model viewer; reference only, not published" }
+  ],
+  "policy": "Only files copied into this project or explicitly listed here may become runtime visual assets. No main-branch tracking. Retired assets are reference-only."
 }

@@ -1,4 +1,66 @@
 .runtime-inline { margin-top: 24px; padding-top: 14px; border-top: 1px solid color-mix(in srgb, currentColor 22%, transparent); }
+.detail-content .detail-rule { margin: 18px 0 16px; }
+.detail-content .tab-panel { height: auto; min-height: 160px; overflow: visible; padding-top: 14px; }
+.detail-tabs { gap: 18px; flex-wrap: wrap; }
+.detail-tabs button span { margin-left: 0; }
+.detail-tabs button { min-height: 36px; }
+.detail-content .runtime-inline:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.detail-content .incident-list { margin-top: 12px; }
+.incident-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 6px; }
+.incident-heading span { font-size: 11px; color: var(--theme-muted, #77756d); }
+.message-text { white-space: pre-wrap; text-align: left !important; }
+.archive-pagination { margin-top: 16px; }
+.archive-pagination button { min-height: 32px; border-bottom: 1px solid currentColor; }
+.archive-pagination button:disabled, .runtime-inline button:disabled { opacity: .45; cursor: not-allowed; }
+#workspace-notice:not(:empty) { margin: 12px 0; padding: 10px; border-left: 2px solid #a2704e; font-size: 12px; line-height: 1.6; }
+.runtime-row select { box-sizing: border-box; width: 100%; min-width: 0; color: inherit; background: color-mix(in srgb, currentColor 5%, transparent); border: 1px solid color-mix(in srgb, currentColor 24%, transparent); padding: 7px; font: inherit; }
+.runtime-row[hidden] { display: none !important; }
+.brand p { font-size: 14px; line-height: 1.3; margin: 5px 0 0; }
+.brand > .rinbot-bridge { font-size: 11px; line-height: 1.4; font-weight: 400; margin-top: 8px; }
+.management-navigation { top: 230px; }
+[data-layout="desktop"] .detail-content { top: 345px; max-height: calc(100% - 425px); }
+[data-layout="desktop"] .back-button { top: 345px; }
+.detail-tabs { flex-wrap: nowrap; overflow-x: auto; }
+.detail-tabs button { flex-shrink: 0; white-space: nowrap; }
+[data-fallback="2d"] .object-caption { display: none; }
+[data-fallback="2d"][data-layout="desktop"] .detail-content { left: 24%; width: 68%; }
+[data-fallback="2d"]:is([data-layout="compact"], [data-layout="portrait"]) .detail-content { left: var(--edge); right: var(--edge); width: auto; top: 230px; }
+.workspace-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.workspace-bookmark { font-size: 11px; white-space: nowrap; padding: 8px 0; }
+.incident-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(105px, 1fr)); gap: 8px; }
+.incident-summary > span, .incident-card { border: 1px solid color-mix(in srgb, currentColor 18%, transparent); padding: 10px 12px; }
+.incident-summary b { display: block; margin-top: 4px; font-size: 1.15em; }
+.incident-list { display: grid; gap: 10px; }
+.incident-card { display: grid; gap: 8px; }
+.sticker-preview-wrap { display: grid; justify-items: start; gap: 8px; }
+.sticker-preview { display: block; max-width: min(240px, 100%); max-height: 240px; object-fit: contain; border: 1px solid color-mix(in srgb, currentColor 18%, transparent); background: color-mix(in srgb, currentColor 4%, transparent); }
+.sticker-create { display: grid; gap: 8px; padding: 12px; border: 1px solid color-mix(in srgb, currentColor 18%, transparent); }
+.incident-card-head, .incident-meta, .incident-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.incident-card-head span, .incident-meta { color: color-mix(in srgb, currentColor 68%, transparent); font-size: .9em; }
+.incident-card p { margin: 0; overflow-wrap: anywhere; }
+.incident-card details { min-width: 0; }
+.incident-card details summary { cursor: pointer; color: color-mix(in srgb, currentColor 72%, transparent); }
+.incident-card details pre { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px; background: color-mix(in srgb, currentColor 5%, transparent); font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.incident-meta span { overflow-wrap: anywhere; }
+.incident-actions { justify-content: flex-start; flex-wrap: wrap; }
+@media (max-width: 600px) { .incident-card-head, .incident-meta { align-items: flex-start; flex-direction: column; } }
 .runtime-row { display: grid; grid-template-columns: minmax(120px, .7fr) minmax(0, 1.3fr); gap: 14px; padding: 7px 0; border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent); font-size: 12px; }
 .runtime-row span { color: var(--theme-muted, #77756d); font-family: monospace; font-size: 10px; letter-spacing: .04em; }
 .runtime-row b { font-weight: 500; overflow-wrap: anywhere; }
+.runtime-row input { box-sizing: border-box; width: 100%; min-width: 0; padding: 7px 9px; color: inherit; background: color-mix(in srgb, currentColor 5%, transparent); border: 1px solid color-mix(in srgb, currentColor 24%, transparent); border-radius: 2px; font: inherit; }
+.runtime-row input[type="checkbox"] { width: 18px; height: 18px; justify-self: end; accent-color: var(--theme-ink, #292b24); }
+.runtime-row textarea { box-sizing: border-box; width: 100%; min-width: 0; padding: 8px 9px; color: inherit; background: color-mix(in srgb, currentColor 5%, transparent); border: 1px solid color-mix(in srgb, currentColor 24%, transparent); border-radius: 2px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical; }
+@media (max-width: 600px) { .runtime-row { grid-template-columns: 1fr; gap: 5px; } }
+.runtime-row.runtime-json-setting { align-items: start; }
+.runtime-json-setting textarea { box-sizing: border-box; width: 100%; min-height: 190px; padding: 10px; color: inherit; background: color-mix(in srgb, currentColor 5%, transparent); border: 1px solid color-mix(in srgb, currentColor 24%, transparent); border-radius: 2px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical; }
+.runtime-inline > .solid-button { margin-top: 12px; }
+.runtime-inline > small[role="status"] { display: block; min-height: 1.4em; margin-top: 8px; color: var(--theme-muted, #77756d); }
+.relationship-trace {
+  max-height: 28rem;
+  overflow: auto;
+  padding: 0.8rem;
+  border: 1px solid var(--line, #aaa);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-align: left;
+}

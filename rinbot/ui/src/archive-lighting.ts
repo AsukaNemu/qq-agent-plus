@@ -3,7 +3,7 @@ import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 
 export type LightingLook = "baseline" | "refined";
 
-// The archive and its independent viewer use the same studio illumination.
+// Studio illumination for the archive array and its selected card.
 // Each renderer needs its own PMREM render target / WebGL texture.
 export function createArchiveLighting(
   renderer: THREE.WebGLRenderer,
