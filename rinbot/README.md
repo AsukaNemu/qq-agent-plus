@@ -236,3 +236,11 @@ RINBOT_NAPCAT_READ_REPORT=/absolute/new/napcat-live-read.json \
 cargo test --manifest-path rinbot/Cargo.toml --release --locked --test napcat_live_read \
   -- --include-ignored --nocapture
 ```
+
+## Rust 构建环境（维护更新 2026-10-16）
+
+最低 Rust 版本为 1.88。旧的 Rust 1.82 依赖固定值包含 `time` 日期解析和
+`quick-xml` XML 解析的已公开拒绝服务问题；升级后的 `plist` / `time` 需要更新编译工具链。
+`Cargo.lock` 同时更新 `rustls` 的安全修复。CI 验证最低工具链和 stable。
+
+这次更新仅涉及构建依赖与检查。生产切换仍以迁移验收门槛和独立运行证据为准。

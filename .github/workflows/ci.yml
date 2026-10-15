@@ -66,3 +66,41 @@ jobs:
           node test/render-test.mjs
           node test/scroll-test.mjs
           node test/usage-e2e.mjs
+
+  rinbot-ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rinbot/ui
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: rinbot/ui/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check:content
+      - run: npm run build
+      - run: npm audit --audit-level=high
+
+  rinbot-rust:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ['1.88.0', stable]
+    defaults:
+      run:
+        working-directory: rinbot
+    steps:
+      - uses: actions/checkout@v5
+      - name: 安装 Rust 工具链
+        run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal --component rustfmt
+      - name: 安装媒体测试依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg libclang-dev
+      - if: matrix.toolchain == 'stable'
+        run: cargo +${{ matrix.toolchain }} fmt --all -- --check
+      - run: cargo +${{ matrix.toolchain }} test --locked --jobs 2
