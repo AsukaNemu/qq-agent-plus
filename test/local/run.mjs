@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const CASES = [
   'test-inline-fallback.mjs',
@@ -21,7 +22,7 @@ const CASES = [
   'test-card-segments.mjs'
 ];
 
-const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
+const here = path.dirname(fileURLToPath(import.meta.url));
 let failed = 0;
 
 // 每个用例一个全新的临时数据目录：用例之间互不污染，也保证单个用例重跑时的行为可预期。

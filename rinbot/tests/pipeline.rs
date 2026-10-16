@@ -312,7 +312,7 @@ impl MessageGateway for FakeGateway {
         self.image_reads.fetch_add(1, Ordering::SeqCst);
         if self
             .image_read_failures
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                 remaining.checked_sub(1)
             })
             .is_ok()

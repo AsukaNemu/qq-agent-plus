@@ -11,7 +11,7 @@
 //       绝不能指向生产数据目录。
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const dataDir = process.env.QQ_AGENT_DATA_DIR;
 if (!dataDir) {
@@ -28,7 +28,7 @@ fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify({
   }
 }));
 
-const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
+const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..');
 const { QzoneInteractionManager } = await import(
   pathToFileURL(path.join(repoRoot, 'src', 'features', 'qzone-interactions.js')).href
