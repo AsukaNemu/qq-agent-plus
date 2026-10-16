@@ -582,6 +582,36 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn silk_legacy_fixture_decodes_identically_with_and_without_tencent_prefix() {
+        use sha2::{Digest, Sha256};
+
+        let fixture = include_bytes!("../../tests/fixtures/silk-v0.2-triangle.silk");
+        assert_eq!(fixture[0], 2);
+        for input in [fixture.as_slice(), &fixture[1..]] {
+            let pcm = audio_buffer_to_pcm(input, "voice.silk", OsStr::new("missing-ffmpeg"))
+                .await
+                .unwrap();
+            assert_eq!(pcm.len(), 3_200);
+            assert_eq!(
+                format!("{:x}", Sha256::digest(&pcm)),
+                "ae238ad80ffc1c447aeafe02639ee382ab909375b0f7f3416733090018cf462f"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn truncated_silk_fixture_is_rejected_before_native_decode() {
+        let fixture = include_bytes!("../../tests/fixtures/silk-v0.2-triangle.silk");
+        let result = audio_buffer_to_pcm(
+            &fixture[..fixture.len() - 1],
+            "voice.silk",
+            OsStr::new("missing-ffmpeg"),
+        )
+        .await;
+        assert!(matches!(result, Err(AsrError::InvalidSilk)));
+    }
+
     #[test]
     fn silence_does_not_generate_speech_caveat() {
         assert!(speech_caveat(&vec![0; 4 * PCM_BYTES_PER_SECOND]).is_empty());

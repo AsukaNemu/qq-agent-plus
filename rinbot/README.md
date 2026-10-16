@@ -243,4 +243,11 @@ cargo test --manifest-path rinbot/Cargo.toml --release --locked --test napcat_li
 `quick-xml` XML 解析的已公开拒绝服务问题；升级后的 `plist` / `time` 需要更新编译工具链。
 `Cargo.lock` 同时更新 `rustls` 的安全修复。CI 验证最低工具链和 stable。
 
-这次更新仅涉及构建依赖与检查。生产切换仍以迁移验收门槛和独立运行证据为准。
+`scraper` 更新到 0.27，移除未维护的 `fxhash`。上游 `silk-rs` 没有发布新的绑定版本，
+因此将 0.2.0 的原始源码保留在 `vendor/silk-rs`，仅更新其 `bindgen` 构建依赖并关闭
+不需要的 CLI/logger 默认特性，移除 `atty` / `ansi_term`。C 编解码器和 Rust 运行时代码
+保持原样，来源、许可和文件哈希见该目录的 `MAINTENANCE.md`。
+ASR 回归验证旧版生成的合成 SILK 样本在 QQ 前缀/标准头两种形式下产生相同 PCM。
+
+CI 额外执行 `cargo audit --deny warnings`，覆盖漏洞及未维护/健全性告警。
+生产切换仍以迁移验收门槛和独立运行证据为准。
