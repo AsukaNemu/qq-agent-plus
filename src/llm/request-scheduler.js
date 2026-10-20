@@ -35,6 +35,13 @@ export function modelHttpError(response, text) {
   return error;
 }
 
+function cooldownError(until, now) {
+  const wait = Math.max(1, until - now);
+  return Object.assign(new Error(`模型 API HTTP 429：模型冷却中，${Math.ceil(wait / 1000)} 秒后可重试`), {
+    status: 429, retryAt: until, retryAfterMs: wait
+  });
+}
+
 function waitForTurn(promise, signal) {
   signal?.throwIfAborted();
   if (!signal) return promise;
@@ -87,8 +94,9 @@ export class RequestScheduler {
     const queueController = new AbortController();
     const queueSignal = signal ? AbortSignal.any([signal, queueController.signal]) : queueController.signal;
     const queueTimer = queueTimeoutMs > 0 ? setTimeout(() => {
-      const error = new Error(`模型排队超时（${queueTimeoutMs}ms）`);
-      error.code = 'MODEL_QUEUE_TIMEOUT';
+      const now = this.now();
+      const error = state.cooldownUntil > now ? cooldownError(state.cooldownUntil, now)
+        : Object.assign(new Error(`模型排队超时（${queueTimeoutMs}ms）`), { code: 'MODEL_QUEUE_TIMEOUT' });
       queueController.abort(error);
     }, queueTimeoutMs) : null;
     try {
@@ -98,14 +106,11 @@ export class RequestScheduler {
         const now = this.now();
         const remaining = Math.max(state.cooldownUntil, serialize ? state.nextStartAt : 0) - now;
         if (remaining <= 0) break;
-        // A long quota reset cannot be completed within this request's budget.
-        // Return the cooldown instead of turning it into a retryable timeout.
-        if (state.cooldownUntil - now >= deadline - now) {
-          const error = new Error(`模型 API HTTP 429：模型冷却中，${Math.ceil((state.cooldownUntil - now) / 1000)} 秒后可重试`);
-          error.status = 429;
-          error.retryAt = state.cooldownUntil;
-          error.retryAfterMs = state.cooldownUntil - now;
-          throw error;
+        // A known limit beyond either budget stays 429, so routing can try
+        // another model or wait for the pool without treating it as a timeout.
+        if (state.cooldownUntil > now && (state.cooldownUntil >= deadline
+          || (queueTimeoutMs > 0 && state.cooldownUntil - now >= queueTimeoutMs))) {
+          throw cooldownError(state.cooldownUntil, now);
         }
         await this.sleep(Math.min(remaining, 2147483647), queueSignal);
       }

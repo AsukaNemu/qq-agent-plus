@@ -310,7 +310,7 @@ async function runCompletionWithRetries(args, retries) {
       }
       const wait = 1000 * Math.pow(2, attempt);   // 1s, 2s
       console.warn(`[llm] 请求失败（第 ${attempt + 1} 次尝试），${wait}ms 后重试：${error?.message ?? error}`);
-      await delay(wait, undefined, { signal: args.signal });
+      await delay(wait, undefined, { signal: args.signal ?? undefined });
     }
   }
   throw lastError;
@@ -344,9 +344,37 @@ function pickFallback(args) {
 /**
  * 带重试 + 兜底模型的对话请求。
  * 主模型彻底失败（重试耗尽 / 认证欠费类错误），或两轮都被服务商审核拦下时，
- * 自动改用 config.api.fallback 里配置的备用模型再试一次（只切一次，不递归）。
+ * 自动改用 config.api.fallback 里配置的备用模型（每轮只切一次，不递归）。
+ * 所有通道都短暂冷却时，最多等 60 秒再尝试一轮；调用方取消信号约束整个过程。
  */
 export async function chatCompletionWithRetry(args, retries = 2) {
+  try {
+    return await runCompletionWithFallback(args, retries);
+  } catch (error) {
+    if (args.signal?.aborted || !isRateLimitError(error)) throw error;
+    const routes = args.overrides?.visionRequest
+      ? activeVisionModels(args.overrides).map((model) => ({ ...args.overrides, model }))
+      : args.overrides ? [] : [effectiveApi(), pickFallback(args)].filter(Boolean);
+    const unique = new Map(routes.map((api) => [requestScheduler.stateKey(api), api]));
+    const waits = [...unique.values()].map((api) => requestScheduler.availability(api).cooldownMs);
+    // A short shared cooldown can recover within the caller's cancellation
+    // budget. Retry the pool once; hour/day quota resets stay explicit 429s.
+    if (waits.length < 2 || waits.some((wait) => wait <= 0)) throw error;
+    const wait = Math.ceil(Math.min(...waits));
+    if (wait > 60000) throw error;
+    console.warn(`[llm] 所有模型通道都在冷却，等待最早恢复的通道：${Math.ceil(wait / 1000)} 秒，最多再尝试一轮`);
+    try {
+      await delay(wait, undefined, { signal: args.signal ?? undefined });
+    } catch (waitError) {
+      throw args.signal?.reason ?? waitError;
+    }
+  }
+  // Deliberately outside the catch above: persistent throttling must not turn
+  // into an unbounded recovery loop or restart a cancelled request.
+  return runCompletionWithFallback(args, retries);
+}
+
+async function runCompletionWithFallback(args, retries) {
   let response = null;
   let primaryError = null;
   try {

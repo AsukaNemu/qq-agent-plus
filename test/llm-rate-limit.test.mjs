@@ -79,6 +79,15 @@ test('cooldowns are scoped to provider, credential and model; long resets stay 4
   }
 });
 
+test('a known cooldown beyond the queue budget stays 429 without waiting or sending', async () => {
+  const scheduler = new RequestScheduler({ now: () => 0, sleep: async () => assert.fail('do not queue behind a known limit') });
+  await assert.rejects(scheduler.run(api, {}, async () => {
+    throw Object.assign(new Error('limited'), { status: 429, retryAt: 1000 });
+  }));
+  await assert.rejects(scheduler.run(api, { queueTimeoutMs: 10, deadline: 5000 }, async () => assert.fail('still cooling')),
+    (error) => error.status === 429 && error.retryAt === 1000);
+});
+
 test('cancelling a queued request does not send it or allow another to bypass the active one', async () => {
   const scheduler = new RequestScheduler();
   const first = deferred();
@@ -129,6 +138,84 @@ function mockFetch(t, fn) {
   globalThis.fetch = fn;
 }
 
+function configureFallback() {
+  const cfg = configure();
+  cfg.api.timeoutMs = 5000;
+  cfg.api.queueTimeoutMs = 10;
+  cfg.api.fallback = { enabled: true, model: 'backup', timeoutMs: 5000 };
+  setRuntimeConfig(cfg);
+  return cfg;
+}
+
+test('both chat routes cooling down wait once and recover on the primary', async (t) => {
+  configureFallback();
+  const seen = [];
+  let limitedAt = 0;
+  mockFetch(t, async (_url, options) => {
+    const model = JSON.parse(options.body).model;
+    seen.push(model);
+    if (seen.length <= 2) {
+      limitedAt ||= Date.now();
+      return new Response('busy', { status: 429, headers: { 'Retry-After': '0.08' } });
+    }
+    assert.ok(Date.now() - limitedAt >= 70, 'respect the shared provider cooldown');
+    return ok();
+  });
+  const result = await chatCompletionWithRetry({ messages: [] });
+  assert.equal(result.message.content, 'ok');
+  assert.deepEqual(seen, ['chat', 'backup', 'chat']);
+});
+
+test('persistent rate limits get only one pool recovery round', async (t) => {
+  configureFallback();
+  const seen = [];
+  mockFetch(t, async (_url, options) => {
+    seen.push(JSON.parse(options.body).model);
+    return new Response('busy', { status: 429, headers: { 'Retry-After': '0.08' } });
+  });
+  await assert.rejects(chatCompletionWithRetry({ messages: [] }), (error) => error.status === 429);
+  assert.deepEqual(seen, ['chat', 'backup', 'chat', 'backup']);
+});
+
+test('pool recovery is cancellable and does not send after cancellation', async (t) => {
+  configureFallback();
+  const controller = new AbortController();
+  let calls = 0;
+  mockFetch(t, async () => {
+    if (++calls === 2) setTimeout(() => controller.abort(new Error('cancelled')), 15);
+    return new Response('busy', { status: 429, headers: { 'Retry-After': '0.08' } });
+  });
+  await assert.rejects(chatCompletionWithRetry({ messages: [], signal: controller.signal }), /cancelled|abort/i);
+  assert.equal(calls, 2);
+});
+
+test('hour-long resets on both routes fail with 429 without a recovery round', async (t) => {
+  configureFallback();
+  let calls = 0;
+  mockFetch(t, async () => {
+    calls++;
+    return new Response('busy', { status: 429, headers: { 'Retry-After': '3600' } });
+  });
+  await assert.rejects(chatCompletionWithRetry({ messages: [] }), (error) => error.status === 429);
+  assert.equal(calls, 2);
+});
+
+test('the priority vision pool also recovers once after both routes cool down', async (t) => {
+  const cfg = configure();
+  Object.assign(cfg.api.visionModel, { models: ['vision-backup'], strategy: 'priority',
+    queueTimeoutMs: 10, timeoutMs: 5000, fallbackTimeoutMs: 5000 });
+  setRuntimeConfig(cfg);
+  const seen = [];
+  mockFetch(t, async (_url, options) => {
+    seen.push(JSON.parse(options.body).model);
+    return seen.length <= 2
+      ? new Response('busy', { status: 429, headers: { 'Retry-After': '0.08' } })
+      : ok();
+  });
+  assert.equal(await describeImages(['data:image/png;base64,test']), 'ok');
+  assert.deepEqual(seen, ['vision', 'vision-backup', 'vision']);
+});
+
 test('a real 429 response delays retry and another vision request while main chat continues', async (t) => {
   configure();
   const first = deferred();
@@ -175,6 +262,14 @@ test('vision queue holds its turn until the response body is fully consumed', as
   assert.equal(calls, 1);
   finish.resolve();
   await Promise.all([a, b]);
+  assert.equal(calls, 2);
+});
+
+test('an image scan with its default null signal can retry a transient network failure', async (t) => {
+  configure();
+  let calls = 0;
+  mockFetch(t, async () => ++calls === 1 ? new Response('temporary', { status: 502 }) : ok());
+  assert.equal(await describeImages(['data:image/png;base64,test']), 'ok');
   assert.equal(calls, 2);
 });
 
