@@ -114,6 +114,7 @@ function effectiveApi() {
  *   - 主动中止（abort）
  */
 export function isRetryableError(error) {
+  if (error?.code === 'MODEL_ACCOUNT_RESTRICTED') return false;
   if (error?.code === 'TIME_CONTROL_INACTIVE') return false;
   if (error?.code === 'EMPTY_MODEL_ACTION') return true;
   const msg = String(error?.message ?? error ?? '');
@@ -392,7 +393,14 @@ async function runCompletionWithFallback(args, retries) {
   const shouldFallback = primaryError
     ? isFallbackWorthy(primaryError)
     : isModerationRefusal(response);
-  const fb = shouldFallback ? pickFallback(args) : null;
+  let fb = shouldFallback ? pickFallback(args) : null;
+  if (fb && primaryError?.code === 'MODEL_ACCOUNT_RESTRICTED') {
+    const primary = effectiveApi();
+    const endpoint = (api) => String(api.baseUrl || '').trim().replace(/\/+$/, '');
+    if (endpoint(primary) === endpoint(fb) && String(primary.apiKey || '') === String(fb.apiKey || '')) {
+      fb = null;
+    }
+  }
   if (!fb || args.signal?.aborted) {
     if (primaryError) throw primaryError;
     return response;

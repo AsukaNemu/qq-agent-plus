@@ -28,6 +28,16 @@ export function retryAfterMs(response, text, now = Date.now()) {
 export function modelHttpError(response, text) {
   const error = new Error(`模型 API HTTP ${response.status}：${text.slice(0, 500)}`);
   error.status = response.status;
+  if (response.status === 403) {
+    try {
+      const detail = JSON.parse(text)?.error;
+      if (detail?.code === 'ACCOUNT_RESTRICTED' || detail?.type === 'account_restricted') {
+        error.code = 'MODEL_ACCOUNT_RESTRICTED';
+        error.providerCode = detail.provider_code;
+        error.retryable = false;
+      }
+    } catch { /* Ordinary 403s retain their existing handling. */ }
+  }
   if (response.status === 429) {
     error.retryAfterMs = retryAfterMs(response, text);
     error.retryAt = Date.now() + error.retryAfterMs;

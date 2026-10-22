@@ -147,6 +147,62 @@ function configureFallback() {
   return cfg;
 }
 
+const restricted = () => Response.json({ error: {
+  code: 'ACCOUNT_RESTRICTED', type: 'account_restricted', provider_code: 11140,
+  retryable: false, message: 'Account restricted; manual recovery required'
+} }, { status: 403 });
+
+test('account restrictions retain provider metadata and stop same-credential fallback', async (t) => {
+  configureFallback();
+  const error = modelHttpError(restricted(), JSON.stringify({ error: {
+    code: 'ACCOUNT_RESTRICTED', provider_code: 11140
+  } }));
+  assert.equal(error.code, 'MODEL_ACCOUNT_RESTRICTED');
+  assert.equal(error.providerCode, 11140);
+  assert.equal(error.retryable, false);
+  const seen = [];
+  mockFetch(t, async (_url, options) => { seen.push(JSON.parse(options.body).model); return restricted(); });
+  await assert.rejects(chatCompletionWithRetry({ messages: [] }), (error) => error.code === 'MODEL_ACCOUNT_RESTRICTED');
+  assert.deepEqual(seen, ['chat']);
+});
+
+test('an independently configured fallback credential remains eligible', async (t) => {
+  const cfg = configureFallback();
+  cfg.api.apiKey = 'primary-test-key';
+  cfg.api.fallback.apiKey = 'independent-test-key';
+  setRuntimeConfig(cfg);
+  const seen = [];
+  mockFetch(t, async (_url, options) => {
+    const model = JSON.parse(options.body).model;
+    seen.push(model);
+    return model === 'chat' ? restricted() : ok();
+  });
+  assert.equal((await chatCompletionWithRetry({ messages: [] })).message.content, 'ok');
+  assert.deepEqual(seen, ['chat', 'backup']);
+});
+
+test('ordinary request-level 403s retain their existing fallback policy', async (t) => {
+  configureFallback();
+  const seen = [];
+  mockFetch(t, async (_url, options) => {
+    const model = JSON.parse(options.body).model;
+    seen.push(model);
+    return model === 'chat' ? new Response('request content rejected', { status: 403 }) : ok();
+  });
+  await chatCompletionWithRetry({ messages: [] });
+  assert.deepEqual(seen, ['chat', 'backup']);
+});
+
+test('vision does not try a second model on an account restriction', async (t) => {
+  const cfg = configure();
+  Object.assign(cfg.api.visionModel, { strategy: 'priority', models: ['vision-backup'] });
+  setRuntimeConfig(cfg);
+  let calls = 0;
+  mockFetch(t, async () => { calls++; return restricted(); });
+  await assert.rejects(describeImages(['data:image/png;base64,test']), (error) => error.code === 'MODEL_ACCOUNT_RESTRICTED');
+  assert.equal(calls, 1);
+});
+
 test('both chat routes cooling down wait once and recover on the primary', async (t) => {
   configureFallback();
   const seen = [];
