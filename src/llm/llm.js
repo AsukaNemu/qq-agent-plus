@@ -113,7 +113,16 @@ function effectiveApi() {
  *   - HTTP 4xx：401 密钥错、400 请求体错、403 无权限、404 模型不存在
  *   - 主动中止（abort）
  */
+function conservativeRequests() {
+  return getConfig()?.api?.conservativeRequests === true;
+}
+
+function isModelTimeout(error) {
+  return error?.code === 'MODEL_QUEUE_TIMEOUT' || error?.code === 'MODEL_REQUEST_TIMEOUT';
+}
+
 export function isRetryableError(error) {
+  if (conservativeRequests()) return false;
   if (error?.code === 'MODEL_ACCOUNT_RESTRICTED') return false;
   if (error?.code === 'TIME_CONTROL_INACTIVE') return false;
   if (error?.code === 'EMPTY_MODEL_ACTION') return true;
@@ -275,7 +284,7 @@ async function runCompletionWithRetries(args, retries) {
     try {
       args.signal?.throwIfAborted();
       const response = await chatCompletion(args);
-      if (!moderationRetried && isModerationRefusal(response)) {
+      if (!conservativeRequests() && !moderationRetried && isModerationRefusal(response)) {
         moderationRetried = true;
         args = { ...args, messages: trimForModerationRetry(args.messages) };
         console.warn('[llm] 服务商审核拦截整次请求，改用精简上下文重试一次');
@@ -285,6 +294,18 @@ async function runCompletionWithRetries(args, retries) {
       return response;
     } catch (error) {
       lastError = error;
+      if (conservativeRequests()) {
+        // A vision pool keeps one timeout fallback, without resending a
+        // rejected/limited request or replaying the same model.
+        if (args.signal?.aborted || attempt >= retries || !isModelTimeout(error)
+          || args.overrides?.visionStrategy !== 'priority') throw error;
+        const models = activeVisionModels(args.overrides);
+        const failed = new Set(args.overrides.visionFailedModels || []);
+        failed.add(error.requestedModel || args.overrides.model);
+        if (models.every((model) => failed.has(model))) throw error;
+        args = { ...args, overrides: { ...args.overrides, visionFailedModels: [...failed] } };
+        continue;
+      }
       if (args.signal?.aborted || attempt >= retries || !isRetryableError(error)) throw error;
       const timeout = error?.code === 'MODEL_QUEUE_TIMEOUT' || error?.code === 'MODEL_REQUEST_TIMEOUT'
         || /超时|timeout|timed out/i.test(String(error?.message || ''));
@@ -352,6 +373,7 @@ export async function chatCompletionWithRetry(args, retries = 2) {
   try {
     return await runCompletionWithFallback(args, retries);
   } catch (error) {
+    if (conservativeRequests()) throw error;
     if (args.signal?.aborted || !isRateLimitError(error)) throw error;
     const routes = args.overrides?.visionRequest
       ? activeVisionModels(args.overrides).map((model) => ({ ...args.overrides, model }))
@@ -390,9 +412,9 @@ async function runCompletionWithFallback(args, retries) {
 
   recordAllUsage(args, response);
 
-  const shouldFallback = primaryError
-    ? isFallbackWorthy(primaryError)
-    : isModerationRefusal(response);
+  const shouldFallback = conservativeRequests()
+    ? isModelTimeout(primaryError)
+    : primaryError ? isFallbackWorthy(primaryError) : isModerationRefusal(response);
   let fb = shouldFallback ? pickFallback(args) : null;
   if (fb && primaryError?.code === 'MODEL_ACCOUNT_RESTRICTED') {
     const primary = effectiveApi();
@@ -486,7 +508,8 @@ export async function chatCompletion({
 }) {
   assertTimeAllowed();
   signal?.throwIfAborted();
-  const api = selectVisionModel(overrides || effectiveApi(), (candidate) => requestScheduler.availability(candidate));
+  const api = selectVisionModel(overrides || effectiveApi(), (candidate) => conservativeRequests()
+    ? { cooldownMs: 0 } : requestScheduler.availability(candidate));
   // 聊天这类"随口回一句"的任务关掉思考：省一半输出 token、少 1~3 秒；
   // 判断/写作类（表情包要不要收、说说、空间互动、身份评估）不传 purpose，继续思考。
   const thinking = thinkingFor(purpose, overrides);
@@ -597,7 +620,7 @@ export async function chatCompletion({
         // reasoning_effort、enable_thinking 三个族，结构化错误的 error.param 值也在响应体里）。
         // 别用 invalid/unknown/unexpected 这类泛词：上下文超长等无关 400 的错误体几乎都带
         // "invalid_request_error"，会误判成参数被拒——白重试一次还打误导日志（审查 2026-09-28）。
-        const paramRejected = res.status === 400 && patchKeys.length
+        const paramRejected = !conservativeRequests() && res.status === 400 && patchKeys.length
           && /thinking|reasoning/i.test(text);
         if (paramRejected) {
           const retryBody = { ...body };

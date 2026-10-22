@@ -11,7 +11,7 @@ process.env.QQ_AGENT_DATA_DIR = dir;
 after(() => fs.rmSync(dir, { recursive: true, force: true }));
 const { RequestScheduler, retryAfterMs, modelHttpError } = await import('../src/llm/request-scheduler.js');
 const { DEFAULT_CONFIG, setRuntimeConfig } = await import('../src/core/config.js');
-const { chatCompletion, chatCompletionWithRetry } = await import('../src/llm/llm.js');
+const { chatCompletion, chatCompletionWithRetry, isRetryableError } = await import('../src/llm/llm.js');
 const { describeImages, visionModelOverride } = await import('../src/llm/vision-scan.js');
 const api = { baseUrl: 'https://vision.test/v1', model: 'vision', apiKey: 'test' };
 const deferred = () => {
@@ -146,6 +146,83 @@ function configureFallback() {
   setRuntimeConfig(cfg);
   return cfg;
 }
+
+function configureConservative() {
+  const cfg = configureFallback();
+  cfg.api.conservativeRequests = true;
+  setRuntimeConfig(cfg);
+  return cfg;
+}
+
+test('conservative requests do not retry or change models after rejections, limits or server failures', async (t) => {
+  let status, calls;
+  mockFetch(t, async () => {
+    calls++;
+    return new Response('thinking parameter rejected', { status });
+  });
+  for (status of [400, 401, 403, 429, 503]) {
+    configureConservative();
+    calls = 0;
+    await assert.rejects(chatCompletionWithRetry({ messages: [] }), (error) => error.status === status);
+    assert.equal(calls, 1, `one attempt for HTTP ${status}`);
+    assert.equal(isRetryableError(new Error(`模型 API HTTP ${status}`)), false);
+  }
+});
+
+test('conservative requests keep moderation refusals without stripping context and resubmitting', async (t) => {
+  configureConservative();
+  let calls = 0;
+  mockFetch(t, async () => {
+    calls++;
+    return Response.json({ choices: [{ message: { content: 'This is a high risk request' } }] });
+  });
+  const result = await chatCompletionWithRetry({ messages: [{ role: 'user', content: 'test' }] });
+  assert.match(result.message.content, /high risk/);
+  assert.equal(calls, 1);
+});
+
+test('conservative chat keeps one timeout fallback', async (t) => {
+  configureConservative();
+  const models = [];
+  mockFetch(t, async (_url, options) => {
+    const model = JSON.parse(options.body).model;
+    models.push(model);
+    if (model === 'backup') return ok();
+    return new Promise((resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+    });
+  });
+  assert.equal((await chatCompletionWithRetry({ messages: [] })).message.content, 'ok');
+  assert.deepEqual(models, ['chat', 'backup']);
+});
+
+test('conservative priority vision stops on limits and retains a single timeout fallback', async (t) => {
+  let limited, models;
+  mockFetch(t, async (_url, options) => {
+    const model = JSON.parse(options.body).model;
+    models.push(model);
+    if (limited) return new Response('busy', { status: 429 });
+    if (model === 'vision-backup') return ok();
+    return new Promise((resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+    });
+  });
+  for (limited of [true, false]) {
+    const cfg = configureConservative();
+    Object.assign(cfg.api.visionModel, { strategy: 'priority', models: ['vision-backup'],
+      timeoutMs: 5000, fallbackTimeoutMs: 5000 });
+    setRuntimeConfig(cfg);
+    models = [];
+    if (limited) {
+      await assert.rejects(describeImages(['data:image/png;base64,test']), (error) => error.status === 429);
+      await assert.rejects(describeImages(['data:image/png;base64,test']), (error) => error.status === 429);
+      assert.deepEqual(models, ['vision']);
+    } else {
+      assert.equal(await describeImages(['data:image/png;base64,test']), 'ok');
+      assert.deepEqual(models, ['vision', 'vision-backup']);
+    }
+  }
+});
 
 const restricted = () => Response.json({ error: {
   code: 'ACCOUNT_RESTRICTED', type: 'account_restricted', provider_code: 11140,
