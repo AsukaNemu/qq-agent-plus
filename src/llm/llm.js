@@ -113,7 +113,17 @@ function effectiveApi() {
  *   - HTTP 4xx：401 密钥错、400 请求体错、403 无权限、404 模型不存在
  *   - 主动中止（abort）
  */
+function conservativeRequests() {
+  return getConfig()?.api?.conservativeRequests === true;
+}
+
+function isModelTimeout(error) {
+  return error?.code === 'MODEL_QUEUE_TIMEOUT' || error?.code === 'MODEL_REQUEST_TIMEOUT';
+}
+
 export function isRetryableError(error) {
+  if (conservativeRequests()) return false;
+  if (error?.code === 'MODEL_ACCOUNT_RESTRICTED') return false;
   if (error?.code === 'TIME_CONTROL_INACTIVE') return false;
   if (error?.code === 'EMPTY_MODEL_ACTION') return true;
   const msg = String(error?.message ?? error ?? '');
@@ -274,7 +284,7 @@ async function runCompletionWithRetries(args, retries) {
     try {
       args.signal?.throwIfAborted();
       const response = await chatCompletion(args);
-      if (!moderationRetried && isModerationRefusal(response)) {
+      if (!conservativeRequests() && !moderationRetried && isModerationRefusal(response)) {
         moderationRetried = true;
         args = { ...args, messages: trimForModerationRetry(args.messages) };
         console.warn('[llm] 服务商审核拦截整次请求，改用精简上下文重试一次');
@@ -284,6 +294,18 @@ async function runCompletionWithRetries(args, retries) {
       return response;
     } catch (error) {
       lastError = error;
+      if (conservativeRequests()) {
+        // A vision pool keeps one timeout fallback, without resending a
+        // rejected/limited request or replaying the same model.
+        if (args.signal?.aborted || attempt >= retries || !isModelTimeout(error)
+          || args.overrides?.visionStrategy !== 'priority') throw error;
+        const models = activeVisionModels(args.overrides);
+        const failed = new Set(args.overrides.visionFailedModels || []);
+        failed.add(error.requestedModel || args.overrides.model);
+        if (models.every((model) => failed.has(model))) throw error;
+        args = { ...args, overrides: { ...args.overrides, visionFailedModels: [...failed] } };
+        continue;
+      }
       if (args.signal?.aborted || attempt >= retries || !isRetryableError(error)) throw error;
       const timeout = error?.code === 'MODEL_QUEUE_TIMEOUT' || error?.code === 'MODEL_REQUEST_TIMEOUT'
         || /超时|timeout|timed out/i.test(String(error?.message || ''));
@@ -310,7 +332,7 @@ async function runCompletionWithRetries(args, retries) {
       }
       const wait = 1000 * Math.pow(2, attempt);   // 1s, 2s
       console.warn(`[llm] 请求失败（第 ${attempt + 1} 次尝试），${wait}ms 后重试：${error?.message ?? error}`);
-      await delay(wait, undefined, { signal: args.signal });
+      await delay(wait, undefined, { signal: args.signal ?? undefined });
     }
   }
   throw lastError;
@@ -344,9 +366,38 @@ function pickFallback(args) {
 /**
  * 带重试 + 兜底模型的对话请求。
  * 主模型彻底失败（重试耗尽 / 认证欠费类错误），或两轮都被服务商审核拦下时，
- * 自动改用 config.api.fallback 里配置的备用模型再试一次（只切一次，不递归）。
+ * 自动改用 config.api.fallback 里配置的备用模型（每轮只切一次，不递归）。
+ * 所有通道都短暂冷却时，最多等 60 秒再尝试一轮；调用方取消信号约束整个过程。
  */
 export async function chatCompletionWithRetry(args, retries = 2) {
+  try {
+    return await runCompletionWithFallback(args, retries);
+  } catch (error) {
+    if (conservativeRequests()) throw error;
+    if (args.signal?.aborted || !isRateLimitError(error)) throw error;
+    const routes = args.overrides?.visionRequest
+      ? activeVisionModels(args.overrides).map((model) => ({ ...args.overrides, model }))
+      : args.overrides ? [] : [effectiveApi(), pickFallback(args)].filter(Boolean);
+    const unique = new Map(routes.map((api) => [requestScheduler.stateKey(api), api]));
+    const waits = [...unique.values()].map((api) => requestScheduler.availability(api).cooldownMs);
+    // A short shared cooldown can recover within the caller's cancellation
+    // budget. Retry the pool once; hour/day quota resets stay explicit 429s.
+    if (waits.length < 2 || waits.some((wait) => wait <= 0)) throw error;
+    const wait = Math.ceil(Math.min(...waits));
+    if (wait > 60000) throw error;
+    console.warn(`[llm] 所有模型通道都在冷却，等待最早恢复的通道：${Math.ceil(wait / 1000)} 秒，最多再尝试一轮`);
+    try {
+      await delay(wait, undefined, { signal: args.signal ?? undefined });
+    } catch (waitError) {
+      throw args.signal?.reason ?? waitError;
+    }
+  }
+  // Deliberately outside the catch above: persistent throttling must not turn
+  // into an unbounded recovery loop or restart a cancelled request.
+  return runCompletionWithFallback(args, retries);
+}
+
+async function runCompletionWithFallback(args, retries) {
   let response = null;
   let primaryError = null;
   try {
@@ -361,10 +412,17 @@ export async function chatCompletionWithRetry(args, retries = 2) {
 
   recordAllUsage(args, response);
 
-  const shouldFallback = primaryError
-    ? isFallbackWorthy(primaryError)
-    : isModerationRefusal(response);
-  const fb = shouldFallback ? pickFallback(args) : null;
+  const shouldFallback = conservativeRequests()
+    ? isModelTimeout(primaryError)
+    : primaryError ? isFallbackWorthy(primaryError) : isModerationRefusal(response);
+  let fb = shouldFallback ? pickFallback(args) : null;
+  if (fb && primaryError?.code === 'MODEL_ACCOUNT_RESTRICTED') {
+    const primary = effectiveApi();
+    const endpoint = (api) => String(api.baseUrl || '').trim().replace(/\/+$/, '');
+    if (endpoint(primary) === endpoint(fb) && String(primary.apiKey || '') === String(fb.apiKey || '')) {
+      fb = null;
+    }
+  }
   if (!fb || args.signal?.aborted) {
     if (primaryError) throw primaryError;
     return response;
@@ -450,7 +508,8 @@ export async function chatCompletion({
 }) {
   assertTimeAllowed();
   signal?.throwIfAborted();
-  const api = selectVisionModel(overrides || effectiveApi(), (candidate) => requestScheduler.availability(candidate));
+  const api = selectVisionModel(overrides || effectiveApi(), (candidate) => conservativeRequests()
+    ? { cooldownMs: 0 } : requestScheduler.availability(candidate));
   // 聊天这类"随口回一句"的任务关掉思考：省一半输出 token、少 1~3 秒；
   // 判断/写作类（表情包要不要收、说说、空间互动、身份评估）不传 purpose，继续思考。
   const thinking = thinkingFor(purpose, overrides);
@@ -561,7 +620,7 @@ export async function chatCompletion({
         // reasoning_effort、enable_thinking 三个族，结构化错误的 error.param 值也在响应体里）。
         // 别用 invalid/unknown/unexpected 这类泛词：上下文超长等无关 400 的错误体几乎都带
         // "invalid_request_error"，会误判成参数被拒——白重试一次还打误导日志（审查 2026-09-28）。
-        const paramRejected = res.status === 400 && patchKeys.length
+        const paramRejected = !conservativeRequests() && res.status === 400 && patchKeys.length
           && /thinking|reasoning/i.test(text);
         if (paramRejected) {
           const retryBody = { ...body };

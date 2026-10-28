@@ -72,6 +72,9 @@ export const DEFAULT_CONFIG = {
     extraBody: {},
     temperature: 0.8,
     maxRounds: 12,                          // 单次运行的最多工具轮数
+    // 保守调用：失败直接结束，只有排队/请求超时才尝试备用模型。
+    // 同时关闭参数降级、审核重发和整批自动重试；不改变请求身份。
+    conservativeRequests: false,
     timeoutMs: 60000,
     runTimeoutMs: 180000,
     maxRunTokens: 160000,                   // 同一 Agent 运行内所有模型调用的累计 Token 上限

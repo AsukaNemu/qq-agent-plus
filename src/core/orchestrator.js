@@ -1105,7 +1105,8 @@ export class Orchestrator {
         // 进 held/failed 人工核对，不自动重试。
         if (timeClosed && !this.store.hasEffects(lease.id)) this.store.ackLease(lease.id);
         else this.store.failLease(lease.id, session.error, {
-          retryable: !timeClosed && (isRetryableError(error) || controller.signal.aborted)
+          retryable: !timeClosed && getConfig().api?.conservativeRequests !== true
+            && (isRetryableError(error) || controller.signal.aborted)
         });
       }
       const status = timeClosed ? 'aborted' : 'error';
