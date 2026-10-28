@@ -425,15 +425,76 @@ function blankSource(src) {
   return out.join('');
 }
 
+function bindingParts(src) {
+  const parts = [];
+  let depth = 0, start = 0;
+  for (let i = 0; i < src.length; i += 1) {
+    if ('([{'.includes(src[i])) depth += 1;
+    else if (')]}'.includes(src[i])) depth -= 1;
+    else if (src[i] === ',' && depth === 0) {
+      parts.push(src.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(src.slice(start));
+  return parts;
+}
+
+function declaredBinding(pattern, names) {
+  const value = pattern.trim().replace(/^\.\.\./, '').trim();
+  if (value[0] === '{' || value[0] === '[') {
+    let depth = 0, end = -1;
+    for (let i = 0; i < value.length; i += 1) {
+      if ('[{'.includes(value[i])) depth += 1;
+      else if (']}'.includes(value[i])) depth -= 1;
+      if (depth === 0) { end = i; break; }
+    }
+    if (end < 0) return;
+    for (const part of bindingParts(value.slice(1, end))) {
+      const alias = value[0] === '{' ? part.match(/^\s*(?:[A-Za-z_$][\w$]*|['"][^'"]*['"])\s*:\s*([\s\S]*)$/) : null;
+      declaredBinding(alias ? alias[1] : part, names);
+    }
+    return;
+  }
+  const identifier = value.match(/^([A-Za-z_$][\w$]*)\s*(?:=|$)/);
+  if (identifier) names.add(identifier[1]);
+}
+
 function declaredNames(src) {
   const names = new Set();
   for (const match of src.matchAll(/\b(?:function|class)\s+([A-Za-z_$][\w$]*)/g)) names.add(match[1]);
   for (const match of src.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g)) names.add(match[1]);
-  for (const match of src.matchAll(/^\s*(?:static\s+|async\s+|get\s+|set\s+|#)*([A-Za-z_$][\w$]*)\s*\(/gm)) names.add(match[1]);
+  for (const match of src.matchAll(/\b(?:const|let|var)\s*([\{\[])/g)) {
+    declaredBinding(src.slice(match.index + match[0].length - 1), names);
+  }
   for (const match of src.matchAll(/\bimport\s+([\s\S]*?)\s+from\s*['"]/g)) {
     for (const identifier of match[1].matchAll(/[A-Za-z_$][\w$]*/g)) names.add(identifier[0]);
   }
   for (const match of src.matchAll(/^\s*import\s+([A-Za-z_$][\w$]*)\s+from/gm)) names.add(match[1]);
+  // 普通参数也是局部声明。默认值可含嵌套函数、对象或逗号，不能用 [^)]* 截取。
+  const signatures = /\bfunction(?:\s*\*)?(?:\s+[A-Za-z_$][\w$]*)?\s*\(|^\s*(?:static\s+|async\s+|get\s+|set\s+|#)*[A-Za-z_$][\w$]*\s*\(/gm;
+  for (const match of src.matchAll(signatures)) {
+    let depth = 0;
+    let start = match.index + match[0].length;
+    const parameters = new Set();
+    for (let i = start; i < src.length; i += 1) {
+      const char = src[i];
+      if (depth === 0 && (char === ',' || char === ')')) {
+        declaredBinding(src.slice(start, i), parameters);
+        start = i + 1;
+        if (char === ')') {
+          // 单独一行的 foo(...) 调用不是方法声明，只有后接函数体才收集参数。
+          if (/^\s*\{/.test(src.slice(i + 1))) {
+            for (const parameter of parameters) names.add(parameter);
+            const method = match[0].match(/([A-Za-z_$][\w$]*)\s*\($/);
+            if (method) names.add(method[1]);
+          }
+          break;
+        }
+      } else if ('([{'.includes(char)) depth += 1;
+      else if (')]}'.includes(char)) depth -= 1;
+    }
+  }
   return names;
 }
 
@@ -1098,9 +1159,13 @@ function cmdScan(args) {
       : new Set(ignoreRaw.split(',').map((item) => item.trim()).filter(Boolean));
   if (!exists(dir)) {
     ngLine(`目录不存在: ${dir}`);
-    return 0;
+    return hasFlag(args, '--strict') ? 1 : 0;
   }
   const report = scanDirectory(dir, ignore);
+  if (hasFlag(args, '--strict') && report.files === 0) {
+    ngLine(`没有找到任何待扫描 JS 文件: ${dir}`);
+    return 1;
+  }
   for (const line of report.lines) say(line);
   say();
   say(`可疑未定义调用点: ${report.total}`);
